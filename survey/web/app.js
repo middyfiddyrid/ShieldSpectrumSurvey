@@ -362,13 +362,27 @@ async function advanceSeq() {
   const step = seq.steps.shift();
   const ok = await prompt2(step.msg, step.sub);
   if (!ok) return;
-  await startPhase(step.phase, step.module, step.room, seq.profile, seq.minutes);
-  App.seq = seq.steps.length ? seq : null;
+  try {
+    await startPhase(step.phase, step.module, step.room, seq.profile, seq.minutes);
+    App.seq = seq.steps.length ? seq : null;
+  } catch (e) {
+    // never fail silently — the operator is standing there holding an antenna
+    alert("SWEEP DID NOT START: " + e.message +
+          "\n\nFix the issue (e.g. reconnect device on the Session tab), then " +
+          "press the phase START button again.");
+    $("ft-msg").textContent = "sweep start failed: " + e.message;
+  }
 }
 
 function modulesAvailable() {
   const dev = App.state && App.state.device;
   return dev ? dev.modules.map(m => m.side) : [];
+}
+
+function moduleRange(side) {
+  const dev = App.state && App.state.device;
+  const m = dev && dev.modules.find(x => x.side === side);
+  return m ? `${fmtF(m.min_mhz)} – ${fmtF(m.max_mhz)}` : "";
 }
 
 $("btn-ambient").onclick = async () => {
@@ -379,11 +393,11 @@ $("btn-ambient").onclick = async () => {
   if (mods.includes("left")) steps.push({
     phase: "ambient", module: "left", room: "exterior",
     msg: "ATTACH THE NON-DIRECTIONAL (OMNI) ANTENNA TO THE LEFT SMA PORT",
-    sub: "Ambient reference — run this OUTSIDE the premises / vehicle at the curb" });
+    sub: `This port sweeps ${moduleRange("left")} — ambient reference, run OUTSIDE / vehicle at the curb` });
   if (mods.includes("right")) steps.push({
     phase: "ambient", module: "right", room: "exterior",
     msg: "MOVE THE OMNI ANTENNA TO THE RIGHT SMA PORT",
-    sub: "Ambient reference continues on the right module" });
+    sub: `This port sweeps ${moduleRange("right")} — ambient reference continues` });
   if (!steps.length) return alert("No modules reported by device.");
   App.seq = { steps, profile, minutes };
   advanceSeq();
@@ -397,7 +411,7 @@ $("btn-sweep-L").onclick = async () => {
   $("in-room-R").value = room;
   App.seq = { steps: [{ phase: "interior", module: "left", room,
     msg: "ATTACH THE NON-DIRECTIONAL (OMNI) ANTENNA TO THE LEFT SMA PORT",
-    sub: "Phase A — interior sweep, room: " + room }],
+    sub: `This port sweeps ${moduleRange("left")} — Phase A, room: ${room}` }],
     profile: $("profile-L").value, minutes: $("minutes-L").value };
   advanceSeq();
 };
@@ -408,7 +422,7 @@ $("btn-sweep-R").onclick = async () => {
   const room = $("in-room-R").value || $("in-room-L").value || "unspecified";
   App.seq = { steps: [{ phase: "interior", module: "right", room,
     msg: "MOVE THE OMNI ANTENNA TO THE RIGHT SMA PORT",
-    sub: "Phase B — interior sweep, room: " + room }],
+    sub: `This port sweeps ${moduleRange("right")} — Phase B, room: ${room}` }],
     profile: $("profile-R").value, minutes: $("minutes-R").value };
   advanceSeq();
 };

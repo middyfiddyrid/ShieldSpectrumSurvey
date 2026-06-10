@@ -66,6 +66,22 @@ class SweepController:
             log.warning("device missing or dead — reconnecting")
             self.connect_device()
 
+    def module_ranges(self) -> list[dict]:
+        """Module list with REAL frequency ranges. The connect-time read of the
+        inactive module's range can fail (module boot races); recover here by
+        switching to any module whose range is still unknown and reading the
+        config the hardware reports."""
+        self._ensure_device()
+        for m in self.device.info.modules:
+            if m.max_mhz <= m.min_mhz:
+                log.warning("module %s range unknown — querying device", m.side)
+                self.device.select_module(m.side)
+        bad = [m.side for m in self.device.info.modules if m.max_mhz <= m.min_mhz]
+        if bad:
+            raise DeviceError(f"device did not report a frequency range for "
+                              f"module(s): {', '.join(bad)}")
+        return [m.to_dict() for m in self.device.info.modules]
+
     def device_info(self):
         return self.device.info.to_dict() if self.device else None
 

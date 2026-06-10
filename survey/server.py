@@ -27,7 +27,10 @@ class AppState:
         self.cache = DiskCache(cfg.abs_path(cfg.get("cache", "dir", default="cache")),
                                cfg.get("cache", "max_age_hours", default=720))
         self.controller = SweepController(db, cfg)
-        self.session_id = None
+        # restore the most recent session so a server restart doesn't strand the
+        # operator mid-survey (the UI keeps polling whatever session is open)
+        last = db.query_one("SELECT id FROM sessions ORDER BY created_utc DESC LIMIT 1")
+        self.session_id = last["id"] if last else None
         self.baseline_status = {"running": False, "result": None, "error": None}
         self.calibration_status = {"running": False, "result": None, "error": None}
         self.reports_dir = cfg.abs_path("reports")
@@ -170,10 +173,9 @@ def create_app(db, cfg) -> Flask:
     # ---------- planning & sweeping ----------
 
     def _plans(profile, custom_minutes):
-        dev = st.controller.device
-        if dev is None:
-            raise RuntimeError("connect the device first")
-        modules = [m.to_dict() for m in dev.info.modules]
+        # auto-(re)connects and lazily reads any module range the connect-time
+        # identity pass failed to capture; raises DeviceError if truly absent
+        modules = st.controller.module_ranges()
         return plan_full_sweep(modules, cfg, profile, custom_minutes)
 
     @app.get("/api/plan")
@@ -182,7 +184,7 @@ def create_app(db, cfg) -> Flask:
         minutes = float(request.args.get("custom_minutes", 45))
         try:
             plans = _plans(profile, minutes)
-        except RuntimeError as e:
+        except Exception as e:  # noqa: BLE001 - device absent/dead included
             return err(e)
         return jsonify({side: p.to_dict() for side, p in plans.items()})
 
@@ -203,7 +205,8 @@ def create_app(db, cfg) -> Flask:
             if plan is None or not plan.segments:
                 return err(f"no plan for module {module}")
             sweep_id = st.controller.start_sweep(session["id"], phase, module, room, plan)
-        except RuntimeError as e:
+        except Exception as e:  # noqa: BLE001 - busy, device dead, plan failure
+            log.exception("sweep start failed")
             return err(e, 409)
         if st.controller.device:
             db.set_device_info(session["id"], st.controller.device.info.to_dict())
