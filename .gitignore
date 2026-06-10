@@ -1,0 +1,6 @@
+# runtime artifacts — sweep data and client reports are SENSITIVE, never commit
+data/
+reports/
+cache/
+__pycache__/
+*.pyc

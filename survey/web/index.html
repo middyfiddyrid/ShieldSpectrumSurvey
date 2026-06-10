@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>SHIELD TSCM — Spectrum Survey</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root {
+  --bg:#0b0f14; --panel:#121922; --panel2:#0e141c; --line:#1f2a37;
+  --txt:#cfd8e3; --dim:#7b8794; --mono:'Consolas','Cascadia Mono',monospace;
+  --green:#2ecc71; --amber:#f39c12; --red:#e74c3c; --blue:#3498db; --cyan:#1abc9c;
+}
+* { box-sizing:border-box; margin:0; padding:0; }
+body { background:var(--bg); color:var(--txt); font-family:var(--mono); font-size:14px;
+       display:flex; flex-direction:column; height:100vh; overflow:hidden; }
+
+header { display:flex; align-items:center; gap:16px; padding:10px 16px;
+         background:var(--panel); border-bottom:1px solid var(--line); }
+header .brand { font-size:16px; font-weight:bold; letter-spacing:2px; color:#fff; }
+header .brand span { color:var(--cyan); }
+header .addr { color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; }
+.btn { background:#1c2733; color:var(--txt); border:1px solid var(--line); padding:8px 14px;
+       font-family:var(--mono); font-size:13px; cursor:pointer; border-radius:3px; }
+.btn:hover { border-color:var(--cyan); color:#fff; }
+.btn:disabled { opacity:.35; cursor:not-allowed; }
+.btn.primary { background:#103c2c; border-color:var(--green); color:var(--green); font-weight:bold; }
+.btn.danger { border-color:var(--red); color:var(--red); }
+.btn.big { font-size:16px; padding:14px 26px; }
+#btn-report { background:#3b2c10; border-color:var(--amber); color:var(--amber); font-weight:bold; }
+
+main { display:flex; flex:1; min-height:0; }
+nav { width:230px; background:var(--panel2); border-right:1px solid var(--line);
+      padding:14px 0; display:flex; flex-direction:column; gap:2px; }
+nav .step { padding:10px 16px; cursor:pointer; display:flex; align-items:center; gap:10px;
+            border-left:3px solid transparent; color:var(--dim); }
+nav .step:hover { color:var(--txt); background:#15202b; }
+nav .step.active { border-left-color:var(--cyan); color:#fff; background:#15202b; }
+nav .dot { width:9px; height:9px; border-radius:50%; background:#2c3a49; flex:none; }
+nav .dot.done { background:var(--green); }
+nav .dot.live { background:var(--amber); animation:pulse 1s infinite; }
+nav .dot.fail { background:var(--red); }
+@keyframes pulse { 50% { opacity:.3; } }
+nav .sect { margin-top:14px; padding:4px 16px; font-size:11px; color:#42506033;
+            color:#4a5866; letter-spacing:1px; }
+
+#panel { flex:1; overflow-y:auto; padding:20px 24px; min-width:0; }
+.view { display:none; } .view.active { display:block; }
+h2 { font-size:15px; letter-spacing:2px; color:#fff; margin-bottom:14px; }
+h2 .tag { font-size:11px; color:var(--dim); letter-spacing:0; margin-left:10px; }
+h3 { font-size:13px; color:var(--cyan); margin:16px 0 8px; }
+p.note { color:var(--dim); margin:8px 0; line-height:1.5; }
+
+.card { background:var(--panel); border:1px solid var(--line); border-radius:4px;
+        padding:16px; margin-bottom:14px; }
+.row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
+label { color:var(--dim); font-size:12px; }
+input, select { background:#0d1319; color:var(--txt); border:1px solid var(--line);
+                padding:8px 10px; font-family:var(--mono); font-size:13px; border-radius:3px; }
+input[type=text] { width:380px; }
+input.small { width:90px; }
+
+table { width:100%; border-collapse:collapse; font-size:12.5px; }
+th { text-align:left; color:var(--dim); font-weight:normal; border-bottom:1px solid var(--line);
+     padding:6px 8px; position:sticky; top:0; background:var(--panel); cursor:pointer; }
+td { padding:5px 8px; border-bottom:1px solid #16202b; }
+tr:hover td { background:#15202b; }
+.scroll { max-height:420px; overflow-y:auto; border:1px solid var(--line); }
+
+.pill { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; }
+.pill.ok, .pill.VERIFIED, .pill.done { background:#0d3321; color:var(--green); }
+.pill.cached, .pill.stale { background:#33270d; color:var(--amber); }
+.pill.PLAUSIBLE { background:#33270d; color:var(--amber); }
+.pill.failed, .pill.UNVERIFIED, .pill.error { background:#33120d; color:var(--red); }
+.pill.not_configured { background:#1c2733; color:var(--dim); }
+.pill.running { background:#0d2433; color:var(--blue); }
+.caution { color:var(--amber); }
+.score-hi { color:var(--red); font-weight:bold; }
+.score-md { color:var(--amber); }
+
+#strip { width:100%; height:64px; background:#0d1319; border:1px solid var(--line); }
+#livechart, #dirchart { width:100%; height:230px; background:#0d1319; border:1px solid var(--line); }
+
+.overlay { position:fixed; inset:0; background:rgba(5,8,12,.93); display:none;
+           align-items:center; justify-content:center; z-index:50; flex-direction:column; gap:26px; }
+.overlay.show { display:flex; }
+.overlay .msg { font-size:26px; color:#fff; text-align:center; max-width:700px; line-height:1.5; }
+.overlay .sub { color:var(--dim); font-size:14px; }
+
+footer { display:flex; gap:24px; padding:8px 16px; background:var(--panel);
+         border-top:1px solid var(--line); font-size:12px; color:var(--dim); }
+footer b { color:var(--txt); font-weight:normal; }
+footer .sim { color:var(--red); font-weight:bold; }
+
+.progress { height:14px; background:#0d1319; border:1px solid var(--line); border-radius:3px;
+            overflow:hidden; }
+.progress > div { height:100%; background:linear-gradient(90deg,#136b46,var(--green));
+                  width:0%; transition:width .5s; }
+.meter { font-size:46px; color:var(--green); text-align:center; padding:10px;
+         font-weight:bold; }
+.bigfreq { font-size:22px; color:#fff; text-align:center; }
+.kv { display:grid; grid-template-columns:auto 1fr; gap:4px 18px; font-size:13px; }
+.kv div:nth-child(odd) { color:var(--dim); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">SHIELD<span>TSCM</span> // SPECTRUM SURVEY</div>
+  <div class="addr" id="hdr-addr">no session</div>
+  <button class="btn" id="btn-csv" disabled>EXPORT CSV</button>
+  <button class="btn" id="btn-report" disabled>GENERATE REPORT</button>
+</header>
+
+<main>
+<nav id="nav">
+  <div class="step" data-view="session"><div class="dot" id="dot-session"></div>1 · SESSION / BASELINE</div>
+  <div class="step" data-view="baseline"><div class="dot" id="dot-baseline"></div>2 · BASELINE TABLE</div>
+  <div class="step" data-view="ambient"><div class="dot" id="dot-ambient"></div>3 · AMBIENT REFERENCE</div>
+  <div class="step" data-view="sweepL"><div class="dot" id="dot-sweepL"></div>4 · SWEEP — LEFT PORT</div>
+  <div class="step" data-view="sweepR"><div class="dot" id="dot-sweepR"></div>5 · SWEEP — RIGHT PORT</div>
+  <div class="step" data-view="rooms"><div class="dot" id="dot-rooms"></div>6 · ROOMS</div>
+  <div class="step" data-view="directional"><div class="dot" id="dot-directional"></div>7 · DIRECTIONAL</div>
+  <div class="step" data-view="results"><div class="dot" id="dot-results"></div>8 · RESULTS / REPORT</div>
+  <div class="sect">TOOLS</div>
+  <div class="step" data-view="calibration"><div class="dot" id="dot-calibration"></div>CALIBRATION (shop)</div>
+</nav>
+
+<div id="panel">
+
+<!-- ============ SESSION ============ -->
+<section class="view active" id="view-session">
+  <h2>SWEEP SESSION <span class="tag">address → database-verified baseline</span></h2>
+  <div class="card">
+    <div class="row">
+      <label>Street address</label>
+      <input type="text" id="in-address" placeholder="123 Main St, City, ST 65536">
+    </div>
+    <div class="row">
+      <label>Broadcast radius (mi)</label><input class="small" id="in-rb" value="25">
+      <label>Land-mobile/cellular radius (mi)</label><input class="small" id="in-rl" value="5">
+      <label>Operator</label><input class="small" id="in-op" style="width:160px">
+    </div>
+    <div class="row">
+      <button class="btn primary" id="btn-create">CREATE SESSION</button>
+      <span id="session-msg" class="note"></span>
+    </div>
+  </div>
+  <div class="card">
+    <h3>DEVICE</h3>
+    <div class="row">
+      <button class="btn" id="btn-connect">CONNECT RF EXPLORER</button>
+      <span id="device-msg" class="note">not connected</span>
+    </div>
+    <div id="device-detail" class="kv"></div>
+  </div>
+  <div class="card">
+    <h3>BUILD BASELINE</h3>
+    <p class="note">Queries FCC FM/AM/TV, ULS extract, OpenCellID and the static national
+       allocation table in parallel. Results cached to disk — repeat visits work with
+       degraded internet.</p>
+    <div class="row">
+      <button class="btn primary" id="btn-baseline" disabled>BUILD EXPECTED-SPECTRUM BASELINE</button>
+      <span id="baseline-msg" class="note"></span>
+    </div>
+    <div id="baseline-sources"></div>
+  </div>
+  <div class="card">
+    <h3>PREVIOUS SESSIONS</h3>
+    <div class="scroll" style="max-height:180px"><table id="tbl-sessions"></table></div>
+  </div>
+</section>
+
+<!-- ============ BASELINE TABLE ============ -->
+<section class="view" id="view-baseline">
+  <h2>EXPECTED-SPECTRUM BASELINE <span class="tag" id="baseline-count"></span></h2>
+  <div id="baseline-degraded"></div>
+  <div class="card">
+    <div class="row">
+      <label>Filter</label><input type="text" id="baseline-filter" style="width:240px" placeholder="callsign / service / band">
+      <label>Source</label><select id="baseline-source-filter"><option value="">all</option></select>
+    </div>
+    <canvas id="strip"></canvas>
+    <p class="note">Colored bands = expected allocations · markers appear after sweeping
+      (green verified · amber plausible · red unverified)</p>
+    <div class="scroll" style="max-height:480px"><table id="tbl-baseline"></table></div>
+  </div>
+</section>
+
+<!-- ============ AMBIENT ============ -->
+<section class="view" id="view-ambient">
+  <h2>AMBIENT REFERENCE SWEEP <span class="tag">outside / vehicle at curb — TSCM standard practice</span></h2>
+  <div class="card">
+    <p class="note">Run one full sweep OUTSIDE the premises before sweeping interior rooms.
+    The correlation engine compares interior vs. exterior amplitude per signal — a signal
+    meaningfully stronger inside is locally sourced, even in a "plausible" band like 2.4 GHz.</p>
+    <div class="row">
+      <label>Time profile</label>
+      <select id="ambient-profile">
+        <option value="quick">Quick Recon (~15 min)</option>
+        <option value="standard" selected>Standard (~45 min)</option>
+        <option value="deep">Deep (~2 hr)</option>
+        <option value="custom">Custom…</option>
+      </select>
+      <input class="small" id="ambient-minutes" value="45" title="custom minutes" style="display:none">
+      <span class="note" id="ambient-eta"></span>
+    </div>
+    <div class="row">
+      <button class="btn primary big" id="btn-ambient">START AMBIENT SWEEP (both modules)</button>
+    </div>
+  </div>
+  <div class="card" id="ambient-status"></div>
+</section>
+
+<!-- ============ SWEEP LEFT / RIGHT ============ -->
+<section class="view" id="view-sweepL">
+  <h2>INTERIOR SWEEP — LEFT SMA PORT <span class="tag">Phase A · omni antenna</span></h2>
+  <div class="card">
+    <div class="row">
+      <label>Room</label><input type="text" id="in-room-L" style="width:220px" placeholder="e.g. Office">
+      <label>Profile</label>
+      <select id="profile-L">
+        <option value="quick">Quick Recon</option>
+        <option value="standard" selected>Standard</option>
+        <option value="deep">Deep</option>
+        <option value="custom">Custom…</option>
+      </select>
+      <input class="small" id="minutes-L" value="45" style="display:none">
+      <span class="note" id="eta-L"></span>
+    </div>
+    <div class="row"><button class="btn primary big" id="btn-sweep-L">START PHASE A — LEFT MODULE</button></div>
+  </div>
+  <div class="card" id="sweep-status-L"></div>
+</section>
+
+<section class="view" id="view-sweepR">
+  <h2>INTERIOR SWEEP — RIGHT SMA PORT <span class="tag">Phase B · move the omni antenna</span></h2>
+  <div class="card">
+    <div class="row">
+      <label>Room</label><input type="text" id="in-room-R" style="width:220px" placeholder="same room as Phase A">
+      <label>Profile</label>
+      <select id="profile-R">
+        <option value="quick">Quick Recon</option>
+        <option value="standard" selected>Standard</option>
+        <option value="deep">Deep</option>
+        <option value="custom">Custom…</option>
+      </select>
+      <input class="small" id="minutes-R" value="45" style="display:none">
+      <span class="note" id="eta-R"></span>
+    </div>
+    <div class="row"><button class="btn primary big" id="btn-sweep-R">START PHASE B — RIGHT MODULE</button></div>
+  </div>
+  <div class="card" id="sweep-status-R"></div>
+</section>
+
+<!-- ============ ROOMS ============ -->
+<section class="view" id="view-rooms">
+  <h2>ROOM MODE <span class="tag">multi-room comparison · localization</span></h2>
+  <div class="card">
+    <p class="note">Tag each sweep with a room and repeat Phases A+B per room. Signals whose
+    amplitude jumps in one room get a localization score and rank to the top.</p>
+    <div class="row">
+      <label>Next room</label><input type="text" id="in-next-room" style="width:220px" placeholder="Master Bedroom">
+      <button class="btn primary" id="btn-next-room">NEXT ROOM → GO TO PHASE A</button>
+    </div>
+  </div>
+  <div class="card">
+    <h3>ROOM × FREQUENCY HEAT TABLE (peak dBm)</h3>
+    <div class="scroll"><table id="tbl-rooms"></table></div>
+  </div>
+</section>
+
+<!-- ============ DIRECTIONAL ============ -->
+<section class="view" id="view-directional">
+  <h2>DIRECTIONAL FOLLOW-UP <span class="tag">attach the directional antenna</span></h2>
+  <div class="card">
+    <p class="note" id="dir-instruction">Complete a sweep first — anomalies will queue here.</p>
+    <div class="scroll" style="max-height:200px"><table id="tbl-dir-queue"></table></div>
+  </div>
+  <div class="card" id="dir-live" style="display:none">
+    <div class="bigfreq" id="dir-freq"></div>
+    <div class="meter" id="dir-meter">—</div>
+    <canvas id="dirchart"></canvas>
+    <div class="row" style="margin-top:10px">
+      <input type="text" id="dir-notes" style="flex:1" placeholder="operator notes (bearing, suspected object…)">
+      <button class="btn" id="btn-dir-save">LOG READING + NOTES</button>
+      <button class="btn" id="btn-dir-next">NEXT ANOMALY →</button>
+      <button class="btn danger" id="btn-dir-stop">STOP</button>
+    </div>
+  </div>
+  <div class="card">
+    <h3>LOGGED DIRECTIONAL READINGS</h3>
+    <div class="scroll" style="max-height:200px"><table id="tbl-dir-log"></table></div>
+  </div>
+</section>
+
+<!-- ============ RESULTS ============ -->
+<section class="view" id="view-results">
+  <h2>RESULTS <span class="tag">anomalies ranked by score</span></h2>
+  <div class="card">
+    <h3>ANOMALIES — could NOT be verified against any licensed/known source</h3>
+    <div class="scroll" style="max-height:340px"><table id="tbl-anomalies"></table></div>
+  </div>
+  <div class="card">
+    <h3>ALL DETECTED SIGNALS</h3>
+    <div class="row">
+      <label>Phase</label>
+      <select id="signals-phase"><option value="">all</option>
+        <option value="interior">interior</option><option value="ambient">ambient</option></select>
+    </div>
+    <div class="scroll" style="max-height:340px"><table id="tbl-signals"></table></div>
+  </div>
+  <div class="card">
+    <h3>GENERATED REPORTS (archived per session)</h3>
+    <table id="tbl-reports"></table>
+  </div>
+</section>
+
+<!-- ============ CALIBRATION ============ -->
+<section class="view" id="view-calibration">
+  <h2>CALIBRATION / EXPERIMENT MODE <span class="tag">run at the shop, not client sites</span></h2>
+  <div class="card">
+    <p class="note">Runs the same segment under each strategy (Normal raw, Average×N, Max×28,
+    MaxHold×T, varying spans) against a known test source, then persists the winning per-band
+    configuration to config.yaml — production sweeps get tuned to this exact unit.</p>
+    <div class="row">
+      <label>Test source frequency (MHz)</label>
+      <input class="small" id="cal-freq" value="433.92">
+      <button class="btn primary" id="btn-cal">RUN CALIBRATION</button>
+      <button class="btn danger" id="btn-cal-abort">ABORT</button>
+      <span class="note" id="cal-msg"></span>
+    </div>
+    <div class="scroll" style="max-height:420px"><table id="tbl-cal"></table></div>
+  </div>
+</section>
+
+</div>
+</main>
+
+<footer>
+  <div>PORT <b id="ft-port">—</b></div>
+  <div>MODEL <b id="ft-model">—</b></div>
+  <div>FW <b id="ft-fw">—</b></div>
+  <div>MODULE <b id="ft-module">—</b></div>
+  <div>RANGE <b id="ft-range">—</b></div>
+  <div id="ft-sim"></div>
+  <div style="flex:1"></div>
+  <div id="ft-msg">idle</div>
+</footer>
+
+<!-- antenna prompts / sweep overlay -->
+<div class="overlay" id="overlay">
+  <div class="msg" id="overlay-msg"></div>
+  <div class="sub" id="overlay-sub"></div>
+  <div class="row">
+    <button class="btn primary big" id="overlay-confirm">CONFIRM</button>
+    <button class="btn danger" id="overlay-cancel">CANCEL</button>
+  </div>
+</div>
+
+<div class="overlay" id="sweep-overlay">
+  <div class="msg" id="sweep-overlay-title">SWEEPING</div>
+  <div style="width:70%"><div class="progress"><div id="sweep-bar"></div></div></div>
+  <div class="sub" id="sweep-overlay-detail"></div>
+  <canvas id="livechart" style="width:70%"></canvas>
+  <div class="row">
+    <div class="sub" id="sweep-overlay-eta"></div>
+    <button class="btn danger" id="btn-abort">ABORT PHASE (keep data)</button>
+    <button class="btn" id="btn-hide-overlay">RUN IN BACKGROUND</button>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
