@@ -36,6 +36,7 @@ DEFAULTS = {
             "default": 1.0, "broadcast": 0.4,
         },
     },
+    "cellmapper": {"import_path": "data/cellmapper_towers.json"},
     "device": {"simulate": False, "port": "", "baud": 500000},
     "cache": {"dir": "cache", "max_age_hours": 720},
     "calibration": {},

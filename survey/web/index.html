@@ -122,6 +122,7 @@ footer .sim { color:var(--red); font-weight:bold; }
   <div class="step" data-view="directional"><div class="dot" id="dot-directional"></div>7 · DIRECTIONAL</div>
   <div class="step" data-view="results"><div class="dot" id="dot-results"></div>8 · RESULTS / REPORT</div>
   <div class="sect">TOOLS</div>
+  <div class="step" data-view="inventory"><div class="dot" id="dot-inventory"></div>INVENTORY (WiFi/BT)</div>
   <div class="step" data-view="calibration"><div class="dot" id="dot-calibration"></div>CALIBRATION (shop)</div>
 </nav>
 
@@ -315,6 +316,22 @@ footer .sim { color:var(--red); font-weight:bold; }
   </div>
 </section>
 
+<!-- ============ INVENTORY ============ -->
+<section class="view" id="view-inventory">
+  <h2>WIRELESS DEVICE INVENTORY <span class="tag">rule out client-owned WiFi / Bluetooth devices</span></h2>
+  <div class="card">
+    <p class="note">Scan with the laptop's own adapters, then walk the list with the client:
+    mark each device they account for as OWNED. Anything <b>loud (≥ −55 dBm) and unowned</b>
+    is highlighted — those are the 2.4 GHz hits to chase, not the client's soundbar.</p>
+    <div class="row">
+      <button class="btn primary" id="btn-scan-wifi">SCAN WiFi (netsh)</button>
+      <button class="btn primary" id="btn-scan-ble">SCAN BLUETOOTH LE</button>
+      <span class="note" id="inv-msg"></span>
+    </div>
+    <div class="scroll" style="max-height:480px"><table id="tbl-inventory"></table></div>
+  </div>
+</section>
+
 <!-- ============ CALIBRATION ============ -->
 <section class="view" id="view-calibration">
   <h2>CALIBRATION / EXPERIMENT MODE <span class="tag">run at the shop, not client sites</span></h2>
@@ -363,6 +380,9 @@ footer .sim { color:var(--red); font-weight:bold; }
   <div style="width:70%"><div class="progress"><div id="sweep-bar"></div></div></div>
   <div class="sub" id="sweep-overlay-detail"></div>
   <canvas id="livechart" style="width:70%"></canvas>
+  <div class="scroll" style="width:70%; max-height:170px; background:var(--panel)">
+    <table id="tbl-live-ledger"></table>
+  </div>
   <div class="row">
     <div class="sub" id="sweep-overlay-eta"></div>
     <button class="btn danger" id="btn-abort">ABORT PHASE (keep data)</button>

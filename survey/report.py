@@ -332,6 +332,30 @@ def generate_report(db, cfg, session_id: int, reports_dir: str) -> dict:
                          time.strftime("%H:%M", time.localtime(d["ts_utc"]))])
         el.append(_table(rows, [1.0 * inch, 1.1 * inch, 0.7 * inch, 3.2 * inch, 0.7 * inch]))
 
+    # ---- Wireless device inventory ----
+    inv = db.query("SELECT * FROM inventory WHERE session_id=? "
+                   "ORDER BY owned ASC, rssi_dbm DESC", (session_id,))
+    if inv:
+        el.append(Paragraph("Wireless Device Inventory (WiFi / Bluetooth LE)", ss["H1x"]))
+        el.append(Paragraph(
+            "Devices observed by local adapters during the survey. Devices the client "
+            "accounts for are marked CLIENT-OWNED; strong unaccounted transmitters "
+            "warrant follow-up.", ss["Body"]))
+        rows = [["Type", "Name", "Identifier", "RSSI dBm", "Ch/Freq", "Accounting"]]
+        for d in inv:
+            status = "CLIENT-OWNED" if d["owned"] else "UNACCOUNTED"
+            if not d["owned"] and d["rssi_dbm"] is not None and d["rssi_dbm"] >= -55.0:
+                status = "UNACCOUNTED — STRONG SIGNAL"
+            rows.append([d["kind"].upper(),
+                         Paragraph((d["name"] or "(no name)")[:40], ss["Cell"]),
+                         d["identifier"],
+                         f"{d['rssi_dbm']:.0f}" if d["rssi_dbm"] is not None else "—",
+                         (d["channel"] or "") +
+                         (f" / {_fmt_freq(d['freq_mhz'])}" if d["freq_mhz"] else ""),
+                         status])
+        el.append(_table(rows, [0.5 * inch, 1.4 * inch, 1.45 * inch, 0.65 * inch,
+                                1.25 * inch, 1.45 * inch]))
+
     # ---- Recommendations ----
     el.append(Paragraph("Recommendations / Next Steps", ss["H1x"]))
     recs = []

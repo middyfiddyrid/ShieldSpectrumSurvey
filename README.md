@@ -40,7 +40,16 @@ SIMULATED in the UI, database, and any report).
 
 **Calibration mode** (tools, run at the shop): tests Normal/Average/Max/MaxHold strategies
 and span widths against a known source (433 MHz keyfob etc.), then writes the winning
-config and the measured sweep rate back to `config.yaml`.
+config and the measured sweep rate back to `config.yaml`. The test source must be actively
+transmitting during the run — a 0% detection run saves nothing and says so.
+
+**Wireless inventory** (tools): scans WiFi APs (netsh) and Bluetooth LE advertisers
+(laptop adapter via `bleak`) so the client can account for their own devices; loud
+(≥ −55 dBm) unaccounted devices are highlighted and included in the report.
+
+**Live sweep view**: realtime, running-average, and max-hold traces drawn together
+(RF Explorer for Windows style), with a live known/unknown signal ledger under the chart
+that classifies each detection against the baseline as it lands.
 
 ## Baseline sources
 
@@ -51,6 +60,7 @@ config and the measured sweep rate back to `config.yaml`.
 | FCC ULS (land mobile, paging, microwave) | weekly extract | download `l_LMpriv.zip` (+ others as wanted) from fcc.gov/uls/transactions/daily-weekly, unzip, set `uls.extract_dir` in config.yaml; flagged STALE after `uls.stale_days` |
 | OpenCellID → carrier band table | free API key | set `api_keys.opencellid`; towers map to carrier-owned blocks (uplink blocks stay caution-flagged) |
 | RadioReference | paid premium acct (optional) | set `api_keys.radioreference_user/pass`; shows "not configured" otherwise |
+| CellMapper (import) | manual capture | run `tools/cellmapper_capture.js` in the DevTools console of your own logged-in cellmapper.net tab, pan the map, download to `data/cellmapper_towers.json`. No scraping — captures only what the site already sends your browser. |
 | Airports (gates aviation bands) | internet once | OurAirports dataset, cached |
 
 Every external query caches to `cache/` — a repeat visit to the same address works with

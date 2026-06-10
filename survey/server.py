@@ -222,11 +222,15 @@ def create_app(db, cfg) -> Flask:
         if not session:
             return err("no session")
         phase = request.args.get("phase")
+        sweep_id = request.args.get("sweep_id")
         q = "SELECT * FROM signals WHERE session_id=?"
         params = [session["id"]]
         if phase:
             q += " AND phase=?"
             params.append(phase)
+        if sweep_id:
+            q += " AND sweep_id=?"
+            params.append(int(sweep_id))
         q += " ORDER BY center_mhz"
         return jsonify(db.query(q, params))
 
@@ -305,6 +309,35 @@ def create_app(db, cfg) -> Flask:
             return err("no session")
         return jsonify(db.query("SELECT * FROM directional WHERE session_id=? "
                                 "ORDER BY ts_utc", (session["id"],)))
+
+    # ---------- wireless inventory ----------
+
+    @app.post("/api/inventory/scan")
+    def inventory_scan():
+        from .inventory import scan_ble, scan_wifi, upsert_inventory
+        session = st.session()
+        if not session:
+            return err("create a session first")
+        kind = (request.get_json(force=True).get("kind") or "wifi").lower()
+        devices, message = scan_ble() if kind == "ble" else scan_wifi()
+        if devices:
+            upsert_inventory(db, session["id"], devices)
+        return jsonify({"kind": kind, "found": len(devices), "message": message})
+
+    @app.get("/api/inventory")
+    def inventory_get():
+        from .inventory import inventory_rows
+        session = st.session()
+        if not session:
+            return err("no session")
+        return jsonify(inventory_rows(db, session["id"]))
+
+    @app.post("/api/inventory/mark")
+    def inventory_mark():
+        body = request.get_json(force=True)
+        db.execute("UPDATE inventory SET owned=? WHERE id=?",
+                   (int(bool(body.get("owned"))), body.get("id")))
+        return jsonify({"saved": True})
 
     # ---------- calibration ----------
 

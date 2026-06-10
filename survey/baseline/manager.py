@@ -7,6 +7,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 
 from .base import DiskCache
+from .cellmapper import CellMapperImportSource
 from .fcc_broadcast import FccAmSource, FccFmSource, FccTvSource
 from .fcc_uls import FccUlsSource
 from .opencellid import OpenCellIdSource
@@ -28,6 +29,8 @@ def build_sources(cfg, cache: DiskCache, address: str):
         FccUlsSource(cache, cfg.get("uls", "extract_dir", default=""),
                      cfg.get("uls", "stale_days", default=30)),
         OpenCellIdSource(cache, cfg.get("api_keys", "opencellid", default="")),
+        CellMapperImportSource(cache, cfg.abs_path(
+            cfg.get("cellmapper", "import_path", default="data/cellmapper_towers.json"))),
         RadioReferenceSource(cache,
                              cfg.get("api_keys", "radioreference_user", default=""),
                              cfg.get("api_keys", "radioreference_pass", default=""),

@@ -1,51 +1,47 @@
-# Shield TSCM — Field Spectrum Survey configuration
-# All values can be edited by hand; the calibration mode also writes back here.
-
 app:
   host: 127.0.0.1
   port: 8765
   open_browser: true
-
 branding:
-  company: "Shield TSCM"
-  logo_path: ""            # absolute path to PNG/JPG for the report header; blank = text-only header
-  operator: ""             # default operator name on reports
-
+  company: Shield TSCM
+  logo_path: ''
+  operator: ''
 radius:
-  broadcast_miles: 25      # FM/AM/TV search radius
-  land_mobile_miles: 5     # ULS / cellular search radius
-
+  broadcast_miles: 25
+  land_mobile_miles: 5
 api_keys:
-  opencellid: ""           # free key from opencellid.org; blank = source shows "not configured"
-  radioreference_user: ""  # optional premium account; blank = source shows "not configured"
-  radioreference_pass: ""
-
+  opencellid: ''
+  radioreference_user: ''
+  radioreference_pass: ''
 uls:
-  # Path to an unzipped FCC ULS weekly extract directory (l_LMpriv etc. containing
-  # HD.dat / EN.dat / FR.dat / LO.dat). Blank = ULS source reports "not configured"
-  # with download instructions. Extract age is checked and flagged stale after stale_days.
-  extract_dir: ""
+  extract_dir: ''
   stale_days: 30
-
 detection:
-  threshold_db: 12.0       # bin must exceed segment noise floor by this much to count
-  merge_gap_bins: 2        # hot bins this close merge into one signal
-  min_persistence: 0.05    # fraction of passes a bin must be hot to keep (transients still kept, scored lower)
-  interior_delta_flag_db: 10.0   # interior minus exterior amplitude that triggers a local-source boost
-  room_delta_flag_db: 12.0       # room vs house-average delta that triggers localization boost
-
+  threshold_db: 12.0
+  merge_gap_bins: 2
+  min_persistence: 0.05
+  interior_delta_flag_db: 10.0
+  room_delta_flag_db: 12.0
 sweep:
-  sweep_points: 112        # RF Explorer data points per pass
-  seconds_per_sweep: 0.35  # empirical; CALIBRATION mode refines and writes this back
+  sweep_points: 112
+  seconds_per_sweep: 0.36
   segment_width_mhz:
-    subghz: 75             # < 1 GHz  (narrow = better RBW where analog bugs live)
-    mid: 100               # 1 - 2.4 GHz
-    high: 200              # > 2.4 GHz
+    subghz: 75
+    mid: 100
+    high: 200
   profiles:
-    quick:    { minutes: 15,  avg_passes: 5,  span_scale: 2.0 }
-    standard: { minutes: 45,  avg_passes: 10, span_scale: 1.0 }
-    deep:     { minutes: 120, avg_passes: 20, span_scale: 0.5 }
-  # Risk-weighted MaxHold dwell multipliers. Keys match band tags in survey/allocations.py.
+    quick:
+      minutes: 15
+      avg_passes: 5
+      span_scale: 2.0
+    standard:
+      minutes: 45
+      avg_passes: 10
+      span_scale: 1.0
+    deep:
+      minutes: 120
+      avg_passes: 20
+      span_scale: 0.5
   band_dwell_weights:
     ism_433: 3.0
     ism_915: 3.0
@@ -56,16 +52,49 @@ sweep:
     gps: 1.5
     default: 1.0
     broadcast: 0.4
-
+cellmapper:
+  import_path: data/cellmapper_towers.json
 device:
-  simulate: false          # true = run against the built-in simulator (demo / development only,
-                           # clearly labeled SIMULATED in the UI and blocked from client reports)
-  port: ""                 # blank = autodetect (CP210x USB bridge)
+  simulate: false
+  port: ''
   baud: 500000
-
 cache:
-  dir: cache               # disk cache for all external queries (offline-tolerant repeat visits)
-  max_age_hours: 720       # entries older than this are used but flagged STALE
-
-# Written by CALIBRATION mode — per-band winning strategy for this exact unit.
-calibration: {}
+  dir: cache
+  max_age_hours: 720
+calibration:
+  test_freq_mhz: 433.92
+  winner: &id001
+    strategy: maxhold_20s
+    span_mhz: 50.0
+    detection_rate: 0.0
+    mean_snr_db: null
+    time_cost_s: 0.7
+  results:
+  - strategy: normal_raw_x10
+    span_mhz: 50.0
+    detection_rate: 0.0
+    mean_snr_db: null
+    time_cost_s: 3.6
+  - strategy: average_x10
+    span_mhz: 50.0
+    detection_rate: 0.0
+    mean_snr_db: null
+    time_cost_s: 3.6
+  - strategy: average_x28
+    span_mhz: 50.0
+    detection_rate: 0.0
+    mean_snr_db: null
+    time_cost_s: 9.7
+  - strategy: max_x28
+    span_mhz: 50.0
+    detection_rate: 0.0
+    mean_snr_db: null
+    time_cost_s: 11.8
+  - strategy: maxhold_10s
+    span_mhz: 50.0
+    detection_rate: 0.0
+    mean_snr_db: null
+    time_cost_s: 10.2
+  - *id001
+  calibrated_unit: WSUB1G_PLUS+6G_PLUS
+  calibrated_at: 2026-06-10 06:54

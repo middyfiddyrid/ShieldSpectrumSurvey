@@ -6,3 +6,5 @@ reportlab>=4.0
 # Official RF Explorer python library (https://github.com/RFExplorer/RFExplorer-for-Python)
 # If this lags the 6G Combo PLUS, the app falls back to its raw UART driver automatically.
 RFExplorer>=1.0
+# Bluetooth LE inventory scanning (optional — inventory degrades gracefully without it)
+bleak>=0.21

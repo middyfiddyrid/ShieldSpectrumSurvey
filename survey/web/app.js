@@ -37,6 +37,7 @@ function show(view) {
   if (view === "rooms") loadRooms();
   if (view === "results") loadResults();
   if (view === "directional") loadDirectional();
+  if (view === "inventory") loadInventory();
 }
 
 /* ---------- polling ---------- */
@@ -115,6 +116,7 @@ function render(st) {
     $("sweep-overlay-eta").textContent =
       `${st.sweep.percent || 0}%  ·  ETA ${Math.floor(eta / 60)}m ${eta % 60}s`;
     if (st.sweep.live_trace) drawTrace($("livechart"), st.sweep.live_trace);
+    updateLiveLedger(st.sweep.sweep_id);
   } else if (!st.sweep.running) {
     so.classList.remove("show");
     App.overlayHidden = false;
@@ -141,11 +143,13 @@ function render(st) {
 
 /* ---------- canvas traces ---------- */
 function drawTrace(canvas, t) {
+  /* draws up to three traces at once, RF-Explorer-for-Windows style:
+     realtime (cyan), running average (green), max-hold (amber) */
   const ctx = canvas.getContext("2d");
   const W = canvas.width = canvas.clientWidth || 800;
   const H = canvas.height = canvas.clientHeight || 230;
   ctx.fillStyle = "#0d1319"; ctx.fillRect(0, 0, W, H);
-  const amps = t.amps, n = amps.length;
+  const n = (t.amps || []).length;
   if (!n) return;
   const aMin = -115, aMax = -20;
   ctx.strokeStyle = "#1f2a37";
@@ -154,15 +158,29 @@ function drawTrace(canvas, t) {
     ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
     ctx.fillStyle = "#42506b"; ctx.font = "9px monospace"; ctx.fillText(g + "dBm", 4, y - 2);
   }
-  ctx.strokeStyle = "#1abc9c"; ctx.lineWidth = 1.4; ctx.beginPath();
-  for (let i = 0; i < n; i++) {
-    const x = i / (n - 1) * W;
-    const y = H - (Math.max(aMin, Math.min(aMax, amps[i])) - aMin) / (aMax - aMin) * H;
-    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
-  }
-  ctx.stroke();
+  const plot = (arr, color, width) => {
+    if (!arr || arr.length < 2) return;
+    ctx.strokeStyle = color; ctx.lineWidth = width; ctx.beginPath();
+    for (let i = 0; i < arr.length; i++) {
+      const x = i / (arr.length - 1) * W;
+      const y = H - (Math.max(aMin, Math.min(aMax, arr[i])) - aMin) / (aMax - aMin) * H;
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    }
+    ctx.stroke();
+  };
+  plot(t.maxpeak, "#f39c12", 1.1);    // max-hold
+  plot(t.avg, "#2ecc71", 1.1);        // running average
+  plot(t.amps, "#1abc9c", 1.5);       // realtime on top
+  ctx.font = "10px monospace";
+  let lx = W - 220;
+  [["REALTIME", "#1abc9c", true], ["AVG", "#2ecc71", !!t.avg], ["MAX HOLD", "#f39c12", !!t.maxpeak]]
+    .forEach(([label, color, on]) => {
+      if (!on) return;
+      ctx.fillStyle = color; ctx.fillRect(lx, 8, 10, 3);
+      ctx.fillText(label, lx + 14, 13); lx += ctx.measureText(label).width + 34;
+    });
   if (t.freqs && t.freqs.length) {
-    ctx.fillStyle = "#7b8794"; ctx.font = "10px monospace";
+    ctx.fillStyle = "#7b8794";
     ctx.fillText(fmtF(t.freqs[0]), 4, H - 4);
     const lastLabel = fmtF(t.freqs[t.freqs.length - 1]);
     ctx.fillText(lastLabel, W - ctx.measureText(lastLabel).width - 4, H - 4);
@@ -191,6 +209,27 @@ function drawStrip(rows, signals) {
   });
   ctx.fillStyle = "#42506b"; ctx.font = "9px monospace";
   for (let g = 0; g <= hi; g += 1000) ctx.fillText((g / 1000) + "G", X(g) + 2, 12);
+}
+
+/* ---------- live ledger (under the spectral graph while sweeping) ---------- */
+let ledgerLast = 0;
+async function updateLiveLedger(sweepId) {
+  if (!sweepId || Date.now() - ledgerLast < 2500) return;   // refresh every ~2.5s
+  ledgerLast = Date.now();
+  try {
+    const sigs = await api("/api/signals?sweep_id=" + sweepId);
+    const known = s => s.classification === "VERIFIED" ? "KNOWN"
+      : s.classification === "PLAUSIBLE" && !s.caution ? "KNOWN BAND" : "UNKNOWN";
+    $("tbl-live-ledger").innerHTML =
+      "<tr><th>#</th><th>Frequency</th><th>Peak dBm</th><th>Status</th><th>Match</th></tr>" +
+      sigs.slice().reverse().map((s, i) => {
+        const k = known(s);
+        const cls = k === "KNOWN" ? "VERIFIED" : k === "KNOWN BAND" ? "PLAUSIBLE" : "UNVERIFIED";
+        return `<tr><td>${sigs.length - i}</td><td>${fmtF(s.center_mhz)}</td>` +
+          `<td>${s.peak_dbm}</td><td><span class="pill ${cls}">${k}</span>${s.caution ? " ⚠" : ""}</td>` +
+          `<td>${esc(s.matched_label || s.match_reason || "").slice(0, 70)}</td></tr>`;
+      }).join("") || "<tr><td>no signals detected yet</td></tr>";
+  } catch (e) { /* ledger is best-effort during sweep */ }
 }
 
 /* ---------- session / device / baseline ---------- */
@@ -525,6 +564,46 @@ $("btn-report").onclick = async () => {
   $("btn-report").disabled = false;
 };
 $("btn-csv").onclick = () => { window.location = "/api/export/csv"; };
+
+/* ---------- inventory ---------- */
+async function invScan(kind) {
+  $("inv-msg").textContent = kind === "ble" ?
+    "scanning BLE (~8s)…" : "scanning WiFi…";
+  try {
+    const r = await api("/api/inventory/scan", { kind });
+    $("inv-msg").textContent = r.message;
+  } catch (e) { $("inv-msg").textContent = "FAILED: " + e.message; }
+  loadInventory();
+}
+$("btn-scan-wifi").onclick = () => invScan("wifi");
+$("btn-scan-ble").onclick = () => invScan("ble");
+
+async function loadInventory() {
+  try {
+    const rows = await api("/api/inventory");
+    $("tbl-inventory").innerHTML =
+      "<tr><th>Type</th><th>Name</th><th>ID (MAC/BSSID)</th><th>RSSI dBm</th>" +
+      "<th>Ch / Freq</th><th>Info</th><th>Owned?</th><th></th></tr>" +
+      rows.map(d => {
+        const loud = d.loud_unowned;
+        const rssi = d.rssi_dbm != null ?
+          `<span class="${loud ? "score-hi" : ""}">${d.rssi_dbm}</span>` : "—";
+        return `<tr${loud ? ' style="background:#1f1212"' : ""}>` +
+          `<td>${d.kind.toUpperCase()}</td><td>${esc(d.name) || "<i>(no name)</i>"}</td>` +
+          `<td>${esc(d.identifier)}</td><td>${rssi}${loud ? " ⚠ LOUD+UNOWNED" : ""}</td>` +
+          `<td>${esc(d.channel)}${d.freq_mhz ? " / " + fmtF(d.freq_mhz) : ""}</td>` +
+          `<td>${esc(d.extra)}</td>` +
+          `<td>${d.owned ? '<span class="pill ok">CLIENT-OWNED</span>'
+                         : '<span class="pill failed">UNACCOUNTED</span>'}</td>` +
+          `<td><button class="btn" onclick="invMark(${d.id},${d.owned ? 0 : 1})">` +
+          `${d.owned ? "UNMARK" : "MARK OWNED"}</button></td></tr>`;
+      }).join("") || "<tr><td>nothing scanned yet</td></tr>";
+  } catch (e) { $("tbl-inventory").innerHTML = `<tr><td>${esc(e.message)}</td></tr>`; }
+}
+window.invMark = async (id, owned) => {
+  await api("/api/inventory/mark", { id, owned });
+  loadInventory();
+};
 
 /* ---------- calibration ---------- */
 $("btn-cal").onclick = async () => {

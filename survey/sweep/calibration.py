@@ -90,12 +90,16 @@ def run_calibration(controller, cfg, test_freq_mhz: float = 433.92,
         snr = r["mean_snr_db"] or 0.0
         return r["detection_rate"] * 100 + snr - r["time_cost_s"] * 0.5
 
-    winner = max(results, key=fitness) if results else None
+    detected_any = any(r["detection_rate"] > 0 for r in results)
+    winner = max(results, key=fitness) if (results and detected_any) else None
     if winner:
         cfg.set_and_save(("calibration",), {
             "test_freq_mhz": test_freq_mhz, "winner": winner,
             "results": results, "calibrated_unit": dev.info.model,
             "calibrated_at": time.strftime("%Y-%m-%d %H:%M"),
         })
-    return {"results": results, "winner": winner,
+    message = "" if detected_any else (
+        f"TEST SOURCE NOT DETECTED at {test_freq_mhz} MHz in any strategy — "
+        "keep the keyfob/test transmitter keyed during the run. No winner saved.")
+    return {"results": results, "winner": winner, "message": message,
             "seconds_per_sweep": cfg.get("sweep", "seconds_per_sweep")}

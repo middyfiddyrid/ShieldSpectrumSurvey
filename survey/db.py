@@ -84,6 +84,16 @@ CREATE TABLE IF NOT EXISTS directional (
     center_mhz REAL NOT NULL,
     room TEXT, peak_dbm REAL, notes TEXT, ts_utc REAL
 );
+CREATE TABLE IF NOT EXISTS inventory (
+    id INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL,
+    kind TEXT NOT NULL,            -- wifi | ble
+    identifier TEXT NOT NULL,      -- BSSID / MAC
+    name TEXT, rssi_dbm REAL, channel TEXT, freq_mhz REAL, extra TEXT,
+    owned INTEGER DEFAULT 0,       -- operator: client accounts for this device
+    first_seen REAL, last_seen REAL,
+    UNIQUE(session_id, kind, identifier)
+);
 CREATE TABLE IF NOT EXISTS reports (
     id INTEGER PRIMARY KEY,
     session_id INTEGER NOT NULL,

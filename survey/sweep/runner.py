@@ -124,7 +124,8 @@ class SweepController:
         self._thread = threading.Thread(target=work, daemon=True)
         self._set(running=True, phase=phase, module=module, room=room, error=None,
                   segment_index=0, segment_total=len(plan.segments), percent=0.0,
-                  signal_count=0, message=f"starting {phase} sweep on {module} module")
+                  signal_count=0, sweep_id=sweep_id,
+                  message=f"starting {phase} sweep on {module} module")
         self._thread.start()
         return sweep_id
 
@@ -181,8 +182,13 @@ class SweepController:
 
         def on_frame(frame):
             acc.add_sweep(frame.amps_dbm)
+            # publish all three traces — realtime, running average, max-hold —
+            # so the UI can draw them together like RF Explorer for Windows
+            n = len(frame.amps_dbm)
             self._set(live_trace={"freqs": [round(f, 4) for f in frame.freqs_mhz],
                                   "amps": [round(a, 1) for a in frame.amps_dbm],
+                                  "avg": [round(a, 1) for a in acc.avg[:n]],
+                                  "maxpeak": [round(a, 1) for a in acc.maxpeak[:n]],
                                   "low": seg.low_mhz, "high": seg.high_mhz})
 
         # Pass 1 — AVERAGE
