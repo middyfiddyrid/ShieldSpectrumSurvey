@@ -72,6 +72,7 @@ class DeviceInfo:
     wideband_license: bool = False
     simulated: bool = False
     driver: str = ""
+    battery: str = ""                               # raw #BAT report if the unit sends one
     warnings: list = field(default_factory=list)
 
     def to_dict(self):
@@ -126,6 +127,9 @@ class BaseDevice:
     """Interface shared by the official-lib driver, raw driver, and simulator."""
 
     info: DeviceInfo
+
+    def is_alive(self) -> bool:
+        return True
 
     def connect(self) -> DeviceInfo: ...
     def select_module(self, side: str): ...
@@ -206,11 +210,39 @@ class RawRFEDevice(BaseDevice):
             idx = self._buf.find(b"\r\n")
             if idx >= 0:
                 line, self._buf = self._buf[:idx], self._buf[idx + 2:]
+                bi = line.find(b"#BAT:")
+                if bi >= 0:
+                    self.info.battery = line[bi + 5:].decode(errors="replace").strip()
                 return line
             chunk = self.ser.read(4096)
             if chunk:
                 self._buf += chunk
         return None
+
+    def _drain(self):
+        """Discard buffered serial data so the next config read is fresh, not a
+        stale line from a module-boot dump."""
+        self._buf = b""
+        try:
+            self.ser.reset_input_buffer()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _await_config_line(self, timeout_s: float) -> bool:
+        """Wait for a #C2-F config line; tolerant of binary sweep bytes glued to
+        the same 'line' (the stream interleaves $S frames with text)."""
+        t_end = time.time() + timeout_s
+        while time.time() < t_end:
+            line = self._read_until_newline(0.5)
+            if line is None:
+                continue
+            i = line.find(b"#C2-F:")
+            if i >= 0 and self._parse_config(line[i:]):
+                return True
+            i = line.find(b"#C2-M:")
+            if i >= 0:
+                self._parse_models(line[i:])
+        return False
 
     # -- lifecycle --
 
@@ -236,17 +268,20 @@ class RawRFEDevice(BaseDevice):
         return self.info
 
     def _await_identity(self, timeout_s: float):
-        """Parse #C2-M (models) and #C2-F (current config incl. module min/max)."""
+        """Parse #C2-M (models) and #C2-F (current config incl. module min/max).
+        Both can arrive glued to binary sweep bytes, so search within lines."""
         t_end = time.time() + timeout_s
         got_m = got_f = False
         while time.time() < t_end and not (got_m and got_f):
             line = self._read_until_newline(0.5)
             if line is None:
                 continue
-            if line.startswith(b"#C2-M:"):
-                got_m = self._parse_models(line)
-            elif line.startswith(b"#C2-F:"):
-                got_f = self._parse_config(line)
+            i = line.find(b"#C2-M:")
+            if i >= 0:
+                got_m = self._parse_models(line[i:])
+            i = line.find(b"#C2-F:")
+            if i >= 0:
+                got_f = self._parse_config(line[i:])
         # read the inactive module's range by switching to it and back
         if got_m and got_f and len(self.info.modules) == 2:
             try:
@@ -301,26 +336,55 @@ class RawRFEDevice(BaseDevice):
         return True
 
     def select_module(self, side: str):
-        """CM<0> = mainboard (RIGHT SMA), CM<1> = expansion (LEFT SMA)."""
+        """CM<0> = mainboard (RIGHT SMA), CM<1> = expansion (LEFT SMA).
+        Requesting the already-active module emits no new config line, so that
+        case is confirmed with a plain config request instead of waiting on a
+        switch event that will never come."""
+        if self._active_side == side:
+            self._send("C0")
+            self._await_config_line(5.0)
+            if self._active_side == side:
+                return
         want_expansion = (side == "left")
         self._send("CM" + ("\x01" if want_expansion else "\x00"))
-        t_end = time.time() + 8.0
+        t_end = time.time() + 14.0
         while time.time() < t_end:
-            line = self._read_until_newline(0.5)
-            if line and line.startswith(b"#C2-F:") and self._parse_config(line):
-                if self._active_side == side:
-                    return
+            if self._await_config_line(2.0) and self._active_side == side:
+                # the freshly-booted module streams stale boot config for a
+                # moment; settle and drain before anyone sends a range command
+                time.sleep(2.0)
+                self._drain()
+                return
+            # the PLUS firmware doesn't always volunteer config after a switch
+            self._send("C0")
         raise DeviceError(f"Module switch to {side} not confirmed by device")
 
     def set_range(self, start_mhz: float, end_mhz: float):
+        """Bench-verified against fw 03.45 on the 6G Combo PLUS:
+        - the two-field C2-F form is silently IGNORED; the firmware requires the
+          full 4-field form C2-F:Sssssss,Eeeeeee,tttt,bbbb (top/bottom dBm are
+          visual-only but mandatory)
+        - no confirmation line is emitted; confirm by re-requesting config (C0)
+          and checking both the applied start and end frequencies."""
         start_khz, end_khz = int(start_mhz * 1000), int(end_mhz * 1000)
-        self._send(f"C2-F:{start_khz:07d},{end_khz:07d}")
-        t_end = time.time() + 6.0
-        while time.time() < t_end:
-            line = self._read_until_newline(0.5)
-            if line and line.startswith(b"#C2-F:") and self._parse_config(line):
-                return
-        raise DeviceError(f"Range {start_mhz}-{end_mhz} MHz not confirmed by device")
+        cmd = f"C2-F:{start_khz:07d},{end_khz:07d},{0:04d},{-120:04d}"
+        for attempt in range(5):
+            self._drain()
+            self._send(cmd)
+            time.sleep(0.5)
+            self._drain()
+            self._send("C0")
+            if self._await_config_line(4.0):
+                cfg = self._current_config
+                got_start = cfg.get("start_khz", -1)
+                got_end = got_start + cfg.get("step_hz", 0) * (cfg.get("sweep_points", 112) - 1) / 1000.0
+                tol = max(5.0, (end_khz - start_khz) * 0.02)
+                if abs(got_start - start_khz) <= tol and abs(got_end - end_khz) <= tol:
+                    return
+            time.sleep(1.0 + attempt * 0.5)   # module may still be settling post-switch
+        raise DeviceError(
+            f"Range {start_mhz}-{end_mhz} MHz not applied by device "
+            f"(reports {self._current_config.get('start_khz')} kHz start)")
 
     def set_calculator(self, mode_name: str):
         mode = CALC_BY_NAME.get(mode_name, CALC_NORMAL)
@@ -355,6 +419,11 @@ class RawRFEDevice(BaseDevice):
                     self._buf += chunk
                     continue
                 continue
+            # amplitude bytes are arbitrary binary, so a '$S' found mid-frame is
+            # possible — only a frame ending in \r\n is real (bench-verified)
+            if self._buf[idx + 3 + n_points: need] != b"\r\n":
+                self._buf = self._buf[idx + 2:]
+                continue
             raw = self._buf[idx + 3: idx + 3 + n_points]
             self._buf = self._buf[need:]
             amps = [-(b / 2.0) for b in raw]
@@ -367,8 +436,12 @@ class RawRFEDevice(BaseDevice):
             return SweepFrame(freqs, amps, time.time())
         return None
 
+    def is_alive(self) -> bool:
+        return self.ser is not None and bool(getattr(self.ser, "is_open", False))
+
     def close(self):
         if self.ser:
+            log.info("RawRFEDevice.close() on %s", self.port_name, stack_info=True)
             try:
                 self.ser.close()
             except Exception:  # noqa: BLE001
@@ -458,8 +531,12 @@ class OfficialRFEDevice(BaseDevice):
             time.sleep(0.02)
         return None
 
+    def is_alive(self) -> bool:
+        return self.rfe is not None
+
     def close(self):
         if self.rfe:
+            log.info("OfficialRFEDevice.close() on %s", self.port_name, stack_info=True)
             try:
                 self.rfe.Close()
             except Exception:  # noqa: BLE001

@@ -68,6 +68,7 @@ function render(st) {
   $("ft-module").textContent = st.sweep.module || "—";
   $("ft-range").textContent = dev && dev.modules.length ?
     dev.modules.map(m => `${m.side}: ${fmtF(m.min_mhz)}–${fmtF(m.max_mhz)}`).join("  ·  ") : "—";
+  $("ft-bat").textContent = dev && dev.battery ? dev.battery : "—";
   $("ft-sim").innerHTML = dev && dev.simulated ? '<span class="sim">⚠ SIMULATED DEVICE</span>' : "";
   $("ft-msg").textContent = st.sweep.message || "idle";
 

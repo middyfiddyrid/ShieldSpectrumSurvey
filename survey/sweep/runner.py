@@ -52,13 +52,19 @@ class SweepController:
 
     def connect_device(self):
         from .device import open_device
-        if self.device is not None:
+        old, self.device = self.device, None   # never leave a dead handle assigned
+        if old is not None:
             try:
-                self.device.close()
+                old.close()
             except Exception:  # noqa: BLE001
                 pass
         self.device = open_device(self.cfg)
         return self.device.info
+
+    def _ensure_device(self):
+        if self.device is None or not self.device.is_alive():
+            log.warning("device missing or dead — reconnecting")
+            self.connect_device()
 
     def device_info(self):
         return self.device.info.to_dict() if self.device else None
@@ -85,8 +91,7 @@ class SweepController:
                     plan, on_done=None):
         if self.busy():
             raise RuntimeError("a sweep is already running")
-        if self.device is None:
-            self.connect_device()
+        self._ensure_device()
         self.abort_event.clear()
         sweep_id = self.db.execute(
             "INSERT INTO sweeps (session_id,phase,module,room,profile,started_utc,"
@@ -213,8 +218,7 @@ class SweepController:
                           room: str):
         if self.busy():
             raise RuntimeError("a sweep is already running")
-        if self.device is None:
-            self.connect_device()
+        self._ensure_device()
         self.abort_event.clear()
         span_mhz = max(2.0, (bw_khz / 1000.0) * 4)
         lo, hi = center_mhz - span_mhz / 2, center_mhz + span_mhz / 2
