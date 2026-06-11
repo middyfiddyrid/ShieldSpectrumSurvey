@@ -167,6 +167,19 @@ footer .sim { color:var(--red); font-weight:bold; }
     <div id="baseline-sources"></div>
   </div>
   <div class="card">
+    <h3>CASE FILES <span class="tag" style="font-size:11px">background reports, intake docs — stored locally, never shared externally by the app</span></h3>
+    <p class="note">⚠ Sensitive PII. These are working files for this engagement only. Consumer
+    background data (BeenVerified etc.) is governed by its provider TOS and the FCRA — keep it
+    inside its permissible purpose; do not use it for employment/tenancy/credit decisions.</p>
+    <div class="row">
+      <input type="file" id="case-file-input">
+      <input type="text" id="case-file-kind" class="small" style="width:160px" placeholder="kind (e.g. background)">
+      <button class="btn" id="btn-case-upload">UPLOAD</button>
+      <span class="note" id="case-msg"></span>
+    </div>
+    <table id="tbl-case-files"></table>
+  </div>
+  <div class="card">
     <h3>PREVIOUS SESSIONS</h3>
     <div class="scroll" style="max-height:180px"><table id="tbl-sessions"></table></div>
   </div>
@@ -351,6 +364,7 @@ footer .sim { color:var(--red); font-weight:bold; }
             </select>
           </div>
           <div id="wiki-img" style="margin:10px 0"></div>
+          <div id="wiki-timeline"></div>
           <div id="wiki-match"></div>
           <div class="kv" id="wiki-meta" style="margin:10px 0"></div>
           <p class="note" id="wiki-desc" style="white-space:pre-wrap"></p>

@@ -41,6 +41,7 @@ function show(view) {
   if (view === "directional") loadDirectional();
   if (view === "inventory") loadInventory();
   if (view === "wiki") loadWiki();
+  if (view === "session") loadCaseFiles();
 }
 
 /* ---------- polling ---------- */
@@ -335,6 +336,34 @@ $("btn-connect").onclick = async () => {
 $("btn-baseline").onclick = async () => {
   try { await api("/api/baseline/build", {}); } catch (e) { $("baseline-msg").textContent = e.message; }
 };
+
+/* ---------- case files ---------- */
+$("btn-case-upload").onclick = async () => {
+  const f = $("case-file-input").files[0];
+  if (!f) return alert("Choose a file first.");
+  const fd = new FormData();
+  fd.append("file", f);
+  fd.append("kind", $("case-file-kind").value);
+  $("case-msg").textContent = "uploading…";
+  try {
+    const r = await fetch("/api/case_files", { method: "POST", body: fd });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || "upload failed");
+    $("case-msg").textContent = `${j.filename} stored (${(j.size_bytes / 1024).toFixed(0)} KB)`;
+    $("case-file-input").value = "";
+    loadCaseFiles();
+  } catch (e) { $("case-msg").textContent = "FAILED: " + e.message; }
+};
+async function loadCaseFiles() {
+  try {
+    const rows = await api("/api/case_files");
+    $("tbl-case-files").innerHTML = rows.length ?
+      "<tr><th>File</th><th>Kind</th><th>Size</th><th>Uploaded</th></tr>" +
+      rows.map(f => `<tr><td><a style="color:var(--cyan)" href="/case_files/${f.id}">${esc(f.filename)}</a></td>` +
+        `<td>${esc(f.kind || "")}</td><td>${(f.size_bytes / 1024).toFixed(0)} KB</td>` +
+        `<td>${new Date(f.uploaded_utc * 1000).toLocaleString()}</td></tr>`).join("") : "";
+  } catch (e) {}
+}
 
 async function loadSessions() {
   try {
@@ -733,17 +762,20 @@ async function loadWiki() {
     const cur = $("wiki-cat").value;
     $("wiki-cat").innerHTML = '<option value="">all</option>' + r.categories.map(c =>
       `<option ${c.category === cur ? "selected" : ""}>${esc(c.category)}</option>`).join("");
-    $("wiki-count").textContent = `${r.rows.length} entries`;
+    $("wiki-count").textContent =
+      `${r.rows.length} ${r.grouped ? "distinct signals" : "captures"}`;
     $("tbl-wiki").innerHTML =
-      "<tr><th>Frequency</th><th>Label</th><th>Category</th><th>Status</th><th>Where</th><th>When</th></tr>" +
+      "<tr><th>Frequency</th><th>Label</th><th>Category</th><th>Sightings</th><th>Status</th><th>Last seen</th></tr>" +
       r.rows.map(c => {
         const cls = c.status === "identified" ? "ok" : c.status === "threat" ? "failed" : "stale";
+        const sight = c.sightings ?
+          `${c.sightings}× / ${c.sessions_seen} session${c.sessions_seen > 1 ? "s" : ""}` : "—";
         return `<tr onclick="wikiOpen(${c.id})" style="cursor:pointer">` +
           `<td>${fmtF(c.center_mhz)}</td><td>${esc(c.label)}</td><td>${esc(c.category)}</td>` +
+          `<td>${sight}</td>` +
           `<td><span class="pill ${cls}">${esc(c.status).toUpperCase()}</span></td>` +
-          `<td>${esc((c.address || "").slice(0, 24))}${c.room ? " · " + esc(c.room) : ""}</td>` +
           `<td>${new Date(c.captured_utc * 1000).toLocaleDateString()}</td></tr>`;
-      }).join("") || "<tr><td>no captures yet — use CAPTURE ALL → SIGNAL WIKI on the Results tab</td></tr>";
+      }).join("") || "<tr><td>no captures yet — sweeps auto-archive every detected signal here</td></tr>";
   } catch (e) { $("tbl-wiki").innerHTML = `<tr><td>${esc(e.message)}</td></tr>`; }
 }
 $("wiki-cat").onchange = loadWiki;
@@ -769,6 +801,28 @@ window.wikiOpen = async (id) => {
       `<div>Center / BW</div><div>${fmtF(c.center_mhz)} / ~${(c.bw_khz || 0).toFixed(0)} kHz</div>` +
       `<div>Peak / floor</div><div>${c.peak_dbm} / ${c.floor_dbm} dBm</div>` +
       `<div>Classification</div><div>${esc(c.classification)} ${esc(c.matched_label || "")}</div>`;
+    // observation timeline across all sessions + variance flag
+    try {
+      const tl = await api("/api/signal_timeline?center_mhz=" + c.center_mhz);
+      const v = tl.variance;
+      let html = "";
+      if (v && v.observations > 1) {
+        html = `<div class="card" style="margin:8px 0; ${v.flag ? "border-color:var(--amber)" : ""}">` +
+          `<b>SIGHTING HISTORY:</b> ${v.observations}× across ${v.sessions} session(s) · ` +
+          `peak ${v.peak_min_dbm} to ${v.peak_max_dbm} dBm (range ${v.peak_range_db} dB)` +
+          (v.bw_min_khz != null ? ` · BW ${v.bw_min_khz}–${v.bw_max_khz} kHz` : "") +
+          (v.flag ? `<br><span class="caution">⚠ ${esc(v.flag)}</span>` : "") +
+          `<div class="scroll" style="max-height:120px; margin-top:8px"><table>` +
+          "<tr><th>When</th><th>Where</th><th>Peak</th><th>BW</th><th>Kind</th><th></th></tr>" +
+          tl.rows.slice().reverse().map(o =>
+            `<tr><td>${new Date(o.captured_utc * 1000).toLocaleString()}</td>` +
+            `<td>${esc((o.address || "").slice(0, 20))}${o.room ? " · " + esc(o.room) : ""}</td>` +
+            `<td>${o.peak_dbm}</td><td>${(o.bw_khz || 0).toFixed(0)}</td><td>${o.kind}</td>` +
+            `<td><a style="color:var(--cyan); cursor:pointer" onclick="wikiOpen(${o.id})">view</a></td></tr>`).join("") +
+          "</table></div></div>";
+      }
+      $("wiki-timeline").innerHTML = html;
+    } catch (e) { $("wiki-timeline").innerHTML = ""; }
     $("wiki-match").innerHTML = c.matches.length ?
       `<div class="card" style="border-color:var(--amber); margin:8px 0">` +
       `<b style="color:var(--amber)">⚠ MATCHES IN LIBRARY:</b> ` +

@@ -132,6 +132,17 @@ class SweepController:
                 postprocess_session(self.db, self.cfg, session_id)
             except Exception:  # noqa: BLE001
                 log.exception("postprocess failed")
+            try:
+                from ..sigcapture import archive_observations
+                sess = self.db.query_one("SELECT address FROM sessions WHERE id=?",
+                                         (session_id,))
+                added = archive_observations(
+                    self.db, self.cfg, session_id,
+                    self.cfg.abs_path("capture_images"),
+                    sess["address"] if sess else "")
+                log.info("archived %d signal observations to the wiki", added)
+            except Exception:  # noqa: BLE001
+                log.exception("observation archive failed")
             self._set(running=False,
                       message=f"{phase} sweep ({module}) {status}; "
                               f"{self.state['signal_count']} signals detected")

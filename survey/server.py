@@ -97,6 +97,51 @@ def create_app(db, cfg) -> Flask:
         st.session_id = row["id"]
         return jsonify({"session_id": st.session_id})
 
+    # ---------- case files (session attachments) ----------
+
+    @app.post("/api/case_files")
+    def case_file_upload():
+        import hashlib
+        session = st.session()
+        if not session:
+            return err("create a session first")
+        f = request.files.get("file")
+        if not f or not f.filename:
+            return err("no file")
+        raw = f.read()
+        if len(raw) > 50 * 1024 * 1024:
+            return err("file exceeds 50 MB")
+        digest = hashlib.sha256(raw).hexdigest()
+        safe = os.path.basename(f.filename).replace("\\", "_")
+        stored = f"s{session['id']}_{int(time.time())}_{safe}"
+        case_dir = cfg.abs_path("case_files")
+        os.makedirs(case_dir, exist_ok=True)
+        with open(os.path.join(case_dir, stored), "wb") as out:
+            out.write(raw)
+        db.execute(
+            "INSERT INTO case_files (session_id,filename,stored_name,kind,size_bytes,"
+            "sha256,uploaded_utc,notes) VALUES (?,?,?,?,?,?,?,?)",
+            (session["id"], safe, stored, request.form.get("kind", ""),
+             len(raw), digest, time.time(), request.form.get("notes", "")))
+        return jsonify({"uploaded": True, "filename": safe, "size_bytes": len(raw)})
+
+    @app.get("/api/case_files")
+    def case_files_list():
+        session = st.session()
+        if not session:
+            return err("no session")
+        return jsonify(db.query(
+            "SELECT id,filename,kind,size_bytes,uploaded_utc,notes FROM case_files "
+            "WHERE session_id=? ORDER BY uploaded_utc DESC", (session["id"],)))
+
+    @app.get("/case_files/<int:file_id>")
+    def case_file_download(file_id):
+        row = db.query_one("SELECT * FROM case_files WHERE id=?", (file_id,))
+        if not row:
+            return err("no such file", 404)
+        return send_from_directory(cfg.abs_path("case_files"), row["stored_name"],
+                                   as_attachment=True, download_name=row["filename"])
+
     # ---------- overall state (polled by the UI) ----------
 
     @app.get("/api/state")
@@ -466,9 +511,13 @@ def create_app(db, cfg) -> Flask:
 
     @app.get("/api/captures")
     def captures_list():
-        q = "SELECT c.id, c.session_id, c.center_mhz, c.bw_khz, c.peak_dbm, c.room, "\
-            "c.module, c.captured_utc, c.image_path, c.category, c.label, c.status, "\
-            "s.address FROM captures c JOIN sessions s ON c.session_id=s.id"
+        # Default view groups the library by emitter (one row per frequency,
+        # newest observation) so hundreds of auto-archived observations collapse
+        # into the distinct signals the analyst cares about. ?flat=1 lists every
+        # individual observation/zoom.
+        q = "SELECT c.id, c.session_id, c.kind, c.center_mhz, c.bw_khz, c.peak_dbm, "\
+            "c.room, c.module, c.captured_utc, c.image_path, c.category, c.label, "\
+            "c.status, s.address FROM captures c JOIN sessions s ON c.session_id=s.id"
         params, where = [], []
         if request.args.get("category"):
             where.append("c.category=?")
@@ -477,13 +526,38 @@ def create_app(db, cfg) -> Flask:
             where.append("(c.label LIKE ? OR c.notes LIKE ? OR c.description LIKE ?)")
             like = f"%{request.args['q']}%"
             params += [like, like, like]
+        if request.args.get("kind"):
+            where.append("c.kind=?")
+            params.append(request.args["kind"])
         if where:
             q += " WHERE " + " AND ".join(where)
         q += " ORDER BY c.captured_utc DESC"
         rows = db.query(q, params)
         cats = db.query("SELECT category, COUNT(*) AS n FROM captures "
                         "GROUP BY category ORDER BY n DESC")
-        return jsonify({"rows": rows, "categories": cats})
+        if request.args.get("flat"):
+            return jsonify({"rows": rows, "categories": cats, "grouped": False})
+        # collapse by frequency (0.25 MHz buckets), keep newest + sighting count
+        groups = []
+        for r in rows:
+            g = next((x for x in groups if abs(x["center_mhz"] - r["center_mhz"]) <= 0.25), None)
+            if g is None:
+                r = dict(r)
+                r["sightings"] = 1
+                r["sessions_seen"] = {r["session_id"]}
+                groups.append(r)
+            else:
+                g["sightings"] += 1
+                g["sessions_seen"].add(r["session_id"])
+        for g in groups:
+            g["sessions_seen"] = len(g["sessions_seen"])
+        return jsonify({"rows": groups, "categories": cats, "grouped": True})
+
+    @app.get("/api/signal_timeline")
+    def signal_timeline_route():
+        from .sigcapture import signal_timeline
+        center = float(request.args.get("center_mhz", 0))
+        return jsonify(signal_timeline(db, center))
 
     @app.get("/api/captures/<int:cap_id>")
     def capture_get(cap_id):

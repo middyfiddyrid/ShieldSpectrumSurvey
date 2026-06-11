@@ -3,5 +3,6 @@ data/
 reports/
 cache/
 capture_images/
+case_files/
 __pycache__/
 *.pyc

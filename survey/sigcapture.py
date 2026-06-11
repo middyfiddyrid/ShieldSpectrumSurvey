@@ -129,6 +129,122 @@ def render_capture_svg(data: dict, meta: dict, width=1200, height=560) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Auto-archive: every detected signal becomes a wiki observation per sweep
+# ---------------------------------------------------------------------------
+
+def _crop_segment(seg_data: dict, center: float, half_span: float):
+    """Crop a stored segment trace to a window around a signal — gives a
+    per-observation picture rendered from data already collected (no device
+    time)."""
+    freqs = seg_data.get("freqs") or []
+    if not freqs:
+        return None
+    lo, hi = center - half_span, center + half_span
+    idx = [i for i, f in enumerate(freqs) if lo <= f <= hi]
+    if len(idx) < 4:  # window too narrow in this segment — use whole segment
+        idx = list(range(len(freqs)))
+    a, b = idx[0], idx[-1] + 1
+    return {"freqs": freqs[a:b], "avg": seg_data["avg"][a:b],
+            "maxpeak": seg_data["maxpeak"][a:b], "hits": seg_data["hits"][a:b],
+            "passes": seg_data.get("passes", 1)}
+
+
+def archive_observations(db, cfg, session_id: int, images_dir: str, address: str):
+    """Called after a sweep completes. Archives EVERY detected signal this
+    session as a lightweight wiki observation (cropped trace image from the
+    sweep data + characteristics), so the library grows by hundreds per sweep
+    and the same emitter accrues a time series for variance comparison. The
+    high-iteration manual zoom capture is separate (kind='zoom')."""
+    import os as _os
+    _os.makedirs(images_dir, exist_ok=True)
+    # only archive signals from sweeps not already observation-archived
+    done = {r["signal_id"] for r in db.query(
+        "SELECT signal_id FROM captures WHERE session_id=? AND kind='observation' "
+        "AND signal_id IS NOT NULL", (session_id,))}
+    signals = db.query(
+        "SELECT s.*, seg.data_json AS seg_data, seg.low_mhz AS seg_lo, "
+        "seg.high_mhz AS seg_hi FROM signals s LEFT JOIN segments seg "
+        "ON s.segment_id=seg.id WHERE s.session_id=?", (session_id,))
+    n = 0
+    for s in signals:
+        if s["id"] in done or not s["seg_data"]:
+            continue
+        try:
+            seg = json.loads(s["seg_data"])
+        except (TypeError, ValueError):
+            continue
+        half = max((s["bw_khz"] or 100) / 1000.0 * 5, 0.25)
+        crop = _crop_segment(seg, s["center_mhz"], half)
+        if crop is None:
+            continue
+        feats = signal_features(crop, s["floor_dbm"] or -110)
+        category = auto_category(s["classification"] or "", s["matched_label"] or "",
+                                 s["center_mhz"], bool(s["caution"]))
+        label = (s["matched_label"] or f"{s['center_mhz']:.4f} MHz "
+                 + ("unverified" if s["classification"] == "UNVERIFIED" else "signal"))
+        captured = time.strftime("%Y-%m-%d %H:%M")
+        meta = {"center_mhz": s["center_mhz"], "peak_dbm": s["peak_dbm"],
+                "floor_dbm": s["floor_dbm"], "bw_khz": s["bw_khz"],
+                "persistence": s["persistence"], "label": label,
+                "session_id": session_id, "address": address,
+                "room": s["room"] or "", "module": s["module"] or "",
+                "captured": captured}
+        svg = render_capture_svg(crop, meta)
+        fname = f"obs_s{session_id}_{int(s['center_mhz'] * 10000)}_{s['id']}.svg"
+        with open(_os.path.join(images_dir, fname), "w", encoding="utf-8") as f:
+            f.write(svg)
+        status = "identified" if s["classification"] == "VERIFIED" else "unconfirmed"
+        db.execute(
+            "INSERT INTO captures (session_id,signal_id,kind,center_mhz,span_mhz,bw_khz,"
+            "peak_dbm,floor_dbm,persistence,room,module,captured_utc,image_path,"
+            "data_json,features_json,classification,matched_label,category,label,status,"
+            "description) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (session_id, s["id"], "observation", round(s["center_mhz"], 5),
+             round(2 * half, 4), s["bw_khz"], s["peak_dbm"], s["floor_dbm"],
+             s["persistence"], s["room"] or "", s["module"] or "", time.time(),
+             fname, json.dumps(crop), json.dumps(feats),
+             s["classification"] or "", s["matched_label"] or "",
+             category, label, status, rule_based_description(
+                 {"bw_khz": s["bw_khz"], "center_mhz": s["center_mhz"]}, feats)))
+        n += 1
+    return n
+
+
+def signal_timeline(db, center_mhz: float, tol_mhz: float = MATCH_TOL_MHZ) -> dict:
+    """All observations + zooms of one emitter across every session, oldest
+    first, with variance stats — the 'is someone hiding in this band?' view."""
+    rows = db.query(
+        "SELECT c.id, c.kind, c.center_mhz, c.bw_khz, c.peak_dbm, c.floor_dbm, "
+        "c.persistence, c.room, c.module, c.captured_utc, c.image_path, c.label, "
+        "c.session_id, s.address FROM captures c JOIN sessions s ON c.session_id=s.id "
+        "WHERE ABS(c.center_mhz - ?) <= ? ORDER BY c.captured_utc ASC",
+        (center_mhz, tol_mhz))
+    peaks = [r["peak_dbm"] for r in rows if r["peak_dbm"] is not None]
+    bws = [r["bw_khz"] for r in rows if r["bw_khz"]]
+    sessions = {r["session_id"] for r in rows}
+    variance = {}
+    if peaks:
+        variance = {
+            "observations": len(rows), "sessions": len(sessions),
+            "peak_min_dbm": round(min(peaks), 1), "peak_max_dbm": round(max(peaks), 1),
+            "peak_range_db": round(max(peaks) - min(peaks), 1),
+            "bw_min_khz": round(min(bws), 1) if bws else None,
+            "bw_max_khz": round(max(bws), 1) if bws else None,
+            "first_seen": rows[0]["captured_utc"], "last_seen": rows[-1]["captured_utc"],
+        }
+        # variance flag: a "stable" allocation whose amplitude or bandwidth swings
+        # widely over time can be a transmitter masquerading in a known band
+        if variance["peak_range_db"] >= 20:
+            variance["flag"] = ("amplitude varies >20 dB across sightings — inconsistent "
+                                "with a fixed licensed source; possible intermittent or "
+                                "mobile transmitter in this band")
+        elif bws and max(bws) / max(min(bws), 1) >= 3:
+            variance["flag"] = ("bandwidth varies >3x across sightings — possible second "
+                                "emitter sharing this frequency neighborhood")
+    return {"rows": rows, "variance": variance}
+
+
+# ---------------------------------------------------------------------------
 # Characteristics + descriptions
 # ---------------------------------------------------------------------------
 

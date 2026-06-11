@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS captures (
     id INTEGER PRIMARY KEY,
     session_id INTEGER NOT NULL,
     signal_id INTEGER,           -- originating detection, if any
+    kind TEXT DEFAULT 'zoom',    -- zoom (high-iteration manual) | observation (auto-archived per sweep)
     center_mhz REAL NOT NULL, span_mhz REAL, bw_khz REAL,
     peak_dbm REAL, floor_dbm REAL, persistence REAL,
     room TEXT, module TEXT,
@@ -113,6 +114,13 @@ CREATE TABLE IF NOT EXISTS captures (
     description TEXT DEFAULT ''  -- auto/AI description
 );
 CREATE INDEX IF NOT EXISTS idx_captures_freq ON captures(center_mhz);
+CREATE TABLE IF NOT EXISTS case_files (
+    id INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL,
+    filename TEXT NOT NULL, stored_name TEXT NOT NULL,
+    kind TEXT, size_bytes INTEGER, sha256 TEXT,
+    uploaded_utc REAL, notes TEXT DEFAULT ''
+);
 CREATE TABLE IF NOT EXISTS reports (
     id INTEGER PRIMARY KEY,
     session_id INTEGER NOT NULL,
@@ -130,6 +138,14 @@ class Database:
         os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
         with self._conn() as c:
             c.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self):
+        """Additive column migrations for databases created by older versions."""
+        with self._conn() as c:
+            cols = {r["name"] for r in c.execute("PRAGMA table_info(captures)")}
+            if "kind" not in cols:
+                c.execute("ALTER TABLE captures ADD COLUMN kind TEXT DEFAULT 'zoom'")
 
     def _conn(self):
         conn = sqlite3.connect(self.path, timeout=30)
