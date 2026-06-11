@@ -49,6 +49,37 @@ Continuation brief for a fresh Fable/Claude Code session. Read this first, then 
 
 **P5 ✅ Case-study / device library.** CASE STUDIES tab; entries render in client reports ONLY when the operator attests they are de-identified composites. Both operator composites seeded (household-member consumer device; vehicle GPS/audio kit + phone mirroring). Optional `case_studies` report section in pre- and post-sweep; left OFF for session 16 — per-engagement choice.
 
+## OPERATOR ASKS — 2026-06-11 voice review of the first briefing
+
+Done same day (commit f0b0062): grouped baseline w/ top-5 per category; cellular-carriers
+subsection; **standing rule: internal/config state (NOT_CONFIGURED, "data not available") never
+appears in a client document**; neutral allusion to client-named persons (no names/assessments —
+guardrail intact).
+
+**P6 — Behrens-style report template.** Use
+`_source/Shield Security/Past Clients/Behrens/SSS-2025-iuR-021-FINAL_Behrens_Estate-Security-Review.pdf`
+(37 pp) as the structural baseline for client reports: cover with property photo · executive
+summary · table of contents · scope/confidentiality/methodological limitations · band-by-band
+clearance table (CLEAR/expected per band) · carrier tower density line (per-carrier counts,
+dominant flagged) · risk matrix · countermeasure status table · appendices (camera inventory,
+RF charts, tower detail). Needs: property-photo upload per engagement (report asset), exec-summary
+text from findings, TOC machinery in reportlab.
+
+**P7 — Cell-tower map with sector azimuths over property imagery.** Behrens did this with
+CellMapper screenshots (sector fans + per-cell azimuth like SW 221°). App version: render a map
+figure with tower positions + azimuth wedges aimed relative to the client address. Imagery
+reality check: satellite tops out ~30 cm/px commercial (NAIP free tier ~60 cm) — centimeter-class
+means drone/ground photos, like the Behrens tower photo. If Matt's Google Earth Engine
+subscription is to be used, need its service-account credentials in config; otherwise use the
+property photo + a schematic map. Azimuth data comes with the CellMapper export
+(`tools/cellmapper_capture.js`), not OpenCellID.
+
+**P8 — Configure cellular tower sources (operator action).** OpenCellID needs Matt's free API
+key (opencellid.org → account → API key → paste into `config.yaml` under `api_keys.opencellid`).
+Claude cannot create the account/credentials. Alternative he already uses: export towers from his
+CellMapper session via `tools/cellmapper_capture.js` into `data/cellmapper_towers.json`. Until
+one exists, the carriers section uses the all-national-carriers wording (no counts).
+
 ### Remaining nice-to-haves (not blocking)
 
 - Operator still needs to be walked through generating his first report (everything verified working in the live UI on 2026-06-11).
