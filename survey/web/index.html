@@ -104,9 +104,17 @@ footer .sim { color:var(--red); font-weight:bold; }
 .bigfreq { font-size:22px; color:#fff; text-align:center; }
 .kv { display:grid; grid-template-columns:auto 1fr; gap:4px 18px; font-size:13px; }
 .kv div:nth-child(odd) { color:var(--dim); }
+/* ---- public demo mode ---- */
+#demo-banner { display:none; background:#3b2c10; color:var(--amber); text-align:center;
+  font-size:12.5px; padding:7px 16px; border-bottom:1px solid var(--amber); font-weight:bold; }
+body.demo #demo-banner { display:block; }
+body.demo nav .step[data-view="poi"],
+body.demo #card-casefiles { display:none !important; }
 </style>
 </head>
 <body>
+
+<div id="demo-banner">⚠ DEMO — DeConfliction Systems · simulated, no live hardware. Enter any address to explore the preliminary assessment. Do not enter confidential information.</div>
 
 <header>
   <div class="brand">SHIELD<span>TSCM</span> // SPECTRUM SURVEY</div>
@@ -212,8 +220,8 @@ footer .sim { color:var(--red); font-weight:bold; }
       <button class="btn" id="btn-tech-task-add">ADD</button>
     </div>
   </div>
-  <div class="card">
-    <h3>CASE FILES <span class="tag" style="font-size:11px">background reports, intake docs — stored locally, never shared externally by the app</span></h3>
+  <div class="card" id="card-casefiles">
+    <h3>CASE FILES <span class="tag" style="font-size:11px" id="card-casefiles-tag">background reports, intake docs — stored locally, never shared externally by the app</span></h3>
     <p class="note">⚠ Sensitive PII. These are working files for this engagement only. Consumer
     background data (BeenVerified etc.) is governed by its provider TOS and the FCRA — keep it
     inside its permissible purpose; do not use it for employment/tenancy/credit decisions.</p>

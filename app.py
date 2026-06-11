@@ -30,6 +30,10 @@ def main():
     parser = argparse.ArgumentParser(description="TSCM field spectrum survey")
     parser.add_argument("--simulate", action="store_true",
                         help="use the simulated device (demo only)")
+    parser.add_argument("--demo", action="store_true",
+                        help="PUBLIC DEMO: simulated device, separate empty database, "
+                             "and all PII-bearing features (POI, internal memo, threat "
+                             "analysis, case files) disabled. Safe to expose publicly.")
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
@@ -38,12 +42,18 @@ def main():
                         format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
     cfg = Config(os.path.join(BASE_DIR, "config.yaml"))
-    if args.simulate:
+    demo = args.demo or os.environ.get("DCS_DEMO") == "1"
+    if args.simulate or demo:
         cfg.data["device"]["simulate"] = True
         print("*** SIMULATED DEVICE MODE — demo/diagnostic only, not a real sweep ***")
+    if demo:
+        print("*** PUBLIC DEMO MODE — empty demo DB, PII features disabled ***")
 
-    db = Database(os.path.join(BASE_DIR, "data", "sweeps.db"))
-    app = create_app(db, cfg)
+    # the public demo runs on its own empty database — real client data
+    # (data/sweeps.db) is never exposed
+    db_name = "demo.db" if demo else "sweeps.db"
+    db = Database(os.path.join(BASE_DIR, "data", db_name))
+    app = create_app(db, cfg, demo=demo)
 
     host = cfg.get("app", "host", default="127.0.0.1")
     port = args.port or cfg.get("app", "port", default=8765)

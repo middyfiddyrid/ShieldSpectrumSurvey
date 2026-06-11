@@ -42,13 +42,25 @@ class AppState:
         return self.db.query_one("SELECT * FROM sessions WHERE id=?", (self.session_id,))
 
 
-def create_app(db, cfg) -> Flask:
+def create_app(db, cfg, demo=False) -> Flask:
     app = Flask(__name__, static_folder=None)
     st = AppState(db, cfg)
+    st.demo = demo
     app.config["APP_STATE"] = st
 
     def err(message, code=400):
         return jsonify({"error": str(message)}), code
+
+    # In the PUBLIC DEMO, every feature that touches real client PII is blocked
+    # at the server, not merely hidden in the UI: Persons of Interest, the
+    # internal memo, the multi-AI threat analysis, and case-file upload/serve.
+    DEMO_BLOCKED = ("/api/poi", "/api/report/internal_memo", "/api/analyze",
+                    "/api/case_files", "/case_files")
+
+    @app.before_request
+    def _demo_guard():
+        if st.demo and request.path.startswith(DEMO_BLOCKED):
+            return err("This feature is disabled in the public demo.", 403)
 
     # ---------- static ----------
 
@@ -436,6 +448,7 @@ def create_app(db, cfg) -> Flask:
             "baseline": st.baseline_status,
             "calibration": st.calibration_status,
             "busy": st.controller.busy(),
+            "demo": st.demo,
         })
 
     # ---------- baseline ----------

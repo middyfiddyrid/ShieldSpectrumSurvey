@@ -300,6 +300,11 @@ function dot(id, cls) {
 }
 
 function render(st) {
+  // public demo: flag the body once so CSS hides PII-bearing features
+  if (st.demo && !document.body.classList.contains("demo")) {
+    document.body.classList.add("demo");
+    App.demo = true;
+  }
   // header / footer
   if (st.session) {
     $("hdr-addr").textContent = `#${st.session.id} · ${st.session.address}`;
