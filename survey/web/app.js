@@ -129,6 +129,7 @@ function poiClear() {
   poiSelected = null;
   POI_FIELDS.forEach(f => { $(poiEl[f]).value = f === "status" ? "open"
     : (f.endsWith("_tier") ? "unknown" : ""); });
+  $("poi-named-client").checked = false;
   $("poi-msg").textContent = "";
   $("poi-docs").style.display = "none";
 }
@@ -141,7 +142,7 @@ $("btn-internal-memo").onclick = async () => {
 };
 $("btn-poi-new").onclick = poiClear;
 $("btn-poi-save").onclick = async () => {
-  const body = { id: poiSelected };
+  const body = { id: poiSelected, named_by_client: $("poi-named-client").checked };
   POI_FIELDS.forEach(f => body[f] = $(poiEl[f]).value);
   try {
     const r = await api("/api/poi", body);
@@ -193,6 +194,7 @@ window.poiOpen = (p) => {
   poiSelected = p.id;
   POI_FIELDS.forEach(f => $(poiEl[f]).value = p[f] || (f.endsWith("_tier") ? "unknown" : ""));
   $("poi-status").value = p.status || "open";
+  $("poi-named-client").checked = !!p.named_by_client;
   $("poi-msg").textContent = `editing #${p.id}`;
   loadPoiDocs(p.id);
 };

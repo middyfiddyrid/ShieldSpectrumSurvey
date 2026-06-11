@@ -225,18 +225,21 @@ def create_app(db, cfg) -> Flask:
                        "(profession, credentials, demonstrated skill) — "
                        "tiers without a factual basis aren't recorded")
         vals = {k: body.get(k, "") for k in POI_FIELDS}
+        named = 1 if body.get("named_by_client") else 0
         if body.get("id"):
             sets = ", ".join(f"{k}=?" for k in POI_FIELDS)
-            db.execute(f"UPDATE persons_of_interest SET {sets}, updated_utc=? WHERE id=?",
-                       (*[vals[k] for k in POI_FIELDS], time.time(), body["id"]))
+            db.execute(f"UPDATE persons_of_interest SET {sets}, named_by_client=?, "
+                       "updated_utc=? WHERE id=?",
+                       (*[vals[k] for k in POI_FIELDS], named, time.time(), body["id"]))
             pid = body["id"]
         else:
             cols = ",".join(POI_FIELDS)
             ph = ",".join("?" * len(POI_FIELDS))
             pid = db.execute(
-                f"INSERT INTO persons_of_interest (session_id,{cols},created_utc,updated_utc) "
-                f"VALUES (?,{ph},?,?)",
-                (session["id"], *[vals[k] for k in POI_FIELDS], time.time(), time.time()))
+                f"INSERT INTO persons_of_interest (session_id,{cols},named_by_client,"
+                f"created_utc,updated_utc) VALUES (?,{ph},?,?,?)",
+                (session["id"], *[vals[k] for k in POI_FIELDS], named,
+                 time.time(), time.time()))
             db.execute(
                 "INSERT INTO tech_tasks (session_id,text,done,created_utc) VALUES (?,?,0,?)",
                 (session["id"],

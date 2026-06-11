@@ -145,6 +145,7 @@ CREATE TABLE IF NOT EXISTS persons_of_interest (
     conduct_note TEXT DEFAULT '',      -- documented harassment / litigation / restraining orders
     analyst_notes TEXT DEFAULT '',     -- investigator's own subjective judgment
     opportunity_vectors TEXT DEFAULT '', -- social/institutional areas warranting observation or de-confliction
+    named_by_client INTEGER DEFAULT 0, -- client provided this name -> may appear by name in the client pre-sweep
     status TEXT DEFAULT 'open',        -- cleared | open | concern  (deconfliction state)
     created_utc REAL, updated_utc REAL
 );
@@ -201,6 +202,9 @@ class Database:
             if "opportunity_vectors" not in cols:
                 c.execute("ALTER TABLE persons_of_interest "
                           "ADD COLUMN opportunity_vectors TEXT DEFAULT ''")
+            if "named_by_client" not in cols:
+                c.execute("ALTER TABLE persons_of_interest "
+                          "ADD COLUMN named_by_client INTEGER DEFAULT 0")
 
     def _conn(self):
         conn = sqlite3.connect(self.path, timeout=30)

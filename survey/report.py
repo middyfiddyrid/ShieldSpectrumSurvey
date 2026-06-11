@@ -894,9 +894,19 @@ def generate_presweep_report(db, cfg, session_id: int, reports_dir: str) -> dict
     if eng.get("client_concerns"):
         el.append(Paragraph("Your stated concerns", ss["H1x"]))
         el.append(Paragraph(eng["client_concerns"], ss["Body"]))
+    named = db.query("SELECT name FROM persons_of_interest WHERE session_id=? "
+                     "AND named_by_client=1 ORDER BY name", (session_id,))
     poi_n = db.query_one("SELECT COUNT(*) n FROM persons_of_interest WHERE session_id=?",
                          (session_id,))["n"]
-    if poi_n:
+    if named:
+        names = ", ".join(p["name"] for p in named)
+        el.append(Paragraph(
+            f"The persons you have identified in connection with these concerns — "
+            f"<b>{names}</b> — are assessed under Shield's separate, confidential "
+            "deconfliction process. The purpose of that assessment is to formally rule "
+            "persons out as threat vectors; its working contents are maintained in "
+            "Shield's internal files and are not part of this document.", ss["Body"]))
+    elif poi_n:
         el.append(Paragraph(
             "Persons you have identified in connection with these concerns are assessed "
             "under Shield's separate, confidential deconfliction process. That assessment "
@@ -1013,18 +1023,27 @@ def generate_internal_memo(db, cfg, session_id: int, reports_dir: str) -> dict:
                 Paragraph((p["analyst_notes"] or "")[:160], ss["Cell"])])
         el.append(_table(rows, [1.3 * inch, 0.7 * inch, 0.9 * inch, 1.5 * inch,
                                 1.4 * inch, 1.2 * inch], font_size=7))
-        vectors = [p for p in poi if (p.get("opportunity_vectors") or "").strip()]
-        if vectors:
-            el.append(Paragraph("Opportunity vectors — observation / de-confliction",
-                                ss["H1x"]))
-            el.append(Paragraph(
-                "Social or institutional areas where the person's circumstances intersect "
-                "with the client's — venues that would warrant observation or active "
-                "de-confliction. These are investigative hypotheses about <i>where</i> to "
-                "look, not assertions that anything has occurred there.", ss["Body"]))
-            for p in vectors:
-                el.append(Paragraph(
-                    f"<b>{p['name']}</b>: {p['opportunity_vectors']}", ss["Body"]))
+        el.append(Paragraph("Detailed assessments", ss["H1x"]))
+        el.append(Paragraph(
+            "Full working notes per person — investigative hypotheses, not findings of "
+            "fact. Opportunity vectors are hypotheses about <i>where</i> to look or "
+            "de-conflict, not assertions that anything has occurred there.", ss["Body"]))
+        for p in poi:
+            named = " · named by the client" if p.get("named_by_client") else \
+                " · investigator-identified"
+            el.append(Paragraph(f"<b>{p['name']}</b> — {p['status'].upper()}{named}",
+                                ss["Body"]))
+            for label, key in (("Relationship", "relationship"),
+                               ("Source of facts", "source"),
+                               ("Motive", "motive"),
+                               ("Access", "access_note"),
+                               ("Capability basis", "capability_basis"),
+                               ("Resources", "resources_note"),
+                               ("Documented conduct", "conduct_note"),
+                               ("Analyst judgment", "analyst_notes"),
+                               ("Opportunity vectors", "opportunity_vectors")):
+                if (p.get(key) or "").strip():
+                    el.append(Paragraph(f"<b>{label}:</b> {p[key]}", ss["Body"]))
     else:
         el.append(Paragraph("No persons of interest recorded for this matter.", ss["Body"]))
 
