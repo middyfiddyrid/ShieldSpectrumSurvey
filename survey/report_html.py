@@ -305,9 +305,22 @@ def generate_presweep_html(db, cfg, session_id: int, reports_dir: str) -> dict:
             aerial = _b64(p)
             break
 
+    tony_b64 = ""
+    for fn in ("tony_thurman.jpg", "tony_thurman.jpeg", "tony_thurman.png",
+               "tony.jpg", "tony.png"):
+        p = os.path.join(os.path.dirname(cfg.get("branding", "logo_path", default="")), fn)
+        if p and os.path.exists(p):
+            tony_b64 = _b64(p)
+            break
+
     etype = eng.get("engagement_type", "onsite")
     report_id = f"SHD-{time.strftime('%Y')}-TSCM-{session_id:03d}-PRELIM"
+    n_shield = 1 if options.get("rf_environment") and baseline else 0
+    sec = {"shield": 4 if n_shield else None, "method": 4 + n_shield,
+           "why": 5 + n_shield, "next": 6 + n_shield}
     ctx = {
+        "sec": sec,
+        "tony_b64": tony_b64,
         "year": time.strftime("%Y"),
         "offsite_location": html.escape(eng.get("offsite_location") or ""),
         "scheduling_note": html.escape(eng.get("scheduling_note") or ""),

@@ -188,14 +188,14 @@
   engagement.</p>
 
   {% if shielding %}
-  <h2><span class="secnum">4.</span>RF ENVIRONMENT &amp; SHIELDING ASSESSMENT</h2>
+  <h2><span class="secnum">{{ sec.shield }}.</span>RF ENVIRONMENT &amp; SHIELDING ASSESSMENT</h2>
   {% for para in shielding.paras %}<p>{{ para }}</p>{% endfor %}
   <p class="disc">Disclosure: {{ company }} provides shielding assessment and installation
   services and therefore has a commercial interest in this recommendation. It is offered as
   security guidance, and any decision to proceed is entirely the client's.</p>
   {% endif %}
 
-  <h2><span class="secnum">{{ "5" if shielding else "4" }}.</span>METHODOLOGY — WHAT THE SWEEP WILL DO</h2>
+  <h2><span class="secnum">{{ sec.method }}.</span>METHODOLOGY — WHAT THE SWEEP WILL DO</h2>
   <p>The premises are swept across the full frequency range the analyzer supports, with extra
   dwell time on the bands where surveillance devices commonly operate. An exterior reference
   reading lets us tell a signal that originates inside the premises from the ordinary signals
@@ -220,7 +220,26 @@
     premises is inventoried and reconciled against what you actually own.</li>
   </ul>
 
-  <h2><span class="secnum">{{ "6" if shielding else "5" }}.</span>NEXT STEPS &amp; SCHEDULING</h2>
+  <h2><span class="secnum">{{ sec.why }}.</span>WHY SHIELD IS DIFFERENT</h2>
+  <div style="display:flex;gap:18px;align-items:flex-start;page-break-inside:avoid;">
+    {% if tony_b64 %}
+    <img src="data:image/jpeg;base64,{{ tony_b64 }}"
+         style="width:1.6in;border:1px solid var(--line);display:block;">
+    {% endif %}
+    <div>
+      <p>Shield's technical practice is led by <b>Tony Thurman</b> — a Master's in
+      Electrical Engineering, a career at <b>Bell Laboratories</b>, and former chief
+      executive of Bell Labs' Australian operation.</p>
+      <p>Shield technicians are experts in the <b>applied sciences</b>. They don't just
+      know how to operate the technology — they understand the physics and engineering
+      behind it: what a signal must look like, why a device has to radiate the way it
+      does, and where the laws of physics say it can and cannot hide. That is the
+      difference between running a gadget and conducting a counterintelligence
+      examination.</p>
+    </div>
+  </div>
+
+  <h2><span class="secnum">{{ sec.next }}.</span>NEXT STEPS &amp; SCHEDULING</h2>
   {% if offsite_location %}
   <p><b>Initial meeting (offsite):</b> consistent with counter-surveillance practice, the
   intake conversation is held away from the subject property at a neutral public venue:
@@ -232,9 +251,9 @@
   <p>To confirm a date or ask anything about this briefing, reply by phone or email — no
   detail of this engagement is discussed with anyone but you.</p>
   <div class="callout">
-    <p>Pleased with your result? Ask about our <b>attorney referral process</b> — for matters
-    that call for legal follow-through, we coordinate with counsel including
-    <b>Tony Thurman</b>.</p>
+    <p>Pleased with your result? Ask <b>Tony Thurman</b> about our <b>attorney referral
+    process</b> — for matters that call for legal follow-through, we can introduce you to
+    counsel we work with.</p>
   </div>
 
   <div class="pagebreak"></div>
