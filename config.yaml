@@ -16,6 +16,12 @@ api_keys:
   # Anthropic key enables AI signal descriptions in the wiki (numeric signal
   # profile only is sent — never client, address, or room data)
   anthropic: ''
+  # Multi-AI threat-vector analysis (POI tab -> ANALYZE). Each engine with a
+  # key contributes a section; the packet sent out is DE-IDENTIFIED.
+  openai: ''
+  xai: ''
+  deepseek: ''
+  gemini: ''
 uls:
   extract_dir: ''
   stale_days: 30

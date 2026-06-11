@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ report_id }}</title>
+<style>
+  :root{
+    --navy:#002e60; --navy2:#001f42; --blue:#00559d; --accent:#40a1f3;
+    --ink:#2a2f36; --grey:#5c6670; --line:#e3e7ec; --bg:#f3f6f9;
+    --red:#8c2f39;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+  @page{size:letter;margin:0.7in 0 0.9in;}
+  body{font-family:"Open Sans","Segoe UI",Arial,Helvetica,sans-serif;color:var(--ink);
+       line-height:1.55;font-size:10pt;}
+  .sheet{padding:0 0.8in;}
+  h2{color:var(--navy);font-size:13.5pt;font-weight:800;margin:24px 0 10px;
+     border-bottom:2px solid var(--navy);padding-bottom:5px;}
+  h3{color:var(--blue);font-size:10.5pt;font-weight:800;margin:14px 0 5px;}
+  p{margin:0 0 8px;}
+  .small{font-size:8.5pt;color:var(--grey);}
+  .mono{font-family:Consolas,monospace;font-size:8pt;background:var(--bg);
+        padding:10px;overflow:hidden;white-space:pre-wrap;margin:0 0 10px;
+        border-left:3px solid var(--line);}
+  ul.terms{list-style:none;margin:4px 0 10px;}
+  ul.terms li{padding:3px 0 3px 18px;position:relative;}
+  ul.terms li:before{content:"";position:absolute;left:0;top:10px;width:6px;height:6px;
+                     background:var(--accent);border-radius:2px;}
+  table{width:100%;border-collapse:collapse;font-size:9pt;margin:6px 0 12px;}
+  th{text-align:left;color:var(--navy);font-weight:800;font-size:8pt;letter-spacing:.8px;
+     text-transform:uppercase;border-bottom:2px solid var(--navy);padding:6px 10px 6px 0;}
+  td{padding:6px 10px 6px 0;border-bottom:1px solid var(--line);vertical-align:top;}
+
+  .memohead{display:flex;justify-content:space-between;align-items:flex-start;}
+  .memohead img{height:54px;}
+  .classbar{background:var(--red);color:#fff;font-weight:800;font-size:9pt;
+            letter-spacing:2px;text-align:center;padding:7px 0;margin:14px 0 16px;}
+  .meta{font-size:9.5pt;line-height:1.8;}
+  .meta b{color:var(--navy);letter-spacing:.4px;}
+  .engine{background:var(--bg);border-left:4px solid var(--navy);padding:6px 12px;
+          font-weight:800;color:var(--navy);font-size:10.5pt;margin:22px 0 10px;
+          page-break-after:avoid;}
+  .disc{font-size:8.5pt;color:var(--grey);font-style:italic;}
+  tr{page-break-inside:avoid;}
+</style>
+</head>
+<body>
+<div class="sheet">
+
+  <div class="memohead">
+    {% if logo_b64 %}<img src="data:image/png;base64,{{ logo_b64 }}">{% endif %}
+    <div class="meta" style="text-align:right">
+      <b>INTERNAL MEMORANDUM</b><br>
+      <b>RE</b>&nbsp; Threat-vector analysis — {{ client_name }}<br>
+      <b>MATTER</b>&nbsp; {{ address }}<br>
+      <b>DATE</b>&nbsp; {{ date_long }}<br>
+      <b>REPORT ID</b>&nbsp; {{ report_id }}
+    </div>
+  </div>
+  <div class="classbar">CONFIDENTIAL — INTERNAL MEMORANDUM — NOT FOR CLIENT DISTRIBUTION</div>
+
+  <p class="disc">Multi-engine analysis: the de-identified case packet below was analyzed
+  independently by each contributing AI engine; each chose its own presentation. Contents
+  are investigative hypotheses, not findings of fact; not a consumer report; not a basis
+  for adverse action against any person named. External engines received NO names,
+  addresses, or contact data — identities are re-attached only in this document.</p>
+
+  <h2>IDENTITY LEGEND (this document only)</h2>
+  <table>
+    <tr><th>Packet designation</th><th>Person</th></tr>
+    {% for l in legend %}<tr><td>{{ l.tag }}</td><td>{{ l.name }}</td></tr>{% endfor %}
+  </table>
+
+  {% for s in sections %}
+  <div class="engine">ANALYSIS — {{ s.engine }}</div>
+  {{ s.body }}
+  {% endfor %}
+
+  {% if errors %}
+  <h2>ENGINE ERRORS</h2>
+  {% for e in errors %}<p class="small">{{ e.engine }}: {{ e.err }}</p>{% endfor %}
+  {% endif %}
+  {% if not_configured %}
+  <p class="small">Engines not yet configured (no API key): {{ not_configured | join(", ") }}.</p>
+  {% endif %}
+
+  <p class="disc" style="margin-top:24px">© {{ year }} {{ company }}. All rights reserved.
+  Confidential internal work product; unauthorized reproduction, disclosure, or reverse
+  engineering prohibited.</p>
+</div>
+</body>
+</html>

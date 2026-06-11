@@ -275,6 +275,22 @@ def create_app(db, cfg) -> Flask:
         db.execute("DELETE FROM persons_of_interest WHERE id=?", (pid,))
         return jsonify({"deleted": True})
 
+    @app.post("/api/analyze/threat_vectors")
+    def analyze_threat_vectors():
+        from .analyze import run_analysis
+        session = st.session()
+        if not session:
+            return err("no session")
+        body = request.get_json(force=True) or {}
+        try:
+            result = run_analysis(db, cfg, session["id"], st.reports_dir,
+                                  local_contributions=body.get("local") or None)
+        except Exception as e:  # noqa: BLE001
+            log.exception("threat-vector analysis failed")
+            return err(e, 500)
+        result["filename"] = os.path.basename(result["path"])
+        return jsonify(result)
+
     # ---------- case files (session attachments) ----------
 
     @app.post("/api/case_files")

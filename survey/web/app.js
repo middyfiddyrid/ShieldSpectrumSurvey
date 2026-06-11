@@ -145,6 +145,16 @@ $("btn-internal-memo").onclick = async () => {
     showReportLink("memo-msg", r, "confidential internal memo");
   } catch (e) { $("memo-msg").textContent = "FAILED: " + e.message; }
 };
+$("btn-analyze").onclick = async () => {
+  $("btn-analyze").disabled = true;
+  $("memo-msg").textContent = "analyzing — fanning out to configured AI engines (this can take a minute)…";
+  try {
+    const r = await api("/api/analyze/threat_vectors", {});
+    showReportLink("memo-msg", r, `threat-vector memorandum (${r.engines.join(", ")})`);
+    loadReports();
+  } catch (e) { $("memo-msg").textContent = "FAILED: " + e.message; }
+  $("btn-analyze").disabled = false;
+};
 $("btn-poi-new").onclick = poiClear;
 $("btn-poi-save").onclick = async () => {
   const body = { id: poiSelected, named_by_client: $("poi-named-client").checked };
