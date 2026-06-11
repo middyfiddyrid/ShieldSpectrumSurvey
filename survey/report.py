@@ -256,7 +256,7 @@ def _section_expected_environment(el, ss, baseline, sources):
     for name, rows in broadcast:
         nearest = rows[0]["distance_mi"] if rows and rows[0].get("distance_mi") is not None \
             else None
-        sum_rows.append([name, f"{len(rows)} licensed stations",
+        sum_rows.append([name, f"{len(rows)} licensed station{'s' if len(rows) != 1 else ''}",
                          f"{nearest:.1f} mi" if nearest is not None else "—"])
     sum_rows.append(["Cellular", "all national carriers — detailed below", ""])
     sum_rows.append([Paragraph("Other allocations (aviation, amateur, ISM/Wi-Fi, "
@@ -268,7 +268,9 @@ def _section_expected_environment(el, ss, baseline, sources):
     for name, rows in broadcast:
         if not rows:
             continue
-        el.append(Paragraph(f"<b>{name} — closest of {len(rows)} stations</b>", ss["Body"]))
+        label = (f"{name} — {len(rows)} station" if len(rows) == 1
+                 else f"{name} — closest of {len(rows)} stations")
+        el.append(Paragraph(f"<b>{label}</b>", ss["Body"]))
         t_rows = [["Callsign", "Frequency", "Distance (mi)"]]
         for r in rows[:5]:
             t_rows.append([r.get("callsign") or r.get("label") or "",
