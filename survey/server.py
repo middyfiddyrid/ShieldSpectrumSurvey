@@ -97,6 +97,97 @@ def create_app(db, cfg) -> Flask:
         st.session_id = row["id"]
         return jsonify({"session_id": st.session_id})
 
+    # ---------- engagement / pre-sweep workflow ----------
+
+    DEFAULT_TECH_TASKS = [
+        "Confirm engagement type and terms with the client; collect deposit if remote/monitoring.",
+        "Record the client's stated concerns and any persons the CLIENT names "
+        "(Persons of Interest tab — internal only).",
+        "Upload only client-authorized background reports to Case Files; keep inside "
+        "permissible-purpose / provider-TOS limits (no dragnet on uninvolved third parties).",
+        "Build the expected-spectrum baseline for the address.",
+        "Remote engagements: ship technical package + setup instructions after deposit; "
+        "arrange device return or set up monitoring billing.",
+    ]
+
+    @app.get("/api/engagement")
+    def engagement_get():
+        session = st.session()
+        if not session:
+            return err("no session")
+        row = db.query_one("SELECT * FROM engagement WHERE session_id=?", (session["id"],))
+        return jsonify(row or {"engagement_type": "onsite", "status": "intake",
+                               "client_name": "", "client_contact": "",
+                               "client_concerns": ""})
+
+    @app.post("/api/engagement")
+    def engagement_save():
+        session = st.session()
+        if not session:
+            return err("create a session first")
+        b = request.get_json(force=True)
+        db.execute(
+            "INSERT INTO engagement (session_id,engagement_type,client_name,client_contact,"
+            "client_concerns,status,updated_utc) VALUES (?,?,?,?,?,?,?) "
+            "ON CONFLICT(session_id) DO UPDATE SET engagement_type=excluded.engagement_type,"
+            "client_name=excluded.client_name,client_contact=excluded.client_contact,"
+            "client_concerns=excluded.client_concerns,status=excluded.status,"
+            "updated_utc=excluded.updated_utc",
+            (session["id"], b.get("engagement_type", "onsite"), b.get("client_name", ""),
+             b.get("client_contact", ""), b.get("client_concerns", ""),
+             b.get("status", "intake"), time.time()))
+        # seed technician tasks on first save
+        existing = db.query_one("SELECT COUNT(*) n FROM tech_tasks WHERE session_id=?",
+                                (session["id"],))
+        if not existing["n"]:
+            for t in DEFAULT_TECH_TASKS:
+                db.execute("INSERT INTO tech_tasks (session_id,text,done,created_utc) "
+                           "VALUES (?,?,0,?)", (session["id"], t, time.time()))
+        return jsonify({"saved": True})
+
+    @app.get("/api/tech_tasks")
+    def tech_tasks_list():
+        session = st.session()
+        if not session:
+            return err("no session")
+        return jsonify(db.query("SELECT * FROM tech_tasks WHERE session_id=? "
+                                "ORDER BY id", (session["id"],)))
+
+    @app.post("/api/tech_tasks")
+    def tech_task_add():
+        session = st.session()
+        if not session:
+            return err("no session")
+        text = (request.get_json(force=True).get("text") or "").strip()
+        if not text:
+            return err("task text required")
+        tid = db.execute("INSERT INTO tech_tasks (session_id,text,done,created_utc) "
+                         "VALUES (?,?,0,?)", (session["id"], text, time.time()))
+        return jsonify({"id": tid})
+
+    @app.post("/api/tech_tasks/<int:tid>/toggle")
+    def tech_task_toggle(tid):
+        row = db.query_one("SELECT done FROM tech_tasks WHERE id=?", (tid,))
+        if not row:
+            return err("no such task", 404)
+        db.execute("UPDATE tech_tasks SET done=? WHERE id=?",
+                   (0 if row["done"] else 1, tid))
+        return jsonify({"toggled": True})
+
+    @app.post("/api/report/presweep")
+    def presweep_report():
+        from .report import generate_presweep_report
+        session = st.session()
+        if not session:
+            return err("no session")
+        try:
+            result = generate_presweep_report(db, cfg, session["id"], st.reports_dir)
+        except Exception as e:  # noqa: BLE001
+            log.exception("pre-sweep report failed")
+            return err(e, 500)
+        result["filename"] = os.path.basename(result["path"])
+        return jsonify(result)
+
     # ---------- persons of interest / deconfliction (internal only) ----------
 
     POI_FIELDS = ("name", "aliases", "relationship", "source", "motive",

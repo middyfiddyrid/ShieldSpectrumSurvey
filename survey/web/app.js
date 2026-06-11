@@ -41,9 +41,59 @@ function show(view) {
   if (view === "directional") loadDirectional();
   if (view === "inventory") loadInventory();
   if (view === "wiki") loadWiki();
-  if (view === "session") loadCaseFiles();
+  if (view === "session") { loadCaseFiles(); loadEngagement(); loadTechTasks(); }
   if (view === "poi") loadPoi();
 }
+
+/* ---------- engagement / pre-sweep ---------- */
+async function loadEngagement() {
+  try {
+    const e = await api("/api/engagement");
+    $("eng-type").value = e.engagement_type || "onsite";
+    $("eng-client").value = e.client_name || "";
+    $("eng-contact").value = e.client_contact || "";
+    $("eng-concerns").value = e.client_concerns || "";
+  } catch (err) {}
+}
+$("btn-eng-save").onclick = async () => {
+  try {
+    await api("/api/engagement", {
+      engagement_type: $("eng-type").value, client_name: $("eng-client").value,
+      client_contact: $("eng-contact").value, client_concerns: $("eng-concerns").value });
+    $("eng-msg").textContent = "saved — technician tasks seeded below";
+    loadTechTasks();
+  } catch (e) { $("eng-msg").textContent = "FAILED: " + e.message; }
+};
+$("btn-presweep").onclick = async () => {
+  $("eng-msg").textContent = "rendering…";
+  try {
+    await api("/api/engagement", {
+      engagement_type: $("eng-type").value, client_name: $("eng-client").value,
+      client_contact: $("eng-contact").value, client_concerns: $("eng-concerns").value });
+    const r = await api("/api/report/presweep", {});
+    window.open("/reports/" + encodeURIComponent(r.filename), "_blank");
+    $("eng-msg").textContent = "pre-sweep briefing generated";
+    loadTechTasks();
+  } catch (e) { $("eng-msg").textContent = "FAILED: " + e.message; }
+};
+async function loadTechTasks() {
+  try {
+    const rows = await api("/api/tech_tasks");
+    $("tbl-tech-tasks").innerHTML = rows.map(t =>
+      `<tr><td style="width:24px"><input type="checkbox" ${t.done ? "checked" : ""} ` +
+      `onchange="techToggle(${t.id})"></td>` +
+      `<td style="${t.done ? "text-decoration:line-through; color:var(--dim)" : ""}">${esc(t.text)}</td></tr>`
+    ).join("") || "<tr><td>save the engagement to seed the technician checklist</td></tr>";
+  } catch (e) {}
+}
+window.techToggle = (id) => api(`/api/tech_tasks/${id}/toggle`, {});
+$("btn-tech-task-add").onclick = async () => {
+  const text = $("tech-task-input").value.trim();
+  if (!text) return;
+  await api("/api/tech_tasks", { text });
+  $("tech-task-input").value = "";
+  loadTechTasks();
+};
 
 /* ---------- persons of interest / deconfliction ---------- */
 const POI_FIELDS = ["name", "aliases", "relationship", "source", "motive",

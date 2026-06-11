@@ -114,6 +114,18 @@ CREATE TABLE IF NOT EXISTS captures (
     description TEXT DEFAULT ''  -- auto/AI description
 );
 CREATE INDEX IF NOT EXISTS idx_captures_freq ON captures(center_mhz);
+CREATE TABLE IF NOT EXISTS engagement (
+    session_id INTEGER PRIMARY KEY,
+    engagement_type TEXT DEFAULT 'onsite',   -- onsite | remote | monitoring
+    client_name TEXT DEFAULT '', client_contact TEXT DEFAULT '',
+    client_concerns TEXT DEFAULT '',          -- the client's OWN stated concerns (client-facing)
+    status TEXT DEFAULT 'intake',
+    updated_utc REAL
+);
+CREATE TABLE IF NOT EXISTS tech_tasks (
+    id INTEGER PRIMARY KEY, session_id INTEGER NOT NULL,
+    text TEXT NOT NULL, done INTEGER DEFAULT 0, created_utc REAL
+);
 CREATE TABLE IF NOT EXISTS persons_of_interest (
     id INTEGER PRIMARY KEY,
     session_id INTEGER NOT NULL,

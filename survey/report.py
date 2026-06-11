@@ -454,6 +454,141 @@ def swept_range_label(sweeps: list[dict], device: dict | None) -> str:
     return label
 
 
+ENGAGEMENT_TERMS = {
+    "onsite": [
+        "On-site engagement: a Shield technician performs the full sweep at the premises on "
+        "the scheduled date.",
+    ],
+    "remote": [
+        "Remote engagement: upon receipt of the agreed deposit, Shield ships a pre-configured "
+        "technical package (spectrum analyzer + antennas) with step-by-step setup instructions "
+        "so you can run the guided sweep yourself.",
+        "After your sweep is complete and you are satisfied with the results, return the device "
+        "to Shield using the enclosed prepaid materials. The deposit is applied per the "
+        "engagement agreement.",
+    ],
+    "monitoring": [
+        "Continuous-monitoring engagement: upon receipt of the agreed deposit, Shield ships a "
+        "pre-configured monitoring package with setup instructions.",
+        "Keep the device in place for ongoing monitoring; Shield bills monthly for the duration. "
+        "Return the device when you choose to end monitoring.",
+    ],
+}
+
+
+def generate_presweep_report(db, cfg, session_id: int, reports_dir: str) -> dict:
+    """Client-facing PRE-sweep report: expected RF environment + methodology +
+    engagement terms + the client's own stated concerns. Deliberately excludes
+    all internal assessment material (Persons of Interest, background, capability
+    notes) — those never go to the client."""
+    ss = _styles()
+    session = db.query_one("SELECT * FROM sessions WHERE id=?", (session_id,))
+    if not session:
+        raise ValueError("no such session")
+    eng = db.query_one("SELECT * FROM engagement WHERE session_id=?", (session_id,)) or {}
+    baseline = db.query("SELECT * FROM baseline WHERE session_id=? ORDER BY freq_low_mhz",
+                        (session_id,))
+    sources = db.query("SELECT * FROM source_status WHERE session_id=?", (session_id,))
+    etype = eng.get("engagement_type", "onsite")
+    company = cfg.get("branding", "company", default="")
+
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    os.makedirs(reports_dir, exist_ok=True)
+    path = os.path.join(reports_dir, f"session{session_id}_presweep_{ts}.pdf")
+    doc = SimpleDocTemplate(path, pagesize=letter, topMargin=0.7 * inch,
+                            bottomMargin=0.8 * inch, leftMargin=0.75 * inch,
+                            rightMargin=0.75 * inch,
+                            title=f"Pre-Sweep Briefing — {session['address']}")
+    el = []
+    logo = cfg.get("branding", "logo_path", default="")
+    if logo and os.path.exists(logo):
+        try:
+            el.append(Image(logo, width=2.2 * inch, height=0.9 * inch, kind="proportional"))
+            el.append(Spacer(1, 10))
+        except Exception:  # noqa: BLE001
+            pass
+    el.append(Paragraph(company or "Shield TSCM", ss["Cover"]))
+    el.append(Paragraph("Pre-Sweep Briefing — Technical Surveillance Counter-Measures",
+                        ss["Body"]))
+    el.append(Spacer(1, 14))
+    cover = [["Prepared for", eng.get("client_name") or "—"],
+             ["Location", session["address"]],
+             ["Date", time.strftime("%B %d, %Y")],
+             ["Engagement", etype.capitalize()]]
+    t = Table(cover, colWidths=[2.0 * inch, 5.0 * inch])
+    t.setStyle(TableStyle([("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+                           ("FONTSIZE", (0, 0), (-1, -1), 10),
+                           ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+                           ("LINEBELOW", (0, 0), (-1, -1), 0.4, colors.HexColor("#cccccc"))]))
+    el.append(t)
+    el.append(Spacer(1, 14))
+
+    el.append(Paragraph("What this briefing is", ss["H1x"]))
+    el.append(Paragraph(
+        "Before any sweep, Shield assembles a database-verified picture of every radio signal "
+        "that is <i>expected</i> at your location — licensed broadcast stations, public-safety "
+        "and land-mobile systems, cellular infrastructure, and the national frequency "
+        "allocations. This briefing shows you that expected environment up front. During the "
+        "sweep, anything we detect that cannot be matched to this known picture becomes a "
+        "candidate for physical investigation. Knowing the baseline in advance is what lets us "
+        "separate the ordinary radio noise of your neighborhood from a device that does not "
+        "belong.", ss["Body"]))
+
+    el.append(Paragraph("Engagement terms", ss["H1x"]))
+    for line in ENGAGEMENT_TERMS.get(etype, ENGAGEMENT_TERMS["onsite"]):
+        el.append(Paragraph("•  " + line, ss["Body"]))
+
+    if eng.get("client_concerns"):
+        el.append(Paragraph("Your stated concerns", ss["H1x"]))
+        el.append(Paragraph(eng["client_concerns"], ss["Body"]))
+
+    el.append(Paragraph("Expected RF Environment at Your Location", ss["H1x"]))
+    if sources:
+        src_data = [["Source", "Status", "Entries"]]
+        for s in sources:
+            src_data.append([s["source"], s["status"].upper(), str(s["count"] or 0)])
+        el.append(_table(src_data, [2.2 * inch, 1.4 * inch, 1.0 * inch]))
+        el.append(Spacer(1, 8))
+    if baseline:
+        hi = max((r["freq_high_mhz"] for r in baseline), default=6100.0)
+        el.append(SpectrumStrip(baseline, [], 0.0, hi))
+        el.append(Spacer(1, 6))
+        rows = [["Frequency", "Service", "Callsign / Label", "Dist (mi)", "Source"]]
+        for r in baseline[:120]:
+            f = _fmt_freq(r["freq_low_mhz"]) if r["freq_low_mhz"] == r["freq_high_mhz"] \
+                else f"{_fmt_freq(r['freq_low_mhz'])} – {_fmt_freq(r['freq_high_mhz'])}"
+            rows.append([Paragraph(f, ss["Cell"]), r["service"] or "",
+                         Paragraph((r["callsign"] or r["label"] or "")[:46], ss["Cell"]),
+                         f"{r['distance_mi']:.1f}" if r["distance_mi"] is not None else "",
+                         r["source"]])
+        el.append(_table(rows, [1.35 * inch, 0.7 * inch, 2.3 * inch, 0.7 * inch, 1.0 * inch]))
+        if len(baseline) > 120:
+            el.append(Paragraph(f"…and {len(baseline) - 120} more expected allocations.",
+                                ss["Cell"]))
+    else:
+        el.append(Paragraph("Baseline not yet built for this address — build it before "
+                            "issuing the briefing.", ss["Body"]))
+
+    el.append(Paragraph("Methodology (what the sweep will do)", ss["H1x"]))
+    for para in (
+        "The premises are swept across the full frequency range the analyzer supports, with "
+        "extra dwell time on the bands where surveillance devices commonly operate. An exterior "
+        "reference reading lets us tell a signal that originates inside your premises from the "
+        "ordinary signals present everywhere in the area.",
+        "Every detected signal is matched against the expected environment above and classified. "
+        "Signals that cannot be accounted for are localized room-by-room and, where warranted, "
+        "hunted with a directional antenna. You receive a final report mirroring exactly what is "
+        "found on site. This survey is receive-only; nothing is transmitted.",
+    ):
+        el.append(Paragraph(para, ss["Body"]))
+
+    cb = _watermark_and_footer(False, company)
+    doc.build(el, onFirstPage=cb, onLaterPages=cb)
+    db.execute("INSERT INTO reports (session_id,path,kind,generated_utc) VALUES (?,?,?,?)",
+               (session_id, path, "PRESWEEP", time.time()))
+    return {"path": path, "kind": "PRESWEEP"}
+
+
 def DeviceRange(device: dict) -> str:
     mods = device.get("modules") or []
     if not mods:
