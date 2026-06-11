@@ -313,6 +313,68 @@ def create_app(db, cfg) -> Flask:
         return jsonify(db.query("SELECT * FROM directional WHERE session_id=? "
                                 "ORDER BY ts_utc", (session["id"],)))
 
+    # ---------- community / Discord ----------
+
+    def _sanitized_anomaly_lines(session_id, limit=15):
+        """Anomaly summary safe to share outside the engagement: frequencies and
+        signal characteristics ONLY — never the address, client, operator, or
+        room names."""
+        rows = db.query(
+            "SELECT * FROM signals WHERE session_id=? AND phase='interior' AND "
+            "(classification='UNVERIFIED' OR caution=1) ORDER BY anomaly_score DESC",
+            (session_id,))
+        kept = []
+        for r in rows:
+            if not any(abs(r["center_mhz"] - k["center_mhz"]) <= 0.25 for k in kept):
+                kept.append(r)
+        lines = []
+        for r in kept[:limit]:
+            f = f"{r['center_mhz']:.4f} MHz" if r["center_mhz"] < 1000 \
+                else f"{r['center_mhz'] / 1000:.4f} GHz"
+            lines.append(
+                f"• {f} — peak {r['peak_dbm']:.0f} dBm, bw ~{(r['bw_khz'] or 0):.0f} kHz, "
+                f"persistence {(r['persistence'] or 0) * 100:.0f}%, {r['classification']}"
+                + (f" ({(r['match_reason'] or '')[:90]})" if r["match_reason"] else ""))
+        return lines, len(kept)
+
+    @app.get("/api/discord/preview")
+    def discord_preview():
+        session = st.session()
+        if not session:
+            return err("no session")
+        lines, total = _sanitized_anomaly_lines(session["id"])
+        configured = bool(cfg.get("integrations", "discord_webhook", default=""))
+        return jsonify({"lines": lines, "total": total, "configured": configured})
+
+    @app.post("/api/discord/post")
+    def discord_post():
+        import requests as _rq
+        session = st.session()
+        if not session:
+            return err("no session")
+        webhook = cfg.get("integrations", "discord_webhook", default="")
+        if not webhook:
+            return err("No Discord webhook configured — create one in your TSCM "
+                       "community server (channel settings → Integrations → Webhooks) "
+                       "and set integrations.discord_webhook in config.yaml")
+        body = request.get_json(force=True)
+        lines, total = _sanitized_anomaly_lines(session["id"])
+        if not lines:
+            return err("no anomalies to post")
+        note = (body.get("note") or "").strip()[:300]
+        content = ("**Signal ID help requested** (sweep details withheld)\n"
+                   + (note + "\n" if note else "")
+                   + "\n".join(lines)
+                   + (f"\n…and {total - len(lines)} more." if total > len(lines) else ""))
+        try:
+            r = _rq.post(webhook, json={"content": content[:1900],
+                                        "username": "Shield Spectrum Survey"},
+                         timeout=20)
+            r.raise_for_status()
+        except Exception as e:  # noqa: BLE001
+            return err(f"Discord post failed: {e}", 502)
+        return jsonify({"posted": True, "anomalies": len(lines)})
+
     # ---------- wireless inventory ----------
 
     @app.post("/api/inventory/scan")

@@ -299,6 +299,10 @@ footer .sim { color:var(--red); font-weight:bold; }
   <h2>RESULTS <span class="tag">anomalies ranked by score</span></h2>
   <div class="card">
     <h3>ANOMALIES — could NOT be verified against any licensed/known source</h3>
+    <div class="row">
+      <button class="btn" id="btn-discord">ASK COMMUNITY (Discord, sanitized)</button>
+      <span class="note" id="discord-msg"></span>
+    </div>
     <div class="scroll" style="max-height:340px"><table id="tbl-anomalies"></table></div>
   </div>
   <div class="card">
@@ -380,7 +384,8 @@ footer .sim { color:var(--red); font-weight:bold; }
   <div style="width:70%"><div class="progress"><div id="sweep-bar"></div></div></div>
   <div class="sub" id="sweep-overlay-detail"></div>
   <canvas id="livechart" style="width:70%"></canvas>
-  <div class="scroll" style="width:70%; max-height:170px; background:var(--panel)">
+  <canvas id="waterfall" style="width:70%; height:120px; background:#000208; border:1px solid var(--line)"></canvas>
+  <div class="scroll" style="width:70%; max-height:150px; background:var(--panel)">
     <table id="tbl-live-ledger"></table>
   </div>
   <div class="row">

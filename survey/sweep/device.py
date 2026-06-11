@@ -304,11 +304,12 @@ class RawRFEDevice(BaseDevice):
         exp = MODEL_NAMES.get(exp_code, f"code{exp_code}")
         self.info.firmware = firmware
         self.info.model = f"{main}+{exp}" if exp_code != 255 else main
-        # mainboard = RIGHT SMA, expansion = LEFT SMA on dual-port units
+        # Port mapping confirmed on the physical 6G Combo PLUS (Slim):
+        # mainboard (WSUB1G_PLUS) = LEFT SMA, expansion (6G_PLUS) = RIGHT SMA.
         self.info.modules = []
-        self.info.modules.append(ModuleInfo("right", main, 0.0, 0.0))
+        self.info.modules.append(ModuleInfo("left", main, 0.0, 0.0))
         if exp_code != 255:
-            self.info.modules.append(ModuleInfo("left", exp, 0.0, 0.0))
+            self.info.modules.append(ModuleInfo("right", exp, 0.0, 0.0))
         return True
 
     def _parse_config(self, line: bytes) -> bool:
@@ -325,7 +326,7 @@ class RawRFEDevice(BaseDevice):
         except (ValueError, IndexError):
             return False
         self._current_config = cfg
-        self._active_side = "left" if cfg["expansion_active"] else "right"
+        self._active_side = "right" if cfg["expansion_active"] else "left"
         for m in self.info.modules:
             if m.side == self._active_side:
                 m.min_mhz = cfg["min_khz"] / 1000.0
@@ -336,7 +337,7 @@ class RawRFEDevice(BaseDevice):
         return True
 
     def select_module(self, side: str):
-        """CM<0> = mainboard (RIGHT SMA), CM<1> = expansion (LEFT SMA).
+        """CM<0> = mainboard (LEFT SMA), CM<1> = expansion (RIGHT SMA).
         Requesting the already-active module emits no new config line, so that
         case is confirmed with a plain config request instead of waiting on a
         switch event that will never come."""
@@ -345,7 +346,7 @@ class RawRFEDevice(BaseDevice):
             self._await_config_line(5.0)
             if self._active_side == side:
                 return
-        want_expansion = (side == "left")
+        want_expansion = (side == "right")
         self._send("CM" + ("\x01" if want_expansion else "\x00"))
         t_end = time.time() + 14.0
         while time.time() < t_end:
@@ -483,16 +484,17 @@ class OfficialRFEDevice(BaseDevice):
         self.info.firmware = str(getattr(self.rfe, "RFExplorerFirmwareDetected", "unknown"))
         main_min = getattr(self.rfe, "MinFreqMHZ", 0.0)
         main_max = getattr(self.rfe, "MaxFreqMHZ", 0.0)
-        self.info.modules = [ModuleInfo("right", self.info.model, main_min, main_max)]
+        # mainboard = LEFT SMA, expansion = RIGHT SMA (confirmed on physical unit)
+        self.info.modules = [ModuleInfo("left", self.info.model, main_min, main_max)]
         if getattr(self.rfe, "ExpansionBoardActive", False) or \
                 getattr(self.rfe, "ExpansionBoardModel", None):
             self.info.modules.append(ModuleInfo(
-                "left", str(getattr(self.rfe, "ExpansionBoardModel", "expansion")), 0.0, 0.0))
+                "right", str(getattr(self.rfe, "ExpansionBoardModel", "expansion")), 0.0, 0.0))
         self.info.check_expected()
         return self.info
 
     def select_module(self, side: str):
-        if side == "left":
+        if side == "right":
             self.rfe.SendCommand_EnableExpansion() if hasattr(self.rfe, "SendCommand_EnableExpansion") \
                 else self.rfe.SendCommand("CM\x01")
         else:

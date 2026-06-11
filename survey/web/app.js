@@ -115,7 +115,10 @@ function render(st) {
     const eta = st.sweep.eta_seconds || 0;
     $("sweep-overlay-eta").textContent =
       `${st.sweep.percent || 0}%  ·  ETA ${Math.floor(eta / 60)}m ${eta % 60}s`;
-    if (st.sweep.live_trace) drawTrace($("livechart"), st.sweep.live_trace);
+    if (st.sweep.live_trace) {
+      drawTrace($("livechart"), st.sweep.live_trace);
+      pushWaterfall($("waterfall"), st.sweep.live_trace);
+    }
     updateLiveLedger(st.sweep.sweep_id);
   } else if (!st.sweep.running) {
     so.classList.remove("show");
@@ -141,50 +144,110 @@ function render(st) {
   if (st.calibration.rows) renderCalRows(st.calibration);
 }
 
-/* ---------- canvas traces ---------- */
+/* ---------- canvas traces (RF Explorer for Windows style) ---------- */
 function drawTrace(canvas, t) {
-  /* draws up to three traces at once, RF-Explorer-for-Windows style:
-     realtime (cyan), running average (green), max-hold (amber) */
+  /* three traces drawn together: realtime (green, filled), average (cyan),
+     max-hold (yellow) on a black scope grid — RF Explorer for Windows look */
   const ctx = canvas.getContext("2d");
   const W = canvas.width = canvas.clientWidth || 800;
   const H = canvas.height = canvas.clientHeight || 230;
-  ctx.fillStyle = "#0d1319"; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = "#000208"; ctx.fillRect(0, 0, W, H);
   const n = (t.amps || []).length;
   if (!n) return;
-  const aMin = -115, aMax = -20;
-  ctx.strokeStyle = "#1f2a37";
-  for (let g = -110; g <= -30; g += 20) {
-    const y = H - (g - aMin) / (aMax - aMin) * H;
-    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
-    ctx.fillStyle = "#42506b"; ctx.font = "9px monospace"; ctx.fillText(g + "dBm", 4, y - 2);
+  const aMin = -120, aMax = -10;
+  const Y = v => H - (Math.max(aMin, Math.min(aMax, v)) - aMin) / (aMax - aMin) * H;
+  // dotted scope grid
+  ctx.setLineDash([2, 4]); ctx.strokeStyle = "#27313f"; ctx.lineWidth = 1;
+  for (let g = -110; g <= -20; g += 10) {
+    ctx.beginPath(); ctx.moveTo(0, Y(g)); ctx.lineTo(W, Y(g)); ctx.stroke();
+  }
+  for (let i = 1; i < 10; i++) {
+    const x = W * i / 10;
+    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  for (let g = -110; g <= -20; g += 20) {
+    ctx.fillStyle = "#5a6a80"; ctx.font = "9px monospace";
+    ctx.fillText(g + " dBm", 4, Y(g) - 2);
   }
   const plot = (arr, color, width) => {
     if (!arr || arr.length < 2) return;
     ctx.strokeStyle = color; ctx.lineWidth = width; ctx.beginPath();
     for (let i = 0; i < arr.length; i++) {
       const x = i / (arr.length - 1) * W;
-      const y = H - (Math.max(aMin, Math.min(aMax, arr[i])) - aMin) / (aMax - aMin) * H;
-      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+      i ? ctx.lineTo(x, Y(arr[i])) : ctx.moveTo(x, Y(arr[i]));
     }
     ctx.stroke();
   };
-  plot(t.maxpeak, "#f39c12", 1.1);    // max-hold
-  plot(t.avg, "#2ecc71", 1.1);        // running average
-  plot(t.amps, "#1abc9c", 1.5);       // realtime on top
+  // realtime: filled area under the trace like the vendor app
+  ctx.beginPath();
+  ctx.moveTo(0, H);
+  for (let i = 0; i < n; i++) ctx.lineTo(i / (n - 1) * W, Y(t.amps[i]));
+  ctx.lineTo(W, H); ctx.closePath();
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, "rgba(0,255,90,0.35)");
+  grad.addColorStop(1, "rgba(0,255,90,0.04)");
+  ctx.fillStyle = grad; ctx.fill();
+  plot(t.maxpeak, "#ffd000", 1.1);    // max-hold (yellow)
+  plot(t.avg, "#00c8ff", 1.1);        // average (cyan)
+  plot(t.amps, "#00ff5a", 1.5);       // realtime (green) on top
   ctx.font = "10px monospace";
-  let lx = W - 220;
-  [["REALTIME", "#1abc9c", true], ["AVG", "#2ecc71", !!t.avg], ["MAX HOLD", "#f39c12", !!t.maxpeak]]
+  let lx = W - 250;
+  [["REALTIME", "#00ff5a", true], ["AVG", "#00c8ff", !!t.avg], ["MAX HOLD", "#ffd000", !!t.maxpeak]]
     .forEach(([label, color, on]) => {
       if (!on) return;
       ctx.fillStyle = color; ctx.fillRect(lx, 8, 10, 3);
       ctx.fillText(label, lx + 14, 13); lx += ctx.measureText(label).width + 34;
     });
   if (t.freqs && t.freqs.length) {
-    ctx.fillStyle = "#7b8794";
+    ctx.fillStyle = "#8fa0b8";
     ctx.fillText(fmtF(t.freqs[0]), 4, H - 4);
+    const mid = fmtF(t.freqs[Math.floor(t.freqs.length / 2)]);
+    ctx.fillText(mid, W / 2 - ctx.measureText(mid).width / 2, H - 4);
     const lastLabel = fmtF(t.freqs[t.freqs.length - 1]);
     ctx.fillText(lastLabel, W - ctx.measureText(lastLabel).width - 4, H - 4);
   }
+}
+
+/* ---------- waterfall ---------- */
+const Waterfall = { lastTs: 0, segKey: "" };
+function wfColor(dbm) {
+  const v = Math.max(0, Math.min(1, (dbm + 115) / 85));
+  const stops = [
+    [0.00, 2, 2, 30], [0.35, 0, 60, 255], [0.55, 0, 220, 80],
+    [0.75, 255, 220, 0], [1.00, 255, 40, 40]];
+  for (let i = 1; i < stops.length; i++) {
+    if (v <= stops[i][0]) {
+      const [p0, r0, g0, b0] = stops[i - 1], [p1, r1, g1, b1] = stops[i];
+      const f = (v - p0) / (p1 - p0);
+      return [r0 + (r1 - r0) * f, g0 + (g1 - g0) * f, b0 + (b1 - b0) * f];
+    }
+  }
+  return [255, 40, 40];
+}
+function pushWaterfall(canvas, t) {
+  if (!t || !t.amps || !t.amps.length) return;
+  if (t.ts && t.ts === Waterfall.lastTs) return;     // no new sweep since last poll
+  Waterfall.lastTs = t.ts || 0;
+  const W = canvas.clientWidth || 800, H = canvas.clientHeight || 120;
+  if (canvas.width !== W || canvas.height !== H) { canvas.width = W; canvas.height = H; }
+  const ctx = canvas.getContext("2d");
+  const segKey = t.low + "-" + t.high;
+  if (segKey !== Waterfall.segKey) {                 // new segment -> fresh waterfall
+    Waterfall.segKey = segKey;
+    ctx.fillStyle = "#000208"; ctx.fillRect(0, 0, W, H);
+  }
+  ctx.drawImage(canvas, 0, 0, W, H - 2, 0, 2, W, H - 2);   // scroll down 2px
+  const row = ctx.createImageData(W, 2);
+  const n = t.amps.length;
+  for (let x = 0; x < W; x++) {
+    const [r, g, b] = wfColor(t.amps[Math.floor(x / W * n)]);
+    for (let y = 0; y < 2; y++) {
+      const o = (y * W + x) * 4;
+      row.data[o] = r; row.data[o + 1] = g; row.data[o + 2] = b; row.data[o + 3] = 255;
+    }
+  }
+  ctx.putImageData(row, 0, 0);
 }
 
 const BAND_COLORS = { broadcast: "#2e86c1", land_mobile: "#7d3c98", ism: "#e67e22",
@@ -461,15 +524,24 @@ async function loadRooms() {
 }
 
 /* ---------- directional ---------- */
+App.dirShowAll = false;
+const DIR_TRIAGE = 5;   // directional time is expensive — hunt only what scores highest
 async function loadDirectional() {
   try { App.anomalies = await api("/api/anomalies"); } catch (e) { App.anomalies = []; }
-  App.dirQueue = App.anomalies;
+  App.dirQueue = App.dirShowAll ? App.anomalies : App.anomalies.slice(0, DIR_TRIAGE);
   if (App.dirQueue.length) {
     const top = App.dirQueue[0];
+    const hidden = App.anomalies.length - App.dirQueue.length;
     $("dir-instruction").innerHTML =
       `<b style="color:#fff">ATTACH THE DIRECTIONAL ANTENNA</b> and return to ` +
       `<b style="color:var(--amber)">${esc(top.strongest_room || top.room || "the premises")}</b>. ` +
-      `${App.dirQueue.length} anomalies queued — click LOCK to hunt each one.`;
+      `Triage: hunting the top ${App.dirQueue.length} by anomaly score` +
+      (hidden > 0 ? ` (${hidden} lower-scored hidden — clear them via baseline ` +
+        `sources or the community instead) ` +
+        `<button class="btn" onclick="App.dirShowAll=true;loadDirectional()">SHOW ALL ${App.anomalies.length}</button>`
+        : App.dirShowAll && App.anomalies.length > DIR_TRIAGE ?
+          ` <button class="btn" onclick="App.dirShowAll=false;loadDirectional()">SHOW TOP ${DIR_TRIAGE}</button>` : "") +
+      ` — click LOCK to hunt each one.`;
   } else {
     $("dir-instruction").textContent =
       "No unverified/flagged anomalies pending. Complete sweeps first — or all clear.";
@@ -578,6 +650,25 @@ $("btn-report").onclick = async () => {
   $("btn-report").disabled = false;
 };
 $("btn-csv").onclick = () => { window.location = "/api/export/csv"; };
+
+/* ---------- community (Discord) ---------- */
+$("btn-discord").onclick = async () => {
+  try {
+    const p = await api("/api/discord/preview");
+    if (!p.lines.length) return alert("No anomalies to post.");
+    if (!p.configured)
+      return alert("No Discord webhook configured.\nSet integrations.discord_webhook " +
+                   "in config.yaml (channel settings → Integrations → Webhooks).");
+    const preview = p.lines.join("\n");
+    if (!confirm("EXACTLY this will be posted to the community channel — " +
+                 "no address, client, operator, or room names:\n\n" + preview +
+                 "\n\nPost it?")) return;
+    const note = prompt("Optional note to the community (e.g. 'urban residential, " +
+                        "US midwest'). Leave empty to skip:", "") || "";
+    const r = await api("/api/discord/post", { note });
+    $("discord-msg").textContent = `posted ${r.anomalies} anomalies to the community channel`;
+  } catch (e) { $("discord-msg").textContent = "FAILED: " + e.message; }
+};
 
 /* ---------- inventory ---------- */
 async function invScan(kind) {

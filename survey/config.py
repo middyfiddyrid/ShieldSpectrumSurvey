@@ -37,6 +37,7 @@ DEFAULTS = {
         },
     },
     "cellmapper": {"import_path": "data/cellmapper_towers.json"},
+    "integrations": {"discord_webhook": ""},
     "device": {"simulate": False, "port": "", "baud": 500000},
     "cache": {"dir": "cache", "max_age_hours": 720},
     "calibration": {},

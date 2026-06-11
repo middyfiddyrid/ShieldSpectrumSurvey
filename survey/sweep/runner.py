@@ -205,7 +205,8 @@ class SweepController:
                                   "amps": [round(a, 1) for a in frame.amps_dbm],
                                   "avg": [round(a, 1) for a in acc.avg[:n]],
                                   "maxpeak": [round(a, 1) for a in acc.maxpeak[:n]],
-                                  "low": seg.low_mhz, "high": seg.high_mhz})
+                                  "low": seg.low_mhz, "high": seg.high_mhz,
+                                  "ts": frame.ts})
 
         # Pass 1 — AVERAGE
         dev.set_calculator("average")
@@ -248,8 +249,11 @@ class SweepController:
         def work():
             dev = self.device
             try:
-                side = "left" if any(m.side == "left" and m.min_mhz <= center_mhz <= m.max_mhz
-                                     for m in dev.info.modules) and center_mhz < 1000 else "right"
+                # use the narrowest module covering the frequency (best RBW)
+                covering = [m for m in dev.info.modules
+                            if m.min_mhz <= center_mhz <= m.max_mhz and m.max_mhz > m.min_mhz]
+                pool = covering or dev.info.modules
+                side = min(pool, key=lambda m: m.max_mhz - m.min_mhz).side
                 dev.select_module(side)
                 dev.set_range(max(lo, 0.05), hi)
                 dev.set_calculator("maxhold")

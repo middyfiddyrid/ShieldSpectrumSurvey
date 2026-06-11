@@ -54,6 +54,12 @@ sweep:
     broadcast: 0.4
 cellmapper:
   import_path: data/cellmapper_towers.json
+integrations:
+  # Discord webhook URL for the TSCM community channel. The "ASK COMMUNITY"
+  # button posts a SANITIZED anomaly list (frequencies/characteristics only —
+  # never the address, client, operator, or rooms). Posting is always
+  # operator-confirmed with a preview first.
+  discord_webhook: ''
 device:
   simulate: false
   port: ''
