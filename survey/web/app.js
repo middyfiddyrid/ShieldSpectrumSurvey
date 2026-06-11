@@ -18,6 +18,17 @@ async function api(path, opts) {
   return j;
 }
 
+/* popup blockers silently eat window.open after fetch — render a persistent
+   link the operator can click instead */
+function showReportLink(elId, r, label) {
+  const href = "/reports/" + encodeURIComponent(r.filename);
+  $(elId).innerHTML =
+    `✔ ${esc(label)} ready — ` +
+    `<a class="report-ready" href="${href}" target="_blank" rel="noopener">OPEN PDF</a> ` +
+    `<a class="report-ready" href="${href}" download>DOWNLOAD</a> ` +
+    `<span class="note">${esc(r.filename)}</span>`;
+}
+
 const App = {
   state: null, baseline: null, anomalies: [], dirQueue: [], dirIndex: 0,
   seq: null,          // active multi-step sweep sequence
@@ -71,8 +82,7 @@ $("btn-presweep").onclick = async () => {
       engagement_type: $("eng-type").value, client_name: $("eng-client").value,
       client_contact: $("eng-contact").value, client_concerns: $("eng-concerns").value });
     const r = await api("/api/report/presweep", {});
-    window.open("/reports/" + encodeURIComponent(r.filename), "_blank");
-    $("eng-msg").textContent = "pre-sweep briefing generated";
+    showReportLink("eng-msg", r, "pre-sweep briefing");
     loadTechTasks();
   } catch (e) { $("eng-msg").textContent = "FAILED: " + e.message; }
 };
@@ -117,8 +127,7 @@ $("btn-internal-memo").onclick = async () => {
   $("memo-msg").textContent = "rendering…";
   try {
     const r = await api("/api/report/internal_memo", {});
-    window.open("/reports/" + encodeURIComponent(r.filename), "_blank");
-    $("memo-msg").textContent = "confidential internal memo generated";
+    showReportLink("memo-msg", r, "confidential internal memo");
   } catch (e) { $("memo-msg").textContent = "FAILED: " + e.message; }
 };
 $("btn-poi-new").onclick = poiClear;
@@ -846,9 +855,9 @@ $("btn-report").onclick = async () => {
   $("btn-report").textContent = "RENDERING…";
   try {
     const r = await api("/api/report/generate", {});
-    window.open("/reports/" + encodeURIComponent(r.filename), "_blank");
+    showReportLink("report-msg", r, "report");
     loadReports();
-  } catch (e) { alert("Report failed: " + e.message); }
+  } catch (e) { $("report-msg").textContent = "FAILED: " + e.message; }
   $("btn-report").textContent = "GENERATE REPORT";
   $("btn-report").disabled = false;
 };
@@ -1055,8 +1064,11 @@ loadSessions();
 poll();
 // deep-link support: localhost:8765/#wiki opens the library directly —
 // the wiki is cross-session and never requires an open sweep session
-const bootView = location.hash.replace("#", "");
-if (bootView && bootView !== "session") show(bootView);
+// always go through show() — the session view's loaders (engagement form,
+// case files, tasks) must run on a plain boot too, or the pre-sweep button
+// saves a blank form over the real engagement
+const bootView = location.hash.replace("#", "") || "session";
+show(bootView);
 window.addEventListener("hashchange", () => {
   const v = location.hash.replace("#", "") || "session";
   if (!document.getElementById("view-" + v).classList.contains("active")) show(v);
