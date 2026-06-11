@@ -113,6 +113,14 @@ function poiClear() {
     : (f.endsWith("_tier") ? "unknown" : ""); });
   $("poi-msg").textContent = "";
 }
+$("btn-internal-memo").onclick = async () => {
+  $("memo-msg").textContent = "rendering…";
+  try {
+    const r = await api("/api/report/internal_memo", {});
+    window.open("/reports/" + encodeURIComponent(r.filename), "_blank");
+    $("memo-msg").textContent = "confidential internal memo generated";
+  } catch (e) { $("memo-msg").textContent = "FAILED: " + e.message; }
+};
 $("btn-poi-new").onclick = poiClear;
 $("btn-poi-save").onclick = async () => {
   const body = { id: poiSelected };

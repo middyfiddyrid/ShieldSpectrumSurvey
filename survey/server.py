@@ -174,6 +174,20 @@ def create_app(db, cfg) -> Flask:
                    (0 if row["done"] else 1, tid))
         return jsonify({"toggled": True})
 
+    @app.post("/api/report/internal_memo")
+    def internal_memo_report():
+        from .report import generate_internal_memo
+        session = st.session()
+        if not session:
+            return err("no session")
+        try:
+            result = generate_internal_memo(db, cfg, session["id"], st.reports_dir)
+        except Exception as e:  # noqa: BLE001
+            log.exception("internal memo failed")
+            return err(e, 500)
+        result["filename"] = os.path.basename(result["path"])
+        return jsonify(result)
+
     @app.post("/api/report/presweep")
     def presweep_report():
         from .report import generate_presweep_report

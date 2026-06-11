@@ -103,6 +103,24 @@ def _watermark_and_footer(interim: bool, company: str):
     return fn
 
 
+def _confidential_footer(company: str, watermark="CONFIDENTIAL"):
+    def fn(canvas, doc):
+        canvas.saveState()
+        canvas.setFont("Helvetica-Bold", 7.5)
+        canvas.setFillColor(colors.HexColor("#922b21"))
+        canvas.drawString(0.75 * inch, 0.5 * inch,
+                          f"{company} — CONFIDENTIAL · INTERNAL · NOT FOR CLIENT DISTRIBUTION")
+        canvas.setFillColor(colors.HexColor("#666666"))
+        canvas.drawRightString(PAGE_W - 0.75 * inch, 0.5 * inch, f"Page {doc.page}")
+        canvas.setFont("Helvetica-Bold", 58)
+        canvas.setFillColorRGB(0.57, 0.17, 0.13, alpha=0.10)
+        canvas.translate(PAGE_W / 2, PAGE_H / 2)
+        canvas.rotate(45)
+        canvas.drawCentredString(0, 0, watermark)
+        canvas.restoreState()
+    return fn
+
+
 def _fmt_freq(mhz):
     if mhz is None:
         return ""
@@ -587,6 +605,113 @@ def generate_presweep_report(db, cfg, session_id: int, reports_dir: str) -> dict
     db.execute("INSERT INTO reports (session_id,path,kind,generated_utc) VALUES (?,?,?,?)",
                (session_id, path, "PRESWEEP", time.time()))
     return {"path": path, "kind": "PRESWEEP"}
+
+
+def generate_internal_memo(db, cfg, session_id: int, reports_dir: str) -> dict:
+    """CONFIDENTIAL internal investigative memorandum — Shield's own file copy.
+    Includes the Persons of Interest / deconfliction assessment that is excluded
+    from every client-facing document. Marked confidential, internal, not for
+    client distribution; investigative hypotheses, not findings of fact."""
+    ss = _styles()
+    session = db.query_one("SELECT * FROM sessions WHERE id=?", (session_id,))
+    if not session:
+        raise ValueError("no such session")
+    eng = db.query_one("SELECT * FROM engagement WHERE session_id=?", (session_id,)) or {}
+    poi = db.query("SELECT * FROM persons_of_interest WHERE session_id=? ORDER BY "
+                   "CASE status WHEN 'concern' THEN 0 WHEN 'open' THEN 1 "
+                   "WHEN 'cleared' THEN 2 ELSE 3 END, name", (session_id,))
+    case_files = db.query("SELECT filename, kind, uploaded_utc FROM case_files "
+                          "WHERE session_id=? ORDER BY uploaded_utc", (session_id,))
+    company = cfg.get("branding", "company", default="")
+    operator = session["operator"] or cfg.get("branding", "operator", default="")
+
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    os.makedirs(reports_dir, exist_ok=True)
+    path = os.path.join(reports_dir, f"session{session_id}_internal_memo_{ts}.pdf")
+    doc = SimpleDocTemplate(path, pagesize=letter, topMargin=0.7 * inch,
+                            bottomMargin=0.8 * inch, leftMargin=0.75 * inch,
+                            rightMargin=0.75 * inch,
+                            title=f"CONFIDENTIAL Internal Memorandum — session {session_id}")
+    el = []
+    el.append(Paragraph("CONFIDENTIAL — INTERNAL INVESTIGATIVE MEMORANDUM", ss["Cover"]))
+    el.append(Paragraph(f"{company} — Technical Surveillance Counter-Measures", ss["Body"]))
+    el.append(Spacer(1, 12))
+    head = [["Matter / location", session["address"]],
+            ["Client", eng.get("client_name") or "—"],
+            ["Engagement", (eng.get("engagement_type") or "onsite").capitalize()],
+            ["Prepared by", operator or "—"],
+            ["Date", time.strftime("%B %d, %Y  %H:%M")]]
+    t = Table(head, colWidths=[2.0 * inch, 5.0 * inch])
+    t.setStyle(TableStyle([("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+                           ("FONTSIZE", (0, 0), (-1, -1), 10),
+                           ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                           ("LINEBELOW", (0, 0), (-1, -1), 0.4, colors.HexColor("#cccccc"))]))
+    el.append(t)
+    el.append(Spacer(1, 12))
+
+    el.append(Paragraph("Confidentiality & use", ss["H1x"]))
+    el.append(Paragraph(
+        "<b>This is an internal Shield investigative memorandum. It is confidential and is NOT "
+        "to be provided to the client or any third party.</b> The assessments below are "
+        "investigative hypotheses based on the information available at the time of writing — "
+        "not findings of fact. This memorandum is not a consumer report and was not prepared for "
+        "any FCRA-covered purpose; it must not be used as a basis for any employment, tenancy, "
+        "credit, insurance, or other adverse action against any person named. Any background "
+        "information was gathered for, and limited to, legitimate counter-surveillance "
+        "assessment of persons identified by the client. If prepared at the direction of legal "
+        "counsel, it may constitute protected work product.", ss["Body"]))
+
+    if eng.get("client_concerns"):
+        el.append(Paragraph("Client's stated concerns", ss["H1x"]))
+        el.append(Paragraph(eng["client_concerns"], ss["Body"]))
+
+    el.append(Paragraph("Persons of Interest — Deconfliction Assessment", ss["H1x"]))
+    if poi:
+        cleared = sum(1 for p in poi if p["status"] == "cleared")
+        concern = sum(1 for p in poi if p["status"] == "concern")
+        el.append(Paragraph(
+            f"{len(poi)} person(s) assessed — {cleared} cleared, {concern} of concern, "
+            f"{len(poi) - cleared - concern} open. Goal of this assessment is to clear persons "
+            "by ruling out access, means, and motive.", ss["Body"]))
+        rows = [["Person / relationship", "Status", "Access", "Capability (basis)",
+                 "Motive / conduct", "Analyst notes"]]
+        for p in poi:
+            cap = (p["capability_tier"] or "unknown")
+            if p["capability_basis"]:
+                cap += f" — {p['capability_basis']}"
+            mc = "; ".join(x for x in (p["motive"], p["conduct_note"]) if x)
+            rows.append([
+                Paragraph(f"<b>{p['name']}</b><br/>{p['relationship'] or ''}", ss["Cell"]),
+                p["status"].upper(),
+                Paragraph((p["access_tier"] or "") + (": " + p["access_note"]
+                          if p["access_note"] else ""), ss["Cell"]),
+                Paragraph(cap[:160], ss["Cell"]),
+                Paragraph(mc[:160], ss["Cell"]),
+                Paragraph((p["analyst_notes"] or "")[:160], ss["Cell"])])
+        el.append(_table(rows, [1.3 * inch, 0.7 * inch, 0.9 * inch, 1.5 * inch,
+                                1.4 * inch, 1.2 * inch], font_size=7))
+    else:
+        el.append(Paragraph("No persons of interest recorded for this matter.", ss["Body"]))
+
+    if case_files:
+        el.append(Paragraph("Source documents on file (internal)", ss["H1x"]))
+        rows = [["File", "Kind", "Received"]]
+        for f in case_files:
+            rows.append([Paragraph(f["filename"], ss["Cell"]), f["kind"] or "",
+                         time.strftime("%Y-%m-%d", time.localtime(f["uploaded_utc"]))])
+        el.append(_table(rows, [3.2 * inch, 1.5 * inch, 1.3 * inch]))
+        el.append(Paragraph("Source documents are retained internally; their contents are not "
+                            "reproduced here.", ss["Cell"]))
+
+    el.append(Spacer(1, 10))
+    el.append(Paragraph("This memorandum accompanies, and does not replace, the technical sweep "
+                        "report. Technical findings are documented separately.", ss["Cell"]))
+
+    cb = _confidential_footer(company)
+    doc.build(el, onFirstPage=cb, onLaterPages=cb)
+    db.execute("INSERT INTO reports (session_id,path,kind,generated_utc) VALUES (?,?,?,?)",
+               (session_id, path, "INTERNAL_MEMO", time.time()))
+    return {"path": path, "kind": "INTERNAL_MEMO"}
 
 
 def DeviceRange(device: dict) -> str:
