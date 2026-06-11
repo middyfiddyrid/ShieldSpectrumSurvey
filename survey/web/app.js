@@ -164,23 +164,11 @@ async function loadPoiDocs(pid) {
       "<tr><td>no documents yet — gather the client-authorized background for this person and attach it here</td></tr>";
   } catch (e) {}
 }
-$("btn-poi-doc-attach").onclick = async () => {
-  if (!poiSelected) return;
-  const f = $("poi-doc-input").files[0];
-  if (!f) return alert("Choose a file first.");
-  const fd = new FormData();
-  fd.append("file", f);
-  fd.append("kind", $("poi-doc-kind").value || "background");
-  fd.append("poi_id", poiSelected);
-  $("poi-doc-msg").textContent = "uploading…";
-  try {
-    const r = await fetch("/api/case_files", { method: "POST", body: fd });
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.error || "upload failed");
-    $("poi-doc-msg").textContent = `${j.filename} attached`;
-    $("poi-doc-input").value = "";
-    loadPoiDocs(poiSelected);
-  } catch (e) { $("poi-doc-msg").textContent = "FAILED: " + e.message; }
+$("btn-poi-doc-attach").onclick = () => {
+  if (!poiSelected) return alert("Select or save the person first.");
+  uploadFiles("poi-doc-input", "poi-doc-msg",
+              { kind: $("poi-doc-kind").value || "background", poi_id: poiSelected },
+              () => loadPoiDocs(poiSelected));
 };
 $("btn-poi-delete").onclick = async () => {
   if (!poiSelected) return poiClear();
@@ -574,22 +562,33 @@ $("btn-baseline").onclick = async () => {
 };
 
 /* ---------- case files ---------- */
-$("btn-case-upload").onclick = async () => {
-  const f = $("case-file-input").files[0];
-  if (!f) return alert("Choose a file first.");
-  const fd = new FormData();
-  fd.append("file", f);
-  fd.append("kind", $("case-file-kind").value);
-  $("case-msg").textContent = "uploading…";
-  try {
-    const r = await fetch("/api/case_files", { method: "POST", body: fd });
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.error || "upload failed");
-    $("case-msg").textContent = `${j.filename} stored (${(j.size_bytes / 1024).toFixed(0)} KB)`;
-    $("case-file-input").value = "";
-    loadCaseFiles();
-  } catch (e) { $("case-msg").textContent = "FAILED: " + e.message; }
-};
+async function uploadFiles(inputId, msgId, extra, after) {
+  const files = [...$(inputId).files];
+  if (!files.length) return alert("Choose one or more files first.");
+  let done = 0;
+  for (const f of files) {
+    $(msgId).textContent = `uploading ${done + 1}/${files.length} — ${f.name}…`;
+    const fd = new FormData();
+    fd.append("file", f);
+    Object.entries(extra).forEach(([k, v]) => fd.append(k, v));
+    try {
+      const r = await fetch("/api/case_files", { method: "POST", body: fd });
+      const j = await r.json();
+      if (!r.ok) throw new Error(j.error || "upload failed");
+      done++;
+    } catch (e) {
+      $(msgId).textContent = `FAILED on ${f.name}: ${e.message} (${done} stored)`;
+      after();
+      return;
+    }
+  }
+  $(msgId).textContent = `${done} file${done !== 1 ? "s" : ""} stored`;
+  $(inputId).value = "";
+  after();
+}
+$("btn-case-upload").onclick = () =>
+  uploadFiles("case-file-input", "case-msg",
+              { kind: $("case-file-kind").value }, loadCaseFiles);
 async function loadCaseFiles() {
   try {
     const rows = await api("/api/case_files");

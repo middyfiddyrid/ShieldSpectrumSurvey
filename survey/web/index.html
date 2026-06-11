@@ -210,7 +210,7 @@ footer .sim { color:var(--red); font-weight:bold; }
     background data (BeenVerified etc.) is governed by its provider TOS and the FCRA — keep it
     inside its permissible purpose; do not use it for employment/tenancy/credit decisions.</p>
     <div class="row">
-      <input type="file" id="case-file-input">
+      <input type="file" id="case-file-input" multiple>
       <input type="text" id="case-file-kind" class="small" style="width:160px" placeholder="kind (e.g. background)">
       <button class="btn" id="btn-case-upload">UPLOAD</button>
       <span class="note" id="case-msg"></span>
@@ -452,7 +452,7 @@ footer .sim { color:var(--red); font-weight:bold; }
             <h3 style="margin-top:0">ATTACHED DOCUMENTS <span class="tag">client-authorized only — permissible purpose, no dragnet on uninvolved third parties</span></h3>
             <table id="tbl-poi-docs"></table>
             <div class="row" style="margin-top:6px">
-              <input type="file" id="poi-doc-input">
+              <input type="file" id="poi-doc-input" multiple>
               <input type="text" id="poi-doc-kind" class="small" style="width:140px" value="background">
               <button class="btn" id="btn-poi-doc-attach">ATTACH</button>
               <span class="note" id="poi-doc-msg"></span>
