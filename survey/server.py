@@ -1,5 +1,6 @@
 """Flask server — serves the single-page ops console and the JSON API."""
 
+import json
 import logging
 import os
 import threading
@@ -403,6 +404,106 @@ def create_app(db, cfg) -> Flask:
         db.execute("UPDATE inventory SET owned=? WHERE id=?",
                    (int(bool(body.get("owned"))), body.get("id")))
         return jsonify({"saved": True})
+
+    # ---------- signal wiki (captures) ----------
+
+    @app.post("/api/captures/start")
+    def captures_start():
+        session = st.session()
+        if not session:
+            return err("no session")
+        body = request.get_json(force=True)
+        if body.get("recapture"):
+            row = db.query_one("SELECT * FROM captures WHERE id=?", (body["recapture"],))
+            if not row:
+                return err("no such capture", 404)
+            targets = [{"id": None, "center_mhz": row["center_mhz"],
+                        "bw_khz": row["bw_khz"], "room": row["room"],
+                        "classification": row["classification"],
+                        "matched_label": row["matched_label"],
+                        "persistence": row["persistence"], "caution": 0}]
+        elif body.get("all_anomalies"):
+            rows = db.query(
+                "SELECT * FROM signals WHERE session_id=? AND phase='interior' AND "
+                "(classification='UNVERIFIED' OR caution=1) ORDER BY anomaly_score DESC",
+                (session["id"],))
+            targets = []
+            for r in rows:
+                if not any(abs(r["center_mhz"] - k["center_mhz"]) <= 0.25 for k in targets):
+                    targets.append(r)
+        else:
+            ids = body.get("signal_ids") or []
+            targets = db.query(
+                f"SELECT * FROM signals WHERE id IN ({','.join('?' * len(ids))})",
+                ids) if ids else []
+        if not targets:
+            return err("no capture targets")
+        try:
+            st.controller.start_captures(session["id"], targets,
+                                         cfg.abs_path("capture_images"),
+                                         session["address"])
+        except Exception as e:  # noqa: BLE001
+            return err(e, 409)
+        return jsonify({"started": True, "targets": len(targets)})
+
+    @app.get("/api/captures")
+    def captures_list():
+        q = "SELECT c.id, c.session_id, c.center_mhz, c.bw_khz, c.peak_dbm, c.room, "\
+            "c.module, c.captured_utc, c.image_path, c.category, c.label, c.status, "\
+            "s.address FROM captures c JOIN sessions s ON c.session_id=s.id"
+        params, where = [], []
+        if request.args.get("category"):
+            where.append("c.category=?")
+            params.append(request.args["category"])
+        if request.args.get("q"):
+            where.append("(c.label LIKE ? OR c.notes LIKE ? OR c.description LIKE ?)")
+            like = f"%{request.args['q']}%"
+            params += [like, like, like]
+        if where:
+            q += " WHERE " + " AND ".join(where)
+        q += " ORDER BY c.captured_utc DESC"
+        rows = db.query(q, params)
+        cats = db.query("SELECT category, COUNT(*) AS n FROM captures "
+                        "GROUP BY category ORDER BY n DESC")
+        return jsonify({"rows": rows, "categories": cats})
+
+    @app.get("/api/captures/<int:cap_id>")
+    def capture_get(cap_id):
+        from .sigcapture import find_matches
+        row = db.query_one(
+            "SELECT c.*, s.address FROM captures c JOIN sessions s ON "
+            "c.session_id=s.id WHERE c.id=?", (cap_id,))
+        if not row:
+            return err("no such capture", 404)
+        row["matches"] = find_matches(db, row)
+        row.pop("data_json", None)   # raw data via dedicated param only
+        return jsonify(row)
+
+    @app.post("/api/captures/<int:cap_id>")
+    def capture_update(cap_id):
+        body = request.get_json(force=True)
+        for field in ("label", "category", "status", "notes"):
+            if field in body:
+                db.execute(f"UPDATE captures SET {field}=? WHERE id=?",
+                           (body[field], cap_id))
+        return jsonify({"saved": True})
+
+    @app.post("/api/captures/<int:cap_id>/describe")
+    def capture_describe(cap_id):
+        from .sigcapture import ai_description, rule_based_description, signal_features
+        row = db.query_one("SELECT * FROM captures WHERE id=?", (cap_id,))
+        if not row:
+            return err("no such capture", 404)
+        feats = json.loads(row["features_json"] or "{}")
+        text, ai_err = ai_description(cfg, row, feats)
+        if not text:
+            return err(ai_err or "no description produced", 502)
+        db.execute("UPDATE captures SET description=? WHERE id=?", (text, cap_id))
+        return jsonify({"description": text})
+
+    @app.get("/capture_images/<path:name>")
+    def capture_image(name):
+        return send_from_directory(cfg.abs_path("capture_images"), name)
 
     # ---------- calibration ----------
 

@@ -12,7 +12,8 @@ DEFAULTS = {
     "app": {"host": "127.0.0.1", "port": 8765, "open_browser": True},
     "branding": {"company": "Shield TSCM", "logo_path": "", "operator": ""},
     "radius": {"broadcast_miles": 25, "land_mobile_miles": 5},
-    "api_keys": {"opencellid": "", "radioreference_user": "", "radioreference_pass": ""},
+    "api_keys": {"opencellid": "", "radioreference_user": "", "radioreference_pass": "",
+                 "anthropic": ""},
     "uls": {"extract_dir": "", "stale_days": 30},
     "detection": {
         "threshold_db": 12.0,
@@ -20,7 +21,11 @@ DEFAULTS = {
         "min_persistence": 0.05,
         "interior_delta_flag_db": 10.0,
         "room_delta_flag_db": 12.0,
+        "ignore_below_mhz": 0.15,        # LF conducted-noise floor
+        "lf_extra_threshold_db": 6.0,    # extra SNR demanded below lf_extra_below_mhz
+        "lf_extra_below_mhz": 50.0,
     },
+    "capture": {"avg_passes": 20, "maxhold_dwell_s": 12.0},
     "sweep": {
         "sweep_points": 112,
         "seconds_per_sweep": 0.35,

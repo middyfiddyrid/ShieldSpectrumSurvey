@@ -2,5 +2,6 @@
 data/
 reports/
 cache/
+capture_images/
 __pycache__/
 *.pyc

@@ -19,6 +19,7 @@ room-to-room localization are recomputed session-wide.
 
 import json
 import logging
+import os
 import threading
 import time
 
@@ -45,7 +46,7 @@ class SweepController:
                       "segment_index": 0, "segment_total": 0, "percent": 0.0,
                       "eta_seconds": 0, "signal_count": 0, "message": "idle",
                       "live_trace": None, "current_segment": None, "error": None,
-                      "directional": None, "calibration": None}
+                      "directional": None, "calibration": None, "capture": None}
         self._lock = threading.Lock()
 
     # ---- device ----
@@ -218,6 +219,16 @@ class SweepController:
 
         floor, signals = detect_signals(acc.freqs, acc.avg, acc.maxpeak, acc.hits,
                                         acc.passes, threshold_db, merge_gap)
+        # low-frequency hygiene: conducted noise / analyzer LF artifacts pile up
+        # at the bottom of the range; ignore below the floor frequency and demand
+        # extra SNR in the HF region
+        ignore_below = float(self.cfg.get("detection", "ignore_below_mhz", default=0.15))
+        lf_extra_db = float(self.cfg.get("detection", "lf_extra_threshold_db", default=6.0))
+        lf_region = float(self.cfg.get("detection", "lf_extra_below_mhz", default=50.0))
+        signals = [s for s in signals
+                   if s.center_mhz >= ignore_below
+                   and (s.center_mhz >= lf_region
+                        or s.peak_dbm >= floor + threshold_db + lf_extra_db)]
         segment_id = self.db.execute(
             "INSERT INTO segments (sweep_id,low_mhz,high_mhz,noise_floor_dbm,avg_passes,"
             "maxhold_dwell_s,status,data_json) VALUES (?,?,?,?,?,?,?,?)",
@@ -234,6 +245,149 @@ class SweepController:
                  s.persistence, cls.classification, cls.matched_label,
                  cls.match_reason, int(cls.caution)))
         self._set(signal_count=self.state["signal_count"] + len(signals))
+
+    # ---- signal capture (wiki fingerprints) ----
+
+    def start_captures(self, session_id: int, targets: list[dict], images_dir: str,
+                       address: str = ""):
+        """Zoom onto each target signal and record a high-iteration fingerprint.
+        targets: signal rows (need center_mhz, bw_khz; room/module/etc. optional)."""
+        if self.busy():
+            raise RuntimeError("a sweep is already running")
+        self._ensure_device()
+        self.abort_event.clear()
+        os.makedirs(images_dir, exist_ok=True)
+        cfg = self.cfg
+        avg_passes = int(cfg.get("capture", "avg_passes", default=20))
+        dwell_s = float(cfg.get("capture", "maxhold_dwell_s", default=12.0))
+
+        def work():
+            from ..sigcapture import (ai_description, auto_category, find_matches,
+                                      render_capture_svg, rule_based_description,
+                                      signal_features)
+            results = []
+            try:
+                for i, t in enumerate(targets):
+                    if self.abort_event.is_set():
+                        break
+                    self._set(capture={"running": True, "index": i + 1,
+                                       "total": len(targets),
+                                       "center_mhz": t["center_mhz"], "done": results},
+                              message=f"capturing {t['center_mhz']:.4f} MHz "
+                                      f"({i + 1}/{len(targets)})")
+                    try:
+                        cap_id, matches = self._capture_one(
+                            session_id, t, images_dir, address, avg_passes, dwell_s,
+                            auto_category, render_capture_svg, signal_features,
+                            rule_based_description, ai_description, find_matches)
+                        results.append({"capture_id": cap_id,
+                                        "center_mhz": t["center_mhz"],
+                                        "matches": matches})
+                    except Exception as e:  # noqa: BLE001 - keep capturing the rest
+                        log.exception("capture failed for %s", t.get("center_mhz"))
+                        results.append({"center_mhz": t.get("center_mhz"),
+                                        "error": str(e)})
+            finally:
+                match_count = sum(len(r.get("matches", [])) for r in results)
+                self._set(running=False,
+                          capture={"running": False, "done": results,
+                                   "total": len(targets)},
+                          message=f"capture run finished: {len(results)} signals "
+                                  f"documented, {match_count} library matches")
+
+        self._thread = threading.Thread(target=work, daemon=True)
+        self._set(running=True, phase="capture", error=None,
+                  message=f"signal capture: {len(targets)} targets")
+        self._thread.start()
+
+    def _capture_one(self, session_id, t, images_dir, address, avg_passes, dwell_s,
+                     auto_category, render_capture_svg, signal_features,
+                     rule_based_description, ai_description, find_matches):
+        from .detector import Accumulator, detect_signals
+        dev = self.device
+        center = float(t["center_mhz"])
+        bw_khz = float(t.get("bw_khz") or 100.0)
+        span = min(max(0.5, bw_khz / 1000.0 * 8), 20.0)
+        covering = [m for m in dev.info.modules
+                    if m.min_mhz <= center <= m.max_mhz and m.max_mhz > m.min_mhz]
+        side = min(covering or dev.info.modules,
+                   key=lambda m: m.max_mhz - m.min_mhz).side
+        dev.select_module(side)
+        lo = max(center - span / 2, dev.info.modules[0].min_mhz, 0.05)
+        dev.set_range(lo, lo + span)
+        first = dev.read_sweep(timeout_s=10.0)
+        if first is None:
+            raise DeviceError("no sweep data in capture zoom")
+        acc = Accumulator(first.freqs_mhz)
+        acc.add_sweep(first.amps_dbm)
+
+        def on_frame(frame):
+            acc.add_sweep(frame.amps_dbm)
+            self._set(live_trace={"freqs": [round(f, 5) for f in frame.freqs_mhz],
+                                  "amps": [round(a, 1) for a in frame.amps_dbm],
+                                  "avg": [round(a, 1) for a in acc.avg[:len(frame.amps_dbm)]],
+                                  "maxpeak": [round(a, 1) for a in acc.maxpeak[:len(frame.amps_dbm)]],
+                                  "low": lo, "high": lo + span, "ts": frame.ts})
+
+        dev.set_calculator("average")
+        dev.collect(avg_passes, on_frame, abort=self.abort_event)
+        dev.set_calculator("maxhold")
+        dev.stream(dwell_s, on_frame, abort=self.abort_event)
+        dev.set_calculator("normal")
+
+        floor, sigs = detect_signals(acc.freqs, acc.avg, acc.maxpeak, acc.hits,
+                                     acc.passes, threshold_db=9.0)
+        refined = min(sigs, key=lambda s: abs(s.center_mhz - center)) if sigs else None
+        peak = refined.peak_dbm if refined else max(acc.maxpeak)
+        r_center = refined.center_mhz if refined else center
+        r_bw = refined.bw_khz if refined else bw_khz
+        persistence = refined.persistence if refined else t.get("persistence")
+
+        category = auto_category(t.get("classification", ""), t.get("matched_label", ""),
+                                 r_center, bool(t.get("caution")))
+        label = (t.get("matched_label") or f"{r_center:.4f} MHz "
+                 + ("unverified signal" if t.get("classification") == "UNVERIFIED"
+                    else "signal"))
+        captured = time.strftime("%Y-%m-%d %H:%M")
+        data = acc.to_dict()
+        feats = signal_features(data, floor)
+        meta = {"center_mhz": r_center, "peak_dbm": peak, "floor_dbm": floor,
+                "bw_khz": r_bw, "persistence": persistence, "label": label,
+                "session_id": session_id, "address": address,
+                "room": t.get("room") or "", "module": side, "captured": captured}
+        svg = render_capture_svg(data, meta)
+        fname = f"cap_s{session_id}_{int(r_center * 10000)}_{int(time.time())}.svg"
+        path = os.path.join(images_dir, fname)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(svg)
+
+        cap_row = {"center_mhz": r_center, "bw_khz": r_bw, "peak_dbm": peak,
+                   "floor_dbm": floor, "persistence": persistence,
+                   "classification": t.get("classification", ""),
+                   "matched_label": t.get("matched_label", "")}
+        description = rule_based_description(cap_row, feats)
+        ai_text, ai_err = ai_description(self.cfg, cap_row, feats)
+        if ai_text:
+            description = ai_text
+        elif ai_err:
+            log.info("AI description unavailable: %s", ai_err)
+
+        status = "identified" if t.get("classification") == "VERIFIED" else "unconfirmed"
+        cap_id = self.db.execute(
+            "INSERT INTO captures (session_id,signal_id,center_mhz,span_mhz,bw_khz,"
+            "peak_dbm,floor_dbm,persistence,room,module,captured_utc,image_path,"
+            "data_json,features_json,classification,matched_label,category,label,"
+            "status,description) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (session_id, t.get("id"), round(r_center, 5), span, round(r_bw, 1),
+             round(peak, 1), round(floor, 1), persistence,
+             t.get("room") or "", side, time.time(), fname,
+             json.dumps(data), json.dumps(feats),
+             t.get("classification", ""), t.get("matched_label", ""),
+             category, label, status, description))
+        matches = find_matches(self.db, {"id": cap_id, "center_mhz": r_center,
+                                         "bw_khz": r_bw},
+                               exclude_session=session_id)
+        return cap_id, matches
 
     # ---- directional follow-up ----
 

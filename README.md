@@ -48,8 +48,18 @@ transmitting during the run — a 0% detection run saves nothing and says so.
 (≥ −55 dBm) unaccounted devices are highlighted and included in the report.
 
 **Live sweep view**: realtime, running-average, and max-hold traces drawn together
-(RF Explorer for Windows style), with a live known/unknown signal ledger under the chart
-that classifies each detection against the baseline as it lands.
+(RF Explorer for Windows style) with a waterfall, and a live known/unknown signal ledger
+under the chart that classifies each detection against the baseline as it lands.
+
+**Signal wiki** (tools): the internal cross-session signal library. CAPTURE buttons on
+the Results tab zoom the analyzer onto each signal (narrow span, high-iteration average
++ max-hold dwell) and save a vector fingerprint with provenance, characteristics, and a
+description (rule-based; AI-enriched via the Claude API when `api_keys.anthropic` is set —
+numeric profile only, no client data leaves the machine otherwise). Entries are
+categorized (per-carrier cellular, broadcast, ISM/WiFi/BT, DECT, unknown…), editable,
+recapturable on site, and matched across sessions — a new capture near a previously
+documented signal raises a "seen before at…" alert. `capture_images/` holds the SVGs
+(git-ignored, sensitive).
 
 ## Baseline sources
 

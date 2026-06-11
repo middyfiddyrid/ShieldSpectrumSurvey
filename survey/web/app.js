@@ -38,6 +38,7 @@ function show(view) {
   if (view === "results") loadResults();
   if (view === "directional") loadDirectional();
   if (view === "inventory") loadInventory();
+  if (view === "wiki") loadWiki();
 }
 
 /* ---------- polling ---------- */
@@ -103,12 +104,17 @@ function render(st) {
   const so = $("sweep-overlay");
   if (st.sweep.running && st.sweep.phase !== "directional" && !App.overlayHidden) {
     so.classList.add("show");
-    $("sweep-overlay-title").textContent =
+    const capt = st.sweep.phase === "capture" ? st.sweep.capture : null;
+    $("sweep-overlay-title").textContent = capt ?
+      `SIGNAL CAPTURE — ${fmtF(capt.center_mhz)}` :
       `${(st.sweep.phase || "").toUpperCase()} SWEEP — ${(st.sweep.module || "").toUpperCase()} MODULE` +
       (st.sweep.room ? ` — ${st.sweep.room.toUpperCase()}` : "");
-    $("sweep-bar").style.width = (st.sweep.percent || 0) + "%";
+    const pct = capt ? Math.round(100 * ((capt.index || 1) - 1) / Math.max(capt.total, 1))
+                     : (st.sweep.percent || 0);
+    $("sweep-bar").style.width = pct + "%";
     const cs = st.sweep.current_segment;
-    $("sweep-overlay-detail").textContent =
+    $("sweep-overlay-detail").textContent = capt ?
+      `documenting signal ${capt.index}/${capt.total} — high-iteration zoom (avg + max-hold)` :
       `segment ${st.sweep.segment_index}/${st.sweep.segment_total}` +
       (cs ? ` · ${cs.low_mhz.toFixed(2)}–${cs.high_mhz.toFixed(2)} MHz · RBW ${cs.rbw_khz} kHz [${cs.band_tag}]` : "") +
       ` · signals so far: ${st.sweep.signal_count}`;
@@ -600,7 +606,7 @@ async function loadResults() {
     const anomalies = await api("/api/anomalies");
     $("tbl-anomalies").innerHTML =
       "<tr><th>Score</th><th>Frequency</th><th>Peak dBm</th><th>BW kHz</th><th>Persist</th>" +
-      "<th>In/Out Δ</th><th>Strongest room</th><th>Class</th><th>Why not verified</th></tr>" +
+      "<th>In/Out Δ</th><th>Strongest room</th><th>Class</th><th>Why not verified</th><th></th></tr>" +
       anomalies.map(s =>
         `<tr><td class="${s.anomaly_score >= 60 ? "score-hi" : "score-md"}">${(s.anomaly_score || 0).toFixed(0)}</td>` +
         `<td>${fmtF(s.center_mhz)}</td><td>${s.peak_dbm}</td><td>${s.bw_khz}</td>` +
@@ -608,7 +614,8 @@ async function loadResults() {
         `<td>${s.interior_delta_db != null ? "+" + s.interior_delta_db + " dB" : "—"}</td>` +
         `<td>${esc(s.strongest_room || "")}${s.localization_score ? ` (+${s.localization_score} dB)` : ""}</td>` +
         `<td><span class="pill ${s.classification}">${s.classification}</span>${s.caution ? " ⚠" : ""}</td>` +
-        `<td style="max-width:330px">${esc(s.match_reason)}</td></tr>`).join("");
+        `<td style="max-width:300px">${esc(s.match_reason)}</td>` +
+        `<td><button class="btn" onclick="captureOne(${s.id})">CAPTURE</button></td></tr>`).join("");
   } catch (e) {}
   loadSignals();
   loadReports();
@@ -668,6 +675,95 @@ $("btn-discord").onclick = async () => {
     const r = await api("/api/discord/post", { note });
     $("discord-msg").textContent = `posted ${r.anomalies} anomalies to the community channel`;
   } catch (e) { $("discord-msg").textContent = "FAILED: " + e.message; }
+};
+
+/* ---------- signal wiki ---------- */
+let wikiSelected = null;
+
+async function captureSignals(body, labelEl) {
+  try {
+    const r = await api("/api/captures/start", body);
+    if (labelEl) labelEl.textContent = `capturing ${r.targets} signals — watch the live view`;
+    App.overlayHidden = false;
+  } catch (e) { alert("Capture failed to start: " + e.message); }
+}
+$("btn-capture-all").onclick = () =>
+  captureSignals({ all_anomalies: true }, $("discord-msg"));
+window.captureOne = (id) => captureSignals({ signal_ids: [id] });
+
+async function loadWiki() {
+  try {
+    const cat = $("wiki-cat").value, q = $("wiki-q").value;
+    const r = await api("/api/captures?category=" + encodeURIComponent(cat) +
+                        "&q=" + encodeURIComponent(q));
+    const cur = $("wiki-cat").value;
+    $("wiki-cat").innerHTML = '<option value="">all</option>' + r.categories.map(c =>
+      `<option ${c.category === cur ? "selected" : ""}>${esc(c.category)}</option>`).join("");
+    $("wiki-count").textContent = `${r.rows.length} entries`;
+    $("tbl-wiki").innerHTML =
+      "<tr><th>Frequency</th><th>Label</th><th>Category</th><th>Status</th><th>Where</th><th>When</th></tr>" +
+      r.rows.map(c => {
+        const cls = c.status === "identified" ? "ok" : c.status === "threat" ? "failed" : "stale";
+        return `<tr onclick="wikiOpen(${c.id})" style="cursor:pointer">` +
+          `<td>${fmtF(c.center_mhz)}</td><td>${esc(c.label)}</td><td>${esc(c.category)}</td>` +
+          `<td><span class="pill ${cls}">${esc(c.status).toUpperCase()}</span></td>` +
+          `<td>${esc((c.address || "").slice(0, 24))}${c.room ? " · " + esc(c.room) : ""}</td>` +
+          `<td>${new Date(c.captured_utc * 1000).toLocaleDateString()}</td></tr>`;
+      }).join("") || "<tr><td>no captures yet — use CAPTURE ALL → SIGNAL WIKI on the Results tab</td></tr>";
+  } catch (e) { $("tbl-wiki").innerHTML = `<tr><td>${esc(e.message)}</td></tr>`; }
+}
+$("wiki-cat").onchange = loadWiki;
+$("wiki-q").oninput = () => { clearTimeout(window._wt); window._wt = setTimeout(loadWiki, 400); };
+
+window.wikiOpen = async (id) => {
+  try {
+    const c = await api("/api/captures/" + id);
+    wikiSelected = c;
+    $("wiki-detail").style.display = "";
+    $("wiki-label").value = c.label || "";
+    $("wiki-status").value = c.status || "unconfirmed";
+    $("wiki-cat-edit").value = c.category || "";
+    $("wiki-notes").value = c.notes || "";
+    $("wiki-desc").textContent = c.description || "(no description yet)";
+    $("wiki-img").innerHTML =
+      `<a href="/capture_images/${encodeURIComponent(c.image_path)}" target="_blank">` +
+      `<img src="/capture_images/${encodeURIComponent(c.image_path)}" style="width:100%; border:1px solid var(--line)"></a>`;
+    $("wiki-meta").innerHTML =
+      `<div>Captured</div><div>${new Date(c.captured_utc * 1000).toLocaleString()}</div>` +
+      `<div>Session</div><div>#${c.session_id} — ${esc(c.address)}</div>` +
+      `<div>Room / module</div><div>${esc(c.room || "—")} / ${esc(c.module)}</div>` +
+      `<div>Center / BW</div><div>${fmtF(c.center_mhz)} / ~${(c.bw_khz || 0).toFixed(0)} kHz</div>` +
+      `<div>Peak / floor</div><div>${c.peak_dbm} / ${c.floor_dbm} dBm</div>` +
+      `<div>Classification</div><div>${esc(c.classification)} ${esc(c.matched_label || "")}</div>`;
+    $("wiki-match").innerHTML = c.matches.length ?
+      `<div class="card" style="border-color:var(--amber); margin:8px 0">` +
+      `<b style="color:var(--amber)">⚠ MATCHES IN LIBRARY:</b> ` +
+      c.matches.map(m => `seen ${new Date(m.captured_utc * 1000).toLocaleDateString()} ` +
+        `at ${esc(m.address)}${m.room ? " (" + esc(m.room) + ")" : ""} — ` +
+        `<a style="color:var(--cyan); cursor:pointer" onclick="wikiOpen(${m.capture_id})">${esc(m.label)}</a>`)
+        .join("; ") + `</div>` : "";
+  } catch (e) { alert(e.message); }
+};
+
+$("btn-wiki-save").onclick = async () => {
+  if (!wikiSelected) return;
+  await api("/api/captures/" + wikiSelected.id, {
+    label: $("wiki-label").value, status: $("wiki-status").value,
+    category: $("wiki-cat-edit").value, notes: $("wiki-notes").value });
+  loadWiki();
+};
+$("btn-wiki-ai").onclick = async () => {
+  if (!wikiSelected) return;
+  $("wiki-desc").textContent = "asking the analyst model…";
+  try {
+    const r = await api(`/api/captures/${wikiSelected.id}/describe`, {});
+    $("wiki-desc").textContent = r.description;
+  } catch (e) { $("wiki-desc").textContent = "AI describe failed: " + e.message; }
+};
+$("btn-wiki-recapture").onclick = () => {
+  if (!wikiSelected) return;
+  if (!confirm(`Recapture ${fmtF(wikiSelected.center_mhz)} with the live analyzer now?`)) return;
+  captureSignals({ signal_ids: [] , recapture: wikiSelected.id });
 };
 
 /* ---------- inventory ---------- */

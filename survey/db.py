@@ -94,6 +94,25 @@ CREATE TABLE IF NOT EXISTS inventory (
     first_seen REAL, last_seen REAL,
     UNIQUE(session_id, kind, identifier)
 );
+CREATE TABLE IF NOT EXISTS captures (
+    id INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL,
+    signal_id INTEGER,           -- originating detection, if any
+    center_mhz REAL NOT NULL, span_mhz REAL, bw_khz REAL,
+    peak_dbm REAL, floor_dbm REAL, persistence REAL,
+    room TEXT, module TEXT,
+    captured_utc REAL,
+    image_path TEXT,             -- SVG fingerprint
+    data_json TEXT,              -- raw accumulator (freqs/avg/maxpeak/hits/passes)
+    features_json TEXT,          -- numeric shape profile
+    classification TEXT, matched_label TEXT,
+    category TEXT,               -- wiki section (editable)
+    label TEXT,                  -- wiki title (editable)
+    status TEXT DEFAULT 'unconfirmed',   -- unconfirmed | identified | threat
+    notes TEXT DEFAULT '',
+    description TEXT DEFAULT ''  -- auto/AI description
+);
+CREATE INDEX IF NOT EXISTS idx_captures_freq ON captures(center_mhz);
 CREATE TABLE IF NOT EXISTS reports (
     id INTEGER PRIMARY KEY,
     session_id INTEGER NOT NULL,

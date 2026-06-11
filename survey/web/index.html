@@ -122,6 +122,7 @@ footer .sim { color:var(--red); font-weight:bold; }
   <div class="step" data-view="directional"><div class="dot" id="dot-directional"></div>7 · DIRECTIONAL</div>
   <div class="step" data-view="results"><div class="dot" id="dot-results"></div>8 · RESULTS / REPORT</div>
   <div class="sect">TOOLS</div>
+  <div class="step" data-view="wiki"><div class="dot" id="dot-wiki"></div>SIGNAL WIKI</div>
   <div class="step" data-view="inventory"><div class="dot" id="dot-inventory"></div>INVENTORY (WiFi/BT)</div>
   <div class="step" data-view="calibration"><div class="dot" id="dot-calibration"></div>CALIBRATION (shop)</div>
 </nav>
@@ -300,6 +301,7 @@ footer .sim { color:var(--red); font-weight:bold; }
   <div class="card">
     <h3>ANOMALIES — could NOT be verified against any licensed/known source</h3>
     <div class="row">
+      <button class="btn primary" id="btn-capture-all">CAPTURE ALL → SIGNAL WIKI</button>
       <button class="btn" id="btn-discord">ASK COMMUNITY (Discord, sanitized)</button>
       <span class="note" id="discord-msg"></span>
     </div>
@@ -317,6 +319,44 @@ footer .sim { color:var(--red); font-weight:bold; }
   <div class="card">
     <h3>GENERATED REPORTS (archived per session)</h3>
     <table id="tbl-reports"></table>
+  </div>
+</section>
+
+<!-- ============ SIGNAL WIKI ============ -->
+<section class="view" id="view-wiki">
+  <h2>SIGNAL WIKI <span class="tag">internal library — zoom fingerprints across all sweeps</span></h2>
+  <div class="card">
+    <div class="row">
+      <label>Category</label><select id="wiki-cat"><option value="">all</option></select>
+      <label>Search</label><input type="text" id="wiki-q" style="width:220px" placeholder="label / notes / description">
+      <span class="note" id="wiki-count"></span>
+    </div>
+    <div style="display:flex; gap:14px">
+      <div class="scroll" style="flex:1; max-height:560px"><table id="tbl-wiki"></table></div>
+      <div id="wiki-detail" style="flex:1.4; display:none">
+        <div class="card" style="margin:0">
+          <div class="row">
+            <input type="text" id="wiki-label" style="flex:1; font-weight:bold">
+            <select id="wiki-status">
+              <option value="unconfirmed">UNCONFIRMED</option>
+              <option value="identified">IDENTIFIED</option>
+              <option value="threat">THREAT / DEVICE FOUND</option>
+            </select>
+          </div>
+          <div id="wiki-img" style="margin:10px 0"></div>
+          <div id="wiki-match"></div>
+          <div class="kv" id="wiki-meta" style="margin:10px 0"></div>
+          <p class="note" id="wiki-desc" style="white-space:pre-wrap"></p>
+          <div class="row">
+            <input type="text" id="wiki-cat-edit" class="small" style="width:220px" title="category">
+            <button class="btn" id="btn-wiki-save">SAVE</button>
+            <button class="btn" id="btn-wiki-ai">AI DESCRIBE</button>
+            <button class="btn" id="btn-wiki-recapture">RECAPTURE (live)</button>
+          </div>
+          <div class="row"><textarea id="wiki-notes" style="width:100%; height:70px; background:#0d1319; color:var(--txt); border:1px solid var(--line); font-family:var(--mono)" placeholder="analyst notes"></textarea></div>
+        </div>
+      </div>
+    </div>
   </div>
 </section>
 
