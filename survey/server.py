@@ -255,6 +255,14 @@ def create_app(db, cfg) -> Flask:
                 kept.append(r)
         return jsonify(kept)
 
+    @app.get("/api/expected")
+    def expected():
+        from .expected import expected_vs_found
+        session = st.session()
+        if not session:
+            return err("no session")
+        return jsonify(expected_vs_found(db, session["id"]))
+
     @app.get("/api/rooms")
     def rooms():
         session = st.session()

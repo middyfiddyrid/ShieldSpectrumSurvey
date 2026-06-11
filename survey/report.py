@@ -296,6 +296,37 @@ def generate_report(db, cfg, session_id: int, reports_dir: str) -> dict:
         w = min(1.0, 5.5 / max(len(rooms), 1)) * inch
         el.append(_table(rows, [1.3 * inch] + [w] * len(rooms)))
 
+    # ---- Expected vs found (receive-chain verification) ----
+    from .expected import expected_vs_found
+    exp = expected_vs_found(db, session_id)
+    if exp["counts"]["total_records"]:
+        c = exp["counts"]
+        el.append(Paragraph("Expected-Signal Verification", ss["H1x"]))
+        el.append(Paragraph(
+            f"Of {c['total_records']} licensed transmitters predicted at this location by "
+            f"the database baseline, {c['found']} were received during the survey. "
+            "Signals expected but not received are listed below with the assessed reason — "
+            "this validates the receive chain and documents why any predicted signal is "
+            "absent, rather than leaving the gap unexplained.", ss["Body"]))
+        missing = [r for r in exp["rows"] if not r["found"]]
+        if missing:
+            rows = [["Frequency", "Record", "Dist mi", "Expectation", "Assessed reason"]]
+            for r in missing[:40]:
+                f = _fmt_freq(r["freq_low_mhz"]) if r["freq_low_mhz"] == r["freq_high_mhz"] \
+                    else f"{_fmt_freq(r['freq_low_mhz'])} – {_fmt_freq(r['freq_high_mhz'])}"
+                rows.append([Paragraph(f, ss["Cell"]),
+                             Paragraph((r["callsign"] or r["label"] or "")[:40], ss["Cell"]),
+                             f"{r['distance_mi']:.0f}" if r["distance_mi"] is not None else "",
+                             r["expectation"],
+                             Paragraph(r["reason"][:220], ss["Cell"])])
+            el.append(_table(rows, [1.1 * inch, 1.2 * inch, 0.55 * inch,
+                                    0.8 * inch, 3.35 * inch]))
+            if len(missing) > 40:
+                el.append(Paragraph(f"…and {len(missing) - 40} more lower-expectation "
+                                    "records (full list in the CSV export).", ss["Cell"]))
+        else:
+            el.append(Paragraph("Every predicted signal was received.", ss["Body"]))
+
     # ---- Anomaly list ----
     el.append(Paragraph("Anomalies — Unverified / Flagged Signals (ranked)", ss["H1x"]))
     anomalies = [s for s in signals if s["phase"] == "interior"

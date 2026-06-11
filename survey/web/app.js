@@ -619,7 +619,39 @@ async function loadResults() {
   } catch (e) {}
   loadSignals();
   loadReports();
+  loadExpected();
 }
+
+async function loadExpected() {
+  try {
+    const r = await api("/api/expected");
+    const c = r.counts;
+    $("expected-summary").innerHTML =
+      `${c.found}/${c.total_records} predicted signals received · ` +
+      (c.missing_strong ? `<span class="score-hi">${c.missing_strong} strongly-expected MISSING</span> · ` : "") +
+      (c.missing_medium ? `${c.missing_medium} medium missing · ` : "") +
+      `${c.missing_weak} intermittent silent · ${c.not_swept} not swept`;
+    const showFound = $("expected-show-found").checked;
+    const rows = r.rows.filter(x => showFound || !x.found);
+    $("tbl-expected").innerHTML =
+      "<tr><th>Frequency</th><th>Station / record</th><th>Dist mi</th><th>Expectation</th>" +
+      "<th>Status</th><th>Why</th></tr>" +
+      rows.map(x => {
+        const f = x.freq_low_mhz === x.freq_high_mhz ? fmtF(x.freq_low_mhz)
+          : fmtF(x.freq_low_mhz) + "–" + fmtF(x.freq_high_mhz);
+        const statusPill = x.found ? '<span class="pill ok">RECEIVED</span>'
+          : !x.swept ? '<span class="pill not_configured">NOT SWEPT</span>'
+          : x.expectation === "strong" ? '<span class="pill failed">MISSING</span>'
+          : '<span class="pill stale">SILENT</span>';
+        return `<tr${!x.found && x.expectation === "strong" ? ' style="background:#1f1212"' : ""}>` +
+          `<td>${f}</td><td>${esc(x.callsign || x.label)}</td>` +
+          `<td>${x.distance_mi != null ? x.distance_mi.toFixed(0) : ""}</td>` +
+          `<td>${esc(x.expectation)} — ${esc(x.basis)}</td>` +
+          `<td>${statusPill}</td><td style="max-width:340px">${esc(x.reason)}</td></tr>`;
+      }).join("") || "<tr><td>nothing to verify — build the baseline and sweep first</td></tr>";
+  } catch (e) { $("expected-summary").textContent = e.message; }
+}
+$("expected-show-found").onchange = loadExpected;
 async function loadSignals() {
   const phase = $("signals-phase").value;
   try {
