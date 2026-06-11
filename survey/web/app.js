@@ -71,13 +71,20 @@ async function loadEngagement() {
     $("eng-client").value = e.client_name || "";
     $("eng-contact").value = e.client_contact || "";
     $("eng-concerns").value = e.client_concerns || "";
+    $("eng-offsite").value = e.offsite_location || "";
+    $("eng-scheduling").value = e.scheduling_note || "";
   } catch (err) {}
+}
+function engagementBody() {
+  return {
+    engagement_type: $("eng-type").value, client_name: $("eng-client").value,
+    client_contact: $("eng-contact").value, client_concerns: $("eng-concerns").value,
+    offsite_location: $("eng-offsite").value, scheduling_note: $("eng-scheduling").value,
+  };
 }
 $("btn-eng-save").onclick = async () => {
   try {
-    await api("/api/engagement", {
-      engagement_type: $("eng-type").value, client_name: $("eng-client").value,
-      client_contact: $("eng-contact").value, client_concerns: $("eng-concerns").value });
+    await api("/api/engagement", engagementBody());
     $("eng-msg").textContent = "saved — technician tasks seeded below";
     loadTechTasks();
   } catch (e) { $("eng-msg").textContent = "FAILED: " + e.message; }
@@ -85,9 +92,7 @@ $("btn-eng-save").onclick = async () => {
 $("btn-presweep").onclick = async () => {
   $("eng-msg").textContent = "rendering…";
   try {
-    await api("/api/engagement", {
-      engagement_type: $("eng-type").value, client_name: $("eng-client").value,
-      client_contact: $("eng-contact").value, client_concerns: $("eng-concerns").value });
+    await api("/api/engagement", engagementBody());
     const r = await api("/api/report/presweep", {});
     showReportLink("eng-msg", r, "pre-sweep briefing");
     loadTechTasks();

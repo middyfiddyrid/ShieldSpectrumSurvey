@@ -118,7 +118,8 @@ def create_app(db, cfg) -> Flask:
         row = db.query_one("SELECT * FROM engagement WHERE session_id=?", (session["id"],))
         return jsonify(row or {"engagement_type": "onsite", "status": "intake",
                                "client_name": "", "client_contact": "",
-                               "client_concerns": ""})
+                               "client_concerns": "", "offsite_location": "",
+                               "scheduling_note": ""})
 
     @app.post("/api/engagement")
     def engagement_save():
@@ -128,13 +129,17 @@ def create_app(db, cfg) -> Flask:
         b = request.get_json(force=True)
         db.execute(
             "INSERT INTO engagement (session_id,engagement_type,client_name,client_contact,"
-            "client_concerns,status,updated_utc) VALUES (?,?,?,?,?,?,?) "
+            "client_concerns,offsite_location,scheduling_note,status,updated_utc) "
+            "VALUES (?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(session_id) DO UPDATE SET engagement_type=excluded.engagement_type,"
             "client_name=excluded.client_name,client_contact=excluded.client_contact,"
-            "client_concerns=excluded.client_concerns,status=excluded.status,"
+            "client_concerns=excluded.client_concerns,"
+            "offsite_location=excluded.offsite_location,"
+            "scheduling_note=excluded.scheduling_note,status=excluded.status,"
             "updated_utc=excluded.updated_utc",
             (session["id"], b.get("engagement_type", "onsite"), b.get("client_name", ""),
              b.get("client_contact", ""), b.get("client_concerns", ""),
+             b.get("offsite_location", ""), b.get("scheduling_note", ""),
              b.get("status", "intake"), time.time()))
         # seed technician tasks on first save
         existing = db.query_one("SELECT COUNT(*) n FROM tech_tasks WHERE session_id=?",

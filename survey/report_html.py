@@ -247,6 +247,9 @@ def generate_presweep_html(db, cfg, session_id: int, reports_dir: str) -> dict:
     etype = eng.get("engagement_type", "onsite")
     report_id = f"SHD-{time.strftime('%Y')}-TSCM-{session_id:03d}-PRELIM"
     ctx = {
+        "year": time.strftime("%Y"),
+        "offsite_location": html.escape(eng.get("offsite_location") or ""),
+        "scheduling_note": html.escape(eng.get("scheduling_note") or ""),
         "company": company,
         "company_short": company.split()[0] if company else "Shield",
         "report_id": report_id,

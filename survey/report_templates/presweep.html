@@ -200,6 +200,37 @@
   hardening. You receive a final report mirroring exactly what is found on site. This survey
   is receive-only; nothing is transmitted.</p>
 
+  <h3>Equipment deployed on this engagement</h3>
+  <ul class="terms">
+    <li><b>Wideband RF spectrum analysis</b> — dual-module analyzer covering 50&nbsp;kHz to
+    6.1&nbsp;GHz, driven by the {{ company }} proprietary TSCM suite (baseline correlation,
+    anomaly classification, and room-by-room localization).</li>
+    <li><b>Thermal-imaging camera</b> — powered electronics dissipate heat; thermal
+    inspection reveals active devices concealed behind walls, fixtures, and furnishings that
+    emit no detectable RF.</li>
+    <li><b>Fiber-optic borescope</b> — direct visual inspection inside wall voids, outlets,
+    vents, fixtures, and vehicle cavities where devices are physically concealed.</li>
+    <li><b>Wi-Fi &amp; Bluetooth enumeration</b> — every wireless device on or near the
+    premises is inventoried and reconciled against what you actually own.</li>
+  </ul>
+
+  <h2><span class="secnum">{{ "6" if shielding else "5" }}.</span>NEXT STEPS &amp; SCHEDULING</h2>
+  {% if offsite_location %}
+  <p><b>Initial meeting (offsite):</b> consistent with counter-surveillance practice, the
+  intake conversation is held away from the subject property at a neutral public venue:
+  {{ offsite_location }}.</p>
+  {% endif %}
+  {% if scheduling_note %}
+  <p><b>Availability:</b> {{ scheduling_note }}</p>
+  {% endif %}
+  <p>To confirm a date or ask anything about this briefing, reply by phone or email — no
+  detail of this engagement is discussed with anyone but you.</p>
+  <div class="callout">
+    <p>Pleased with your result? Ask about our <b>attorney referral process</b> — for matters
+    that call for legal follow-through, we coordinate with counsel including
+    <b>Tony Thurman</b>.</p>
+  </div>
+
   <div class="pagebreak"></div>
 
   <h2><span class="secnum">A.</span>APPENDIX A — ALLOCATED-SPECTRUM MAP</h2>
@@ -212,6 +243,13 @@
   <div class="legend">
     {% for l in legend %}<span><span class="chip" style="background:{{ l.color }}"></span>{{ l.label }}</span>{% endfor %}
   </div>
+
+  <p class="disc" style="margin-top:26px">© {{ year }} {{ company }}. All rights reserved.
+  This document, the {{ company }} proprietary TSCM suite, and the methods, baselines, and
+  analytical processes described or embodied herein are the confidential intellectual
+  property of {{ company }}. Unauthorized reproduction, distribution, disclosure, or
+  <b>reverse engineering</b> of this document or of any {{ company_short }} tool, software,
+  or methodology is prohibited.</p>
 
   <div class="docfoot">
     <span><b>{{ company }}</b> · {{ report_id }}</span>

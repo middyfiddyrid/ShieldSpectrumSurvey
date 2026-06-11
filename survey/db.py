@@ -123,6 +123,8 @@ CREATE TABLE IF NOT EXISTS engagement (
     engagement_type TEXT DEFAULT 'onsite',   -- onsite | remote | monitoring
     client_name TEXT DEFAULT '', client_contact TEXT DEFAULT '',
     client_concerns TEXT DEFAULT '',          -- the client's OWN stated concerns (client-facing)
+    offsite_location TEXT DEFAULT '',          -- neutral intake-meeting venue (client-facing)
+    scheduling_note TEXT DEFAULT '',           -- availability / time-on-site (client-facing)
     status TEXT DEFAULT 'intake',
     updated_utc REAL
 );
@@ -205,6 +207,13 @@ class Database:
             if "named_by_client" not in cols:
                 c.execute("ALTER TABLE persons_of_interest "
                           "ADD COLUMN named_by_client INTEGER DEFAULT 0")
+            cols = {r["name"] for r in c.execute("PRAGMA table_info(engagement)")}
+            if "offsite_location" not in cols:
+                c.execute("ALTER TABLE engagement "
+                          "ADD COLUMN offsite_location TEXT DEFAULT ''")
+            if "scheduling_note" not in cols:
+                c.execute("ALTER TABLE engagement "
+                          "ADD COLUMN scheduling_note TEXT DEFAULT ''")
 
     def _conn(self):
         conn = sqlite3.connect(self.path, timeout=30)
