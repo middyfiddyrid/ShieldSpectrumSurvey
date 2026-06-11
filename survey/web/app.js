@@ -19,14 +19,20 @@ async function api(path, opts) {
 }
 
 /* popup blockers silently eat window.open after fetch — render a persistent
-   link the operator can click instead */
+   link the operator can click instead. The embedded preview browser also
+   cannot render PDFs at all (black page), so the PRIMARY action opens the
+   file in the desktop PDF viewer via the server. */
+window.openReportLocal = async (filename) => {
+  try { await api("/api/reports/open_local", { filename }); }
+  catch (e) { alert("Could not open in desktop viewer: " + e.message); }
+};
 function showReportLink(elId, r, label) {
   const href = "/reports/" + encodeURIComponent(r.filename);
   $(elId).innerHTML =
     `✔ ${esc(label)} ready — ` +
-    `<a class="report-ready" href="${href}" target="_blank" rel="noopener">OPEN PDF</a> ` +
+    `<a class="report-ready" href="#" onclick="openReportLocal('${esc(r.filename)}');return false">OPEN IN PDF VIEWER</a> ` +
     `<a class="report-ready" href="${href}" download>DOWNLOAD</a> ` +
-    `<span class="note">${esc(r.filename)}</span>`;
+    `<span class="note">${esc(r.filename)} — if the in-app browser shows a black page, use OPEN IN PDF VIEWER</span>`;
 }
 
 const App = {
@@ -956,10 +962,11 @@ $("signals-phase").onchange = loadSignals;
 async function loadReports() {
   try {
     const reps = await api("/api/reports");
-    $("tbl-reports").innerHTML = "<tr><th>Generated</th><th>Kind</th><th>File</th></tr>" +
+    $("tbl-reports").innerHTML = "<tr><th>Generated</th><th>Kind</th><th>File</th><th></th></tr>" +
       reps.map(r => `<tr><td>${new Date(r.generated_utc * 1000).toLocaleString()}</td>` +
         `<td><span class="pill ${r.kind === "FINAL" ? "ok" : "stale"}">${r.kind}</span></td>` +
-        `<td><a style="color:var(--cyan)" href="/reports/${encodeURIComponent(r.filename)}" target="_blank">${esc(r.filename)}</a></td></tr>`).join("");
+        `<td><a style="color:var(--cyan)" href="/reports/${encodeURIComponent(r.filename)}" download>${esc(r.filename)}</a></td>` +
+        `<td><button class="btn" onclick="openReportLocal('${esc(r.filename)}')">OPEN IN PDF VIEWER</button></td></tr>`).join("");
   } catch (e) {}
 }
 

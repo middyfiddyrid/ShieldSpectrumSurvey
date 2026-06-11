@@ -316,6 +316,17 @@ def create_app(db, cfg) -> Flask:
         return send_from_directory(cfg.abs_path("case_files"), row["stored_name"],
                                    as_attachment=True, download_name=row["filename"])
 
+    @app.post("/api/reports/open_local")
+    def report_open_local():
+        # the embedded preview browser cannot render PDFs (black page), so the
+        # UI offers opening the file in the system's default desktop viewer
+        name = os.path.basename(request.get_json(force=True).get("filename") or "")
+        path = os.path.join(st.reports_dir, name)
+        if not name or not os.path.exists(path):
+            return err("no such report", 404)
+        os.startfile(path)
+        return jsonify({"opened": True})
+
     # ---------- case-study / device library (cross-session) ----------
 
     CS_FIELDS = ("title", "device_class", "rf_signature", "discovery",
