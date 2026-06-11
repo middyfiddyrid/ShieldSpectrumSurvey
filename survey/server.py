@@ -786,6 +786,37 @@ def create_app(db, cfg) -> Flask:
 
     # ---------- report / export ----------
 
+    @app.get("/api/report_options")
+    def report_options_get():
+        from .report import DEFAULT_REPORT_OPTIONS
+        session = st.session()
+        if not session:
+            return err("no session")
+        row = db.query_one("SELECT options_json FROM report_options WHERE session_id=?",
+                           (session["id"],))
+        opts = dict(DEFAULT_REPORT_OPTIONS)
+        if row and row["options_json"]:
+            try:
+                opts.update(json.loads(row["options_json"]))
+            except (TypeError, ValueError):
+                pass
+        return jsonify(opts)
+
+    @app.post("/api/report_options")
+    def report_options_save():
+        from .report import DEFAULT_REPORT_OPTIONS
+        session = st.session()
+        if not session:
+            return err("no session")
+        body = request.get_json(force=True)
+        opts = {k: bool(body.get(k, False)) for k in DEFAULT_REPORT_OPTIONS}
+        db.execute(
+            "INSERT INTO report_options (session_id,options_json,updated_utc) VALUES (?,?,?) "
+            "ON CONFLICT(session_id) DO UPDATE SET options_json=excluded.options_json,"
+            "updated_utc=excluded.updated_utc",
+            (session["id"], json.dumps(opts), time.time()))
+        return jsonify({"saved": True, "options": opts})
+
     @app.post("/api/report/generate")
     def report_generate():
         session = st.session()

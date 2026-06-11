@@ -146,6 +146,111 @@ def _table(data, col_widths, header_bg=C_BG, font_size=7.5):
     return t
 
 
+DEFAULT_REPORT_OPTIONS = {
+    "rf_environment": False,    # density assessment + shielding recommendation
+    "rf_exposure": False,       # balanced non-ionizing exposure context + COI
+    "glossary": False,          # client-friendly glossary of terms
+}
+
+
+def rf_density(baseline: list[dict]) -> dict:
+    """Classify the RF environment from the licensed-record baseline."""
+    strong = [r for r in baseline
+              if r.get("confidence") == "record"
+              and (r.get("service") or "").upper() in ("FM", "TV")
+              and r.get("distance_mi") is not None and r["distance_mi"] <= 30]
+    n = len(strong)
+    tier = "high" if n >= 20 else "moderate" if n >= 8 else "low"
+    nearest = min((r["distance_mi"] for r in strong), default=None)
+    return {"count": n, "tier": tier, "nearest_mi": nearest}
+
+
+def _section_rf_environment(el, ss, baseline, company):
+    d = rf_density(baseline)
+    el.append(Paragraph("RF Environment & Shielding Assessment", ss["H1x"]))
+    nearest = (f" The nearest is about {d['nearest_mi']:.0f} mi away."
+               if d["nearest_mi"] is not None else "")
+    el.append(Paragraph(
+        f"This location sits in a <b>{d['tier']}-density</b> RF environment: roughly "
+        f"{d['count']} full-power broadcast transmitters operate within ~30 miles.{nearest} "
+        "A dense ambient RF environment is normal for an urban or suburban area and is not "
+        "itself a sign of surveillance — but it does affect both the sweep and any decision "
+        "about shielding.", ss["Body"]))
+    if d["tier"] == "high":
+        el.append(Paragraph(
+            "Because the ambient environment here is dense, we recommend considering an "
+            "<b>RF shielding assessment</b>. In a security context, shielding a sensitive room "
+            "(attenuating signals in and out) both reduces the chance that a device inside can "
+            "reach a receiver outside, and lowers the ambient floor so a future sweep can resolve "
+            "weaker anomalies. This is a security recommendation, not a health one.", ss["Body"]))
+    else:
+        el.append(Paragraph(
+            "Shielding is not indicated by the ambient environment alone at this location. If "
+            "shielding is desired for a specific sensitive space, it can still be assessed on "
+            "request.", ss["Body"]))
+    el.append(Paragraph(
+        f"<i>Disclosure: {company} provides shielding assessment and installation services and "
+        "therefore has a commercial interest in this recommendation. It is offered as security "
+        "guidance, and any decision to proceed is entirely the client's.</i>", ss["Cell"]))
+
+
+def _section_rf_exposure(el, ss, baseline, company):
+    el.append(Paragraph("RF Exposure Context (balanced)", ss["H1x"]))
+    for para in (
+        "Clients in dense RF areas often ask whether ambient radio energy is a health concern. "
+        "The radio energy from broadcast, cellular, and Wi-Fi sources is <b>non-ionizing</b> — it "
+        "does not have the energy to break chemical bonds the way X-rays or UV do. In the United "
+        "States, public exposure is regulated by the FCC using limits derived from international "
+        "(ICNIRP/IEEE) guidelines, which are set well below the levels at which any established "
+        "effect occurs. At normal ambient distances — i.e., not standing at a transmitter — "
+        "measured power density is typically a small fraction of those limits.",
+        "We present both sides fairly. The mainstream position of health agencies (WHO, FCC, and "
+        "most national bodies) is that there is no established health effect from RF exposure "
+        "below the regulatory limits. In 2011 the WHO's IARC classified RF fields as 'possibly "
+        "carcinogenic' (Group 2B) — a category that reflects <i>limited</i> evidence and also "
+        "contains items like pickled vegetables and aloe; it denotes 'cannot be ruled out,' not "
+        "'shown to cause harm.' A minority of researchers argue for non-thermal effects or "
+        "electromagnetic sensitivity; these claims are not established and have been difficult to "
+        "replicate under controlled conditions.",
+        "Conflicts of interest exist on all sides and should be weighed: industry-funded research "
+        "can bias toward finding no effect, while advocacy groups and businesses that sell "
+        f"shielding products (which would include {company}) have an interest in emphasizing risk. "
+        "We disclose our own interest here for that reason.",
+        f"{company}'s recommendation: we base shielding recommendations on <b>security</b> "
+        "grounds, not health. Ambient RF at this location is consistent with any comparable "
+        "populated area. If a client wishes to reduce personal exposure for peace of mind, "
+        "shielding is low-risk but we make no medical claims; anyone with a specific health "
+        "concern should consult a physician.",
+    ):
+        el.append(Paragraph(para, ss["Body"]))
+
+
+GLOSSARY = [
+    ("Baseline / expected spectrum", "The database-built list of every signal that should be "
+     "present at your address (licensed stations, cellular, allocations) — what 'normal' looks "
+     "like here."),
+    ("Noise floor", "The background level of radio energy with no specific signal present; "
+     "signals are detected when they rise a set amount above it."),
+    ("VERIFIED / PLAUSIBLE / UNVERIFIED", "How each detected signal was classified: matched to a "
+     "specific licensed source; inside a known band but unmatched; or matching nothing known — "
+     "the last being the candidates for investigation."),
+    ("Persistence", "How consistently a signal was present across repeated passes — steady "
+     "carriers vs. brief bursts."),
+    ("Interior-vs-exterior delta", "How much stronger a signal is inside the premises than "
+     "outside; a large positive value indicates a locally-sourced signal."),
+    ("Directional pass", "Hunting a specific unexplained frequency with a directional antenna to "
+     "locate its source by signal strength."),
+    ("Receive-only", "The analyzer only listens; it never transmits. The survey cannot interfere "
+     "with any device or network."),
+]
+
+
+def _section_glossary(el, ss):
+    el.append(Paragraph("Glossary", ss["H1x"]))
+    for term, defn in GLOSSARY:
+        el.append(Paragraph(f"<b>{term}.</b> {defn}", ss["Body"]))
+
+
 def generate_report(db, cfg, session_id: int, reports_dir: str) -> dict:
     ss = _styles()
     session = db.query_one("SELECT * FROM sessions WHERE id=?", (session_id,))
@@ -178,6 +283,15 @@ def generate_report(db, cfg, session_id: int, reports_dir: str) -> dict:
                             rightMargin=0.75 * inch,
                             title=f"RF Spectrum Survey — {session['address']}")
     el = []
+
+    opt_row = db.query_one("SELECT options_json FROM report_options WHERE session_id=?",
+                           (session_id,))
+    options = dict(DEFAULT_REPORT_OPTIONS)
+    if opt_row and opt_row["options_json"]:
+        try:
+            options.update(json.loads(opt_row["options_json"]))
+        except (TypeError, ValueError):
+            pass
 
     # ---- Cover block ----
     logo = cfg.get("branding", "logo_path", default="")
@@ -405,6 +519,12 @@ def generate_report(db, cfg, session_id: int, reports_dir: str) -> dict:
         el.append(_table(rows, [0.5 * inch, 1.4 * inch, 1.45 * inch, 0.65 * inch,
                                 1.25 * inch, 1.45 * inch]))
 
+    # ---- Optional sections (operator-selected) ----
+    if options.get("rf_environment"):
+        _section_rf_environment(el, ss, baseline, company)
+    if options.get("rf_exposure"):
+        _section_rf_exposure(el, ss, baseline, company)
+
     # ---- Recommendations ----
     el.append(Paragraph("Recommendations / Next Steps", ss["H1x"]))
     recs = []
@@ -425,6 +545,9 @@ def generate_report(db, cfg, session_id: int, reports_dir: str) -> dict:
                 "changes, construction, or any suspected intrusion.")
     for r in recs:
         el.append(Paragraph("•  " + r, ss["Body"]))
+
+    if options.get("glossary"):
+        _section_glossary(el, ss)
 
     cb = _watermark_and_footer(interim, company)
     doc.build(el, onFirstPage=cb, onLaterPages=cb)

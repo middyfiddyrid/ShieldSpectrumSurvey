@@ -765,7 +765,26 @@ async function loadResults() {
   loadSignals();
   loadReports();
   loadExpected();
+  loadReportOptions();
 }
+
+async function loadReportOptions() {
+  try {
+    const o = await api("/api/report_options");
+    document.querySelectorAll(".report-opt").forEach(cb => {
+      cb.checked = !!o[cb.dataset.opt];
+    });
+  } catch (e) {}
+}
+async function saveReportOptions() {
+  const body = {};
+  document.querySelectorAll(".report-opt").forEach(cb => body[cb.dataset.opt] = cb.checked);
+  try {
+    await api("/api/report_options", body);
+    $("report-opt-msg").textContent = "saved — included on next GENERATE REPORT";
+  } catch (e) { $("report-opt-msg").textContent = e.message; }
+}
+document.querySelectorAll(".report-opt").forEach(cb => cb.onchange = saveReportOptions);
 
 async function loadExpected() {
   try {

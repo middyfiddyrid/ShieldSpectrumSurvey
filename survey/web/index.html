@@ -341,6 +341,15 @@ footer .sim { color:var(--red); font-weight:bold; }
 <section class="view" id="view-results">
   <h2>RESULTS <span class="tag">anomalies ranked by score</span></h2>
   <div class="card">
+    <h3>REPORT OPTIONS <span class="tag" style="font-size:11px">extra sections to include when you GENERATE REPORT</span></h3>
+    <div class="row">
+      <label><input type="checkbox" class="report-opt" data-opt="rf_environment"> RF environment &amp; shielding assessment</label>
+      <label><input type="checkbox" class="report-opt" data-opt="rf_exposure"> RF exposure context (balanced, w/ conflicts of interest)</label>
+      <label><input type="checkbox" class="report-opt" data-opt="glossary"> Client glossary</label>
+      <span class="note" id="report-opt-msg"></span>
+    </div>
+  </div>
+  <div class="card">
     <h3>ANOMALIES — could NOT be verified against any licensed/known source</h3>
     <div class="row">
       <button class="btn primary" id="btn-capture-all">CAPTURE ALL → SIGNAL WIKI</button>
