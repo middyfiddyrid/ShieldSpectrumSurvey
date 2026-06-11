@@ -202,6 +202,25 @@ def rf_density(baseline: list[dict]) -> dict:
             "recommend": tier == "high" or cell_tier == "high"}
 
 
+def _property_photo(el, ss, cfg, session_id, address):
+    """Overhead/property image on the cover if one exists for the session
+    (data/property_photos/session<id>.png|.jpg)."""
+    for ext in (".png", ".jpg", ".jpeg"):
+        path = cfg.abs_path(os.path.join("data", "property_photos",
+                                         f"session{session_id}{ext}"))
+        if os.path.exists(path):
+            try:
+                el.append(Image(path, width=7.0 * inch, height=3.2 * inch,
+                                kind="proportional"))
+                el.append(Paragraph(
+                    f"{address} — overhead view. "
+                    "Imagery: Esri World Imagery (Maxar).", ss["Cell"]))
+                el.append(Spacer(1, 12))
+            except Exception:  # noqa: BLE001 - bad image renders text-only
+                pass
+            return
+
+
 def _dedup_nearest(rows):
     """One row per station (callsign/label), keeping the nearest record."""
     best = {}
@@ -527,6 +546,8 @@ def generate_report(db, cfg, session_id: int, reports_dir: str) -> dict:
         ("LINEBELOW", (0, 0), (-1, -1), 0.4, colors.HexColor("#cccccc")),
     ]))
     el.append(t)
+    el.append(Spacer(1, 14))
+    _property_photo(el, ss, cfg, session_id, session["address"])
     el.append(PageBreak())
 
     # ---- Methodology summary ----
@@ -875,6 +896,7 @@ def generate_presweep_report(db, cfg, session_id: int, reports_dir: str) -> dict
                            ("LINEBELOW", (0, 0), (-1, -1), 0.4, colors.HexColor("#cccccc"))]))
     el.append(t)
     el.append(Spacer(1, 14))
+    _property_photo(el, ss, cfg, session_id, session["address"])
 
     el.append(Paragraph("What this briefing is", ss["H1x"]))
     el.append(Paragraph(

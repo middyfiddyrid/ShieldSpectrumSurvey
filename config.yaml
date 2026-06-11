@@ -3,8 +3,8 @@ app:
   port: 8765
   open_browser: true
 branding:
-  company: Shield TSCM
-  logo_path: ''
+  company: Shield Security Systems
+  logo_path: 'C:\Users\Union Terminal\Desktop\Shield_TSCM_Business\branding\shield_security_logo.png'
   operator: ''
 radius:
   broadcast_miles: 25
