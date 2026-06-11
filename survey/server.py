@@ -316,6 +316,68 @@ def create_app(db, cfg) -> Flask:
         return send_from_directory(cfg.abs_path("case_files"), row["stored_name"],
                                    as_attachment=True, download_name=row["filename"])
 
+    # ---------- case-study / device library (cross-session) ----------
+
+    CS_FIELDS = ("title", "device_class", "rf_signature", "discovery",
+                 "case_history", "lessons")
+
+    @app.get("/api/case_studies")
+    def case_studies_list():
+        return jsonify(db.query("SELECT * FROM case_studies ORDER BY id"))
+
+    @app.post("/api/case_studies")
+    def case_study_save():
+        body = request.get_json(force=True)
+        if not (body.get("title") or "").strip():
+            return err("title required")
+        vals = {k: body.get(k, "") for k in CS_FIELDS}
+        deid = 1 if body.get("deidentified") else 0
+        if body.get("id"):
+            sets = ", ".join(f"{k}=?" for k in CS_FIELDS)
+            db.execute(f"UPDATE case_studies SET {sets}, deidentified=?, "
+                       "updated_utc=? WHERE id=?",
+                       (*[vals[k] for k in CS_FIELDS], deid, time.time(), body["id"]))
+            cid = body["id"]
+        else:
+            cols = ",".join(CS_FIELDS)
+            ph = ",".join("?" * len(CS_FIELDS))
+            cid = db.execute(
+                f"INSERT INTO case_studies ({cols},deidentified,created_utc,updated_utc) "
+                f"VALUES ({ph},?,?,?)",
+                (*[vals[k] for k in CS_FIELDS], deid, time.time(), time.time()))
+        return jsonify({"id": cid, "saved": True})
+
+    @app.post("/api/case_studies/<int:cid>/delete")
+    def case_study_delete(cid):
+        db.execute("DELETE FROM case_studies WHERE id=?", (cid,))
+        return jsonify({"deleted": True})
+
+    @app.post("/api/case_studies/<int:cid>/photo")
+    def case_study_photo_upload(cid):
+        if not db.query_one("SELECT id FROM case_studies WHERE id=?", (cid,)):
+            return err("no such case study", 404)
+        f = request.files.get("file")
+        if not f or not f.filename:
+            return err("no file")
+        ext = os.path.splitext(f.filename)[1].lower()
+        if ext not in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
+            return err("image files only")
+        d = cfg.abs_path("data/case_study_photos")
+        os.makedirs(d, exist_ok=True)
+        path = os.path.join(d, f"cs{cid}{ext}")
+        f.save(path)
+        db.execute("UPDATE case_studies SET photo_path=?, updated_utc=? WHERE id=?",
+                   (path, time.time(), cid))
+        return jsonify({"uploaded": True})
+
+    @app.get("/case_study_photo/<int:cid>")
+    def case_study_photo_get(cid):
+        row = db.query_one("SELECT photo_path FROM case_studies WHERE id=?", (cid,))
+        if not row or not row["photo_path"] or not os.path.exists(row["photo_path"]):
+            return err("no photo", 404)
+        return send_from_directory(os.path.dirname(row["photo_path"]),
+                                   os.path.basename(row["photo_path"]))
+
     # ---------- overall state (polled by the UI) ----------
 
     @app.get("/api/state")

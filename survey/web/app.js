@@ -54,6 +54,7 @@ function show(view) {
   if (view === "wiki") loadWiki();
   if (view === "session") { loadCaseFiles(); loadEngagement(); loadTechTasks(); loadReportOptions(); }
   if (view === "poi") loadPoi();
+  if (view === "cases") loadCases();
 }
 
 /* ---------- engagement / pre-sweep ---------- */
@@ -200,6 +201,77 @@ window.poiOpen = (p) => {
   $("poi-status").value = p.status || "open";
   $("poi-msg").textContent = `editing #${p.id}`;
   loadPoiDocs(p.id);
+};
+
+/* ---------- case-study / device library ---------- */
+const CS_EL = { title: "cs-title", device_class: "cs-device", rf_signature: "cs-rf",
+  discovery: "cs-discovery", case_history: "cs-history", lessons: "cs-lessons" };
+let csSelected = null;
+function csClear() {
+  csSelected = null;
+  Object.values(CS_EL).forEach(id => { $(id).value = ""; });
+  $("cs-deid").checked = false;
+  $("cs-msg").textContent = "";
+  $("cs-photo-block").style.display = "none";
+}
+function csShowPhoto() {
+  $("cs-photo-block").style.display = "";
+  const img = $("cs-photo");
+  img.onload = () => { img.style.display = ""; };
+  img.onerror = () => { img.style.display = "none"; };
+  img.src = `/case_study_photo/${csSelected}?t=${Date.now()}`;
+}
+$("btn-cs-new").onclick = csClear;
+$("btn-cs-save").onclick = async () => {
+  const body = { id: csSelected, deidentified: $("cs-deid").checked };
+  Object.entries(CS_EL).forEach(([k, id]) => body[k] = $(id).value);
+  try {
+    const r = await api("/api/case_studies", body);
+    csSelected = r.id;
+    $("cs-msg").textContent = "saved" + ($("cs-deid").checked ? ""
+      : " — will NOT appear in reports until attested de-identified");
+    loadCases(); csShowPhoto();
+  } catch (e) { $("cs-msg").textContent = "FAILED: " + e.message; }
+};
+$("btn-cs-delete").onclick = async () => {
+  if (!csSelected) return csClear();
+  if (!confirm("Delete this case study?")) return;
+  await api(`/api/case_studies/${csSelected}/delete`, {});
+  csClear(); loadCases();
+};
+$("btn-cs-photo").onclick = async () => {
+  if (!csSelected) return alert("Save the case study first.");
+  const f = $("cs-photo-input").files[0];
+  if (!f) return alert("Choose an image first.");
+  const fd = new FormData();
+  fd.append("file", f);
+  $("cs-photo-msg").textContent = "uploading…";
+  try {
+    const r = await fetch(`/api/case_studies/${csSelected}/photo`, { method: "POST", body: fd });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || "upload failed");
+    $("cs-photo-msg").textContent = "photo saved";
+    $("cs-photo-input").value = "";
+    csShowPhoto();
+  } catch (e) { $("cs-photo-msg").textContent = "FAILED: " + e.message; }
+};
+async function loadCases() {
+  try {
+    const rows = await api("/api/case_studies");
+    $("tbl-cases").innerHTML =
+      "<tr><th>Title</th><th>Device class</th><th>Report-eligible</th></tr>" +
+      rows.map(c => `<tr onclick='csOpen(${JSON.stringify(c).replace(/'/g, "&#39;")})' style="cursor:pointer">` +
+        `<td>${esc(c.title)}</td><td>${esc(c.device_class)}</td>` +
+        `<td><span class="pill ${c.deidentified ? "ok" : "stale"}">${c.deidentified ? "ATTESTED" : "NOT ATTESTED"}</span></td></tr>`).join("")
+      || "<tr><td>no case studies yet — add de-identified composite examples of device finds</td></tr>";
+  } catch (e) { $("tbl-cases").innerHTML = `<tr><td>${esc(e.message)}</td></tr>`; }
+}
+window.csOpen = (c) => {
+  csSelected = c.id;
+  Object.entries(CS_EL).forEach(([k, id]) => { $(id).value = c[k] || ""; });
+  $("cs-deid").checked = !!c.deidentified;
+  $("cs-msg").textContent = `editing #${c.id}`;
+  csShowPhoto();
 };
 
 /* ---------- polling ---------- */

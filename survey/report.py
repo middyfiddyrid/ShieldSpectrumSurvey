@@ -150,6 +150,7 @@ DEFAULT_REPORT_OPTIONS = {
     "rf_environment": False,    # density assessment + shielding recommendation
     "rf_exposure": False,       # balanced non-ionizing exposure context + COI
     "glossary": False,          # client-friendly glossary of terms
+    "case_studies": False,      # anonymized composite device-find examples
 }
 
 
@@ -243,6 +244,39 @@ def _section_rf_environment(el, ss, baseline, company):
         f"<i>Disclosure: {company} provides shielding assessment and installation services and "
         "therefore has a commercial interest in this recommendation. It is offered as security "
         "guidance, and any decision to proceed is entirely the client's.</i>", ss["Cell"]))
+
+
+def _section_case_studies(el, ss, studies, company):
+    """Anonymized composite device-find examples. Only studies the operator has
+    attested as de-identified are passed in — never render anything else."""
+    if not studies:
+        return
+    el.append(Paragraph("Examples From Our Case Files (Anonymized)", ss["H1x"]))
+    el.append(Paragraph(
+        "The examples below are drawn from prior engagements but are <b>composites</b>: "
+        "details have been altered and combined across cases so that no client, subject, "
+        "or location is identifiable. They are included to show what real-world "
+        "unauthorized devices look like and how they are found.", ss["Body"]))
+    for s in studies:
+        el.append(Paragraph(f"<b>{s['title']}</b>", ss["Body"]))
+        if (s.get("photo_path") or "") and os.path.exists(s["photo_path"]):
+            try:
+                el.append(Image(s["photo_path"], width=2.2 * inch, height=1.6 * inch,
+                                kind="proportional"))
+            except Exception:  # noqa: BLE001 - bad image renders text-only
+                pass
+        for label, key in (("Device class", "device_class"),
+                           ("RF signature", "rf_signature"),
+                           ("How it was found", "discovery"),
+                           ("Case history (composite)", "case_history"),
+                           ("What it teaches", "lessons")):
+            if (s.get(key) or "").strip():
+                el.append(Paragraph(f"<b>{label}:</b> {s[key]}", ss["Body"]))
+
+
+def _attested_case_studies(db, limit=6):
+    return db.query("SELECT * FROM case_studies WHERE deidentified=1 "
+                    "ORDER BY id LIMIT ?", (limit,))
 
 
 def _section_rf_exposure(el, ss, baseline, company):
@@ -575,6 +609,8 @@ def generate_report(db, cfg, session_id: int, reports_dir: str) -> dict:
         _section_rf_environment(el, ss, baseline, company)
     if options.get("rf_exposure"):
         _section_rf_exposure(el, ss, baseline, company)
+    if options.get("case_studies"):
+        _section_case_studies(el, ss, _attested_case_studies(db), company)
 
     # ---- Recommendations ----
     el.append(Paragraph("Recommendations / Next Steps", ss["H1x"]))
@@ -771,6 +807,8 @@ def generate_presweep_report(db, cfg, session_id: int, reports_dir: str) -> dict
 
     if options.get("rf_environment") and baseline:
         _section_rf_environment(el, ss, baseline, company)
+    if options.get("case_studies"):
+        _section_case_studies(el, ss, _attested_case_studies(db), company)
 
     el.append(Paragraph("Methodology (what the sweep will do)", ss["H1x"]))
     for para in (

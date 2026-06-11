@@ -129,6 +129,7 @@ footer .sim { color:var(--red); font-weight:bold; }
   <div class="sect">TOOLS</div>
   <div class="step" data-view="poi"><div class="dot" id="dot-poi"></div>PERSONS OF INTEREST</div>
   <div class="step" data-view="wiki"><div class="dot" id="dot-wiki"></div>SIGNAL WIKI</div>
+  <div class="step" data-view="cases"><div class="dot" id="dot-cases"></div>CASE STUDIES</div>
   <div class="step" data-view="inventory"><div class="dot" id="dot-inventory"></div>INVENTORY (WiFi/BT)</div>
   <div class="step" data-view="calibration"><div class="dot" id="dot-calibration"></div>CALIBRATION (shop)</div>
 </nav>
@@ -354,6 +355,7 @@ footer .sim { color:var(--red); font-weight:bold; }
       <label><input type="checkbox" class="report-opt" data-opt="rf_environment"> RF environment &amp; shielding assessment</label>
       <label><input type="checkbox" class="report-opt" data-opt="rf_exposure"> RF exposure context (balanced, w/ conflicts of interest)</label>
       <label><input type="checkbox" class="report-opt" data-opt="glossary"> Client glossary</label>
+      <label><input type="checkbox" class="report-opt" data-opt="case_studies"> Anonymized case-study examples (device library)</label>
       <span class="note" id="report-opt-msg"></span>
     </div>
   </div>
@@ -462,11 +464,58 @@ footer .sim { color:var(--red); font-weight:bold; }
   </div>
 </section>
 
+<!-- ============ CASE STUDIES ============ -->
+<section class="view" id="view-cases">
+  <h2>CASE-STUDY / DEVICE LIBRARY <span class="tag">anonymized composites — citable in client reports as education</span></h2>
+  <div class="card">
+    <p class="note">Examples of real device finds, kept as <b>de-identified composites</b>: details
+    altered and combined across cases so no client, subject, or location is identifiable. Only
+    entries with the attestation checked can render in reports (Results tab → report options →
+    anonymized case-study examples).</p>
+    <div style="display:flex; gap:14px">
+      <div class="scroll" style="flex:1; max-height:560px"><table id="tbl-cases"></table></div>
+      <div style="flex:1.5">
+        <div class="card" style="margin:0">
+          <input type="text" id="cs-title" style="width:100%" placeholder="title *">
+          <label>Device class (generic — e.g. consumer GPS tracker, audio transmitter)</label>
+          <textarea id="cs-device" style="width:100%; height:36px"></textarea>
+          <label>RF signature (generic signal description, no case specifics)</label>
+          <textarea id="cs-rf" style="width:100%; height:44px"></textarea>
+          <label>How it was found</label>
+          <textarea id="cs-discovery" style="width:100%; height:44px"></textarea>
+          <label>Case history — COMPOSITE ONLY: alter and combine details so nobody is identifiable</label>
+          <textarea id="cs-history" style="width:100%; height:60px"></textarea>
+          <label>What it teaches</label>
+          <textarea id="cs-lessons" style="width:100%; height:44px"></textarea>
+          <div class="row" style="margin-top:8px">
+            <label style="margin-top:0"><input type="checkbox" id="cs-deid"> I attest this is a de-identified composite — required before it can appear in any report</label>
+          </div>
+          <div class="row">
+            <button class="btn primary" id="btn-cs-save">SAVE</button>
+            <button class="btn" id="btn-cs-new">NEW / CLEAR</button>
+            <button class="btn danger" id="btn-cs-delete">DELETE</button>
+            <span class="note" id="cs-msg"></span>
+          </div>
+          <div id="cs-photo-block" style="display:none">
+            <h3>DEVICE PHOTO</h3>
+            <img id="cs-photo" style="max-width:260px; max-height:200px; display:none; border:1px solid var(--line)">
+            <div class="row" style="margin-top:6px">
+              <input type="file" id="cs-photo-input" accept="image/*">
+              <button class="btn" id="btn-cs-photo">UPLOAD PHOTO</button>
+              <span class="note" id="cs-photo-msg"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
 <!-- ============ SIGNAL WIKI ============ -->
 <style>
-#view-poi textarea, #view-poi label { display:block; width:100%; }
-#view-poi label { color:var(--dim); font-size:11px; margin-top:6px; }
-#view-poi textarea { background:#0d1319; color:var(--txt); border:1px solid var(--line);
+#view-poi textarea, #view-poi label, #view-cases textarea, #view-cases label { display:block; width:100%; }
+#view-poi label, #view-cases label { color:var(--dim); font-size:11px; margin-top:6px; }
+#view-poi textarea, #view-cases textarea { background:#0d1319; color:var(--txt); border:1px solid var(--line);
   font-family:var(--mono); font-size:12px; padding:6px; }
 </style>
 <section class="view" id="view-wiki">

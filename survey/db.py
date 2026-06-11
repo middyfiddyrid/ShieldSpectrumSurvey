@@ -161,6 +161,19 @@ CREATE TABLE IF NOT EXISTS reports (
     session_id INTEGER NOT NULL,
     path TEXT NOT NULL, kind TEXT, generated_utc REAL
 );
+CREATE TABLE IF NOT EXISTS case_studies (
+    id INTEGER PRIMARY KEY,
+    title TEXT NOT NULL,
+    device_class TEXT DEFAULT '',      -- e.g. consumer GPS tracker, audio transmitter
+    rf_signature TEXT DEFAULT '',      -- generic signal description, no case specifics
+    discovery TEXT DEFAULT '',         -- how the device was located
+    case_history TEXT DEFAULT '',      -- de-identified COMPOSITE narrative only
+    lessons TEXT DEFAULT '',           -- what the example teaches a client
+    photo_path TEXT DEFAULT '',        -- optional device photo (local file)
+    deidentified INTEGER DEFAULT 0,    -- operator attests composite is de-identified;
+                                       -- only attested studies render in reports
+    created_utc REAL, updated_utc REAL
+);
 CREATE INDEX IF NOT EXISTS idx_baseline_session ON baseline(session_id);
 CREATE INDEX IF NOT EXISTS idx_signals_session ON signals(session_id);
 CREATE INDEX IF NOT EXISTS idx_segments_sweep ON segments(sweep_id);
