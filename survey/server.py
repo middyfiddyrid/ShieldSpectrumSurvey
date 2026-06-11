@@ -191,11 +191,16 @@ def create_app(db, cfg) -> Flask:
     @app.post("/api/report/presweep")
     def presweep_report():
         from .report import generate_presweep_report
+        from .report_html import generate_presweep_html
         session = st.session()
         if not session:
             return err("no session")
         try:
-            result = generate_presweep_report(db, cfg, session["id"], st.reports_dir)
+            try:
+                result = generate_presweep_html(db, cfg, session["id"], st.reports_dir)
+            except Exception:  # noqa: BLE001 - no browser etc.: legacy renderer
+                log.exception("HTML pre-sweep failed — falling back to reportlab")
+                result = generate_presweep_report(db, cfg, session["id"], st.reports_dir)
         except Exception as e:  # noqa: BLE001
             log.exception("pre-sweep report failed")
             return err(e, 500)
