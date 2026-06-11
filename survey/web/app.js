@@ -52,7 +52,7 @@ function show(view) {
   if (view === "directional") loadDirectional();
   if (view === "inventory") loadInventory();
   if (view === "wiki") loadWiki();
-  if (view === "session") { loadCaseFiles(); loadEngagement(); loadTechTasks(); }
+  if (view === "session") { loadCaseFiles(); loadEngagement(); loadTechTasks(); loadReportOptions(); }
   if (view === "poi") loadPoi();
 }
 
@@ -828,7 +828,12 @@ async function saveReportOptions() {
     $("report-opt-msg").textContent = "saved — included on next GENERATE REPORT";
   } catch (e) { $("report-opt-msg").textContent = e.message; }
 }
-document.querySelectorAll(".report-opt").forEach(cb => cb.onchange = saveReportOptions);
+document.querySelectorAll(".report-opt").forEach(cb => cb.onchange = () => {
+  // the same option can appear on more than one tab — mirror before saving
+  document.querySelectorAll(`.report-opt[data-opt="${cb.dataset.opt}"]`)
+    .forEach(o => { o.checked = cb.checked; });
+  saveReportOptions();
+});
 
 async function loadExpected() {
   try {

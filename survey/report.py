@@ -154,7 +154,8 @@ DEFAULT_REPORT_OPTIONS = {
 
 
 def rf_density(baseline: list[dict]) -> dict:
-    """Classify the RF environment from the licensed-record baseline."""
+    """Classify the RF environment from the licensed-record baseline:
+    broadcast transmitters AND cellular tower proximity."""
     strong = [r for r in baseline
               if r.get("confidence") == "record"
               and (r.get("service") or "").upper() in ("FM", "TV")
@@ -162,7 +163,42 @@ def rf_density(baseline: list[dict]) -> dict:
     n = len(strong)
     tier = "high" if n >= 20 else "moderate" if n >= 8 else "low"
     nearest = min((r["distance_mi"] for r in strong), default=None)
-    return {"count": n, "tier": tier, "nearest_mi": nearest}
+
+    # cellular: each carrier repeats its tower_count on every band-block row,
+    # and OpenCellID + CellMapper may count the same physical towers — so take
+    # the per-carrier max across sources, then sum carriers
+    per_carrier: dict = {}
+    cell_nearest = None
+    for r in baseline:
+        if (r.get("category") or "") != "cellular":
+            continue
+        raw = r.get("raw_json") if "raw_json" in r else r.get("raw")
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (TypeError, ValueError):
+                raw = {}
+        tc = (raw or {}).get("tower_count")
+        carrier = r.get("licensee") or "?"
+        if tc:
+            per_carrier[carrier] = max(per_carrier.get(carrier, 0), int(tc))
+        if r.get("distance_mi") is not None:
+            cell_nearest = r["distance_mi"] if cell_nearest is None \
+                else min(cell_nearest, r["distance_mi"])
+    cell_count = sum(per_carrier.values())
+    has_cell_data = bool(per_carrier) or cell_nearest is not None
+    if not has_cell_data:
+        cell_tier = "unknown"
+    elif (cell_nearest is not None and cell_nearest <= 0.5) or cell_count >= 50:
+        cell_tier = "high"
+    elif (cell_nearest is not None and cell_nearest <= 1.5) or cell_count >= 15:
+        cell_tier = "moderate"
+    else:
+        cell_tier = "low"
+    return {"count": n, "tier": tier, "nearest_mi": nearest,
+            "cell_count": cell_count, "cell_nearest_mi": cell_nearest,
+            "cell_tier": cell_tier,
+            "recommend": tier == "high" or cell_tier == "high"}
 
 
 def _section_rf_environment(el, ss, baseline, company):
@@ -171,12 +207,27 @@ def _section_rf_environment(el, ss, baseline, company):
     nearest = (f" The nearest is about {d['nearest_mi']:.0f} mi away."
                if d["nearest_mi"] is not None else "")
     el.append(Paragraph(
-        f"This location sits in a <b>{d['tier']}-density</b> RF environment: roughly "
+        f"This location sits in a <b>{d['tier']}-density</b> broadcast RF environment: roughly "
         f"{d['count']} full-power broadcast transmitters operate within ~30 miles.{nearest} "
         "A dense ambient RF environment is normal for an urban or suburban area and is not "
         "itself a sign of surveillance — but it does affect both the sweep and any decision "
         "about shielding.", ss["Body"]))
-    if d["tier"] == "high":
+    if d["cell_tier"] == "unknown":
+        el.append(Paragraph(
+            "Cellular tower data was not available for this baseline, so tower proximity is "
+            "not factored into this assessment.", ss["Body"]))
+    else:
+        cell_near = (f" the nearest observed tower is about {d['cell_nearest_mi']:.1f} mi away"
+                     if d["cell_nearest_mi"] is not None else
+                     " tower distances were not reported by the data source")
+        el.append(Paragraph(
+            f"Cellular infrastructure: approximately <b>{d['cell_count']}</b> cell towers were "
+            f"observed near this location across all carriers;{cell_near}. Proximity to cellular "
+            f"towers raises the ambient RF floor at the premises (<b>{d['cell_tier']}</b> cellular "
+            "proximity) — a close tower means more ambient energy across the cellular bands, "
+            "which both masks weak signals during a sweep and is the dominant contributor to "
+            "everyday RF levels indoors.", ss["Body"]))
+    if d["recommend"]:
         el.append(Paragraph(
             "Because the ambient environment here is dense, we recommend considering an "
             "<b>RF shielding assessment</b>. In a security context, shielding a sensitive room "
@@ -632,6 +683,14 @@ def generate_presweep_report(db, cfg, session_id: int, reports_dir: str) -> dict
     sources = db.query("SELECT * FROM source_status WHERE session_id=?", (session_id,))
     etype = eng.get("engagement_type", "onsite")
     company = cfg.get("branding", "company", default="")
+    opt_row = db.query_one("SELECT options_json FROM report_options WHERE session_id=?",
+                           (session_id,))
+    options = dict(DEFAULT_REPORT_OPTIONS)
+    if opt_row and opt_row["options_json"]:
+        try:
+            options.update(json.loads(opt_row["options_json"]))
+        except (TypeError, ValueError):
+            pass
 
     ts = time.strftime("%Y%m%d_%H%M%S")
     os.makedirs(reports_dir, exist_ok=True)
@@ -709,6 +768,9 @@ def generate_presweep_report(db, cfg, session_id: int, reports_dir: str) -> dict
     else:
         el.append(Paragraph("Baseline not yet built for this address — build it before "
                             "issuing the briefing.", ss["Body"]))
+
+    if options.get("rf_environment") and baseline:
+        _section_rf_environment(el, ss, baseline, company)
 
     el.append(Paragraph("Methodology (what the sweep will do)", ss["H1x"]))
     for para in (
