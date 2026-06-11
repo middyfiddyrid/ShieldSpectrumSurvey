@@ -236,6 +236,13 @@ def create_app(db, cfg) -> Flask:
                 f"INSERT INTO persons_of_interest (session_id,{cols},created_utc,updated_utc) "
                 f"VALUES (?,{ph},?,?)",
                 (session["id"], *[vals[k] for k in POI_FIELDS], time.time(), time.time()))
+            db.execute(
+                "INSERT INTO tech_tasks (session_id,text,done,created_utc) VALUES (?,?,0,?)",
+                (session["id"],
+                 f"Gather client-authorized background for \"{vals['name'].strip()}\" and "
+                 "attach it to their POI record (permissible purpose only — no dragnet on "
+                 "uninvolved third parties).", time.time()))
+            return jsonify({"id": pid, "saved": True, "task_added": True})
         return jsonify({"id": pid, "saved": True})
 
     @app.get("/api/poi")
@@ -275,21 +282,30 @@ def create_app(db, cfg) -> Flask:
         os.makedirs(case_dir, exist_ok=True)
         with open(os.path.join(case_dir, stored), "wb") as out:
             out.write(raw)
+        poi_id = request.form.get("poi_id", type=int)
         db.execute(
             "INSERT INTO case_files (session_id,filename,stored_name,kind,size_bytes,"
-            "sha256,uploaded_utc,notes) VALUES (?,?,?,?,?,?,?,?)",
+            "sha256,uploaded_utc,notes,poi_id) VALUES (?,?,?,?,?,?,?,?,?)",
             (session["id"], safe, stored, request.form.get("kind", ""),
-             len(raw), digest, time.time(), request.form.get("notes", "")))
-        return jsonify({"uploaded": True, "filename": safe, "size_bytes": len(raw)})
+             len(raw), digest, time.time(), request.form.get("notes", ""), poi_id))
+        return jsonify({"uploaded": True, "filename": safe, "size_bytes": len(raw),
+                        "poi_id": poi_id})
 
     @app.get("/api/case_files")
     def case_files_list():
         session = st.session()
         if not session:
             return err("no session")
-        return jsonify(db.query(
-            "SELECT id,filename,kind,size_bytes,uploaded_utc,notes FROM case_files "
-            "WHERE session_id=? ORDER BY uploaded_utc DESC", (session["id"],)))
+        poi_id = request.args.get("poi_id", type=int)
+        sql = ("SELECT cf.id,cf.filename,cf.kind,cf.size_bytes,cf.uploaded_utc,cf.notes,"
+               "cf.poi_id,p.name AS poi_name FROM case_files cf "
+               "LEFT JOIN persons_of_interest p ON p.id=cf.poi_id "
+               "WHERE cf.session_id=?")
+        params = [session["id"]]
+        if poi_id:
+            sql += " AND cf.poi_id=?"
+            params.append(poi_id)
+        return jsonify(db.query(sql + " ORDER BY cf.uploaded_utc DESC", params))
 
     @app.get("/case_files/<int:file_id>")
     def case_file_download(file_id):

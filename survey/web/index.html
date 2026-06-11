@@ -441,6 +441,16 @@ footer .sim { color:var(--red); font-weight:bold; }
             <button class="btn danger" id="btn-poi-delete">DELETE</button>
             <span class="note" id="poi-msg"></span>
           </div>
+          <div id="poi-docs" style="display:none; margin-top:12px; border-top:1px solid var(--line); padding-top:10px">
+            <h3 style="margin-top:0">ATTACHED DOCUMENTS <span class="tag">client-authorized only — permissible purpose, no dragnet on uninvolved third parties</span></h3>
+            <table id="tbl-poi-docs"></table>
+            <div class="row" style="margin-top:6px">
+              <input type="file" id="poi-doc-input">
+              <input type="text" id="poi-doc-kind" class="small" style="width:140px" value="background">
+              <button class="btn" id="btn-poi-doc-attach">ATTACH</button>
+              <span class="note" id="poi-doc-msg"></span>
+            </div>
+          </div>
         </div>
       </div>
     </div>

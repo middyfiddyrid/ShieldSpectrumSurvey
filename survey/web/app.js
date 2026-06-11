@@ -122,6 +122,7 @@ function poiClear() {
   POI_FIELDS.forEach(f => { $(poiEl[f]).value = f === "status" ? "open"
     : (f.endsWith("_tier") ? "unknown" : ""); });
   $("poi-msg").textContent = "";
+  $("poi-docs").style.display = "none";
 }
 $("btn-internal-memo").onclick = async () => {
   $("memo-msg").textContent = "rendering…";
@@ -137,9 +138,41 @@ $("btn-poi-save").onclick = async () => {
   try {
     const r = await api("/api/poi", body);
     poiSelected = r.id;
-    $("poi-msg").textContent = "saved";
+    $("poi-msg").textContent = r.task_added
+      ? `saved — technician task added: gather client-authorized background for ${body.name}; attach it below`
+      : "saved";
     loadPoi();
+    loadPoiDocs(r.id);
   } catch (e) { $("poi-msg").textContent = "FAILED: " + e.message; }
+};
+async function loadPoiDocs(pid) {
+  $("poi-docs").style.display = "";
+  try {
+    const rows = await api(`/api/case_files?poi_id=${pid}`);
+    $("tbl-poi-docs").innerHTML = rows.length ?
+      "<tr><th>File</th><th>Kind</th><th>Uploaded</th></tr>" +
+      rows.map(f => `<tr><td><a style="color:var(--cyan)" href="/case_files/${f.id}">${esc(f.filename)}</a></td>` +
+        `<td>${esc(f.kind || "")}</td><td>${new Date(f.uploaded_utc * 1000).toLocaleString()}</td></tr>`).join("") :
+      "<tr><td>no documents yet — gather the client-authorized background for this person and attach it here</td></tr>";
+  } catch (e) {}
+}
+$("btn-poi-doc-attach").onclick = async () => {
+  if (!poiSelected) return;
+  const f = $("poi-doc-input").files[0];
+  if (!f) return alert("Choose a file first.");
+  const fd = new FormData();
+  fd.append("file", f);
+  fd.append("kind", $("poi-doc-kind").value || "background");
+  fd.append("poi_id", poiSelected);
+  $("poi-doc-msg").textContent = "uploading…";
+  try {
+    const r = await fetch("/api/case_files", { method: "POST", body: fd });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || "upload failed");
+    $("poi-doc-msg").textContent = `${j.filename} attached`;
+    $("poi-doc-input").value = "";
+    loadPoiDocs(poiSelected);
+  } catch (e) { $("poi-doc-msg").textContent = "FAILED: " + e.message; }
 };
 $("btn-poi-delete").onclick = async () => {
   if (!poiSelected) return poiClear();
@@ -165,6 +198,7 @@ window.poiOpen = (p) => {
   POI_FIELDS.forEach(f => $(poiEl[f]).value = p[f] || (f.endsWith("_tier") ? "unknown" : ""));
   $("poi-status").value = p.status || "open";
   $("poi-msg").textContent = `editing #${p.id}`;
+  loadPoiDocs(p.id);
 };
 
 /* ---------- polling ---------- */
@@ -481,9 +515,10 @@ async function loadCaseFiles() {
   try {
     const rows = await api("/api/case_files");
     $("tbl-case-files").innerHTML = rows.length ?
-      "<tr><th>File</th><th>Kind</th><th>Size</th><th>Uploaded</th></tr>" +
+      "<tr><th>File</th><th>Kind</th><th>POI</th><th>Size</th><th>Uploaded</th></tr>" +
       rows.map(f => `<tr><td><a style="color:var(--cyan)" href="/case_files/${f.id}">${esc(f.filename)}</a></td>` +
-        `<td>${esc(f.kind || "")}</td><td>${(f.size_bytes / 1024).toFixed(0)} KB</td>` +
+        `<td>${esc(f.kind || "")}</td><td>${esc(f.poi_name || "")}</td>` +
+        `<td>${(f.size_bytes / 1024).toFixed(0)} KB</td>` +
         `<td>${new Date(f.uploaded_utc * 1000).toLocaleString()}</td></tr>`).join("") : "";
   } catch (e) {}
 }

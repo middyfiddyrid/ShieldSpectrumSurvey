@@ -152,7 +152,8 @@ CREATE TABLE IF NOT EXISTS case_files (
     session_id INTEGER NOT NULL,
     filename TEXT NOT NULL, stored_name TEXT NOT NULL,
     kind TEXT, size_bytes INTEGER, sha256 TEXT,
-    uploaded_utc REAL, notes TEXT DEFAULT ''
+    uploaded_utc REAL, notes TEXT DEFAULT '',
+    poi_id INTEGER                     -- optional link to persons_of_interest
 );
 CREATE TABLE IF NOT EXISTS reports (
     id INTEGER PRIMARY KEY,
@@ -179,6 +180,9 @@ class Database:
             cols = {r["name"] for r in c.execute("PRAGMA table_info(captures)")}
             if "kind" not in cols:
                 c.execute("ALTER TABLE captures ADD COLUMN kind TEXT DEFAULT 'zoom'")
+            cols = {r["name"] for r in c.execute("PRAGMA table_info(case_files)")}
+            if "poi_id" not in cols:
+                c.execute("ALTER TABLE case_files ADD COLUMN poi_id INTEGER")
 
     def _conn(self):
         conn = sqlite3.connect(self.path, timeout=30)
