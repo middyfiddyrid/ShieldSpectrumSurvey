@@ -75,6 +75,67 @@ def _strip_svg(baseline, width=980, height=72):
     return "".join(parts)
 
 
+SHOWCASE_BANDS = [
+    ("UPLINK", "Cellular uplink block — the quiet stretch of spectrum where a "
+               "GSM/LTE-based bug or GPS tracker transmits back out. The sweep "
+               "dwells here: sustained energy that is stronger inside the premises "
+               "than outside is a candidate device."),
+    ("Remote controls", "315/433 MHz remote-control band — the home of cheap "
+                        "consumer transmitters, and of the covert devices built "
+                        "from the same chips. Key fobs and garage doors burst here "
+                        "briefly; a continuous or repeating carrier does not belong."),
+    ("2.4 GHz", "2.4 GHz ISM band — Wi-Fi cameras, Bluetooth audio devices, and "
+                "Zigbee sensors all share this space. Every emitter found here is "
+                "reconciled against the devices you actually own; the unaccounted-"
+                "for ones get investigated."),
+    ("5.8 GHz", "5.8 GHz ISM band — analog video senders and wireless camera "
+                "links favor this band; a strong local carrier here that you do "
+                "not own is a classic hidden-camera signature."),
+    ("DECT", "DECT cordless band — legitimate cordless phones live here, and so "
+             "do DECT-based room audio bugs; each carrier is matched to known "
+             "handsets on the premises."),
+]
+
+
+def _showcase_captures(db, limit=2):
+    """Two de-identified reference spectrographs from the signal library,
+    re-rendered WITHOUT the source session's provenance (no address, room,
+    or session number from another client's sweep)."""
+    from .sigcapture import render_capture_svg
+    rows = db.query("SELECT * FROM captures "
+                    "ORDER BY (kind='zoom') DESC, length(data_json) DESC")
+    picked, seen = [], set()
+    for keyword, caption in SHOWCASE_BANDS:
+        if len(picked) >= limit:
+            break
+        for r in rows:
+            text = f"{r.get('label') or ''} {r.get('category') or ''}"
+            if keyword.lower() not in text.lower() or r["id"] in seen:
+                continue
+            try:
+                data = json.loads(r["data_json"])
+                if len(data.get("freqs") or []) < 8:
+                    continue
+                meta = {"center_mhz": r["center_mhz"], "peak_dbm": r["peak_dbm"],
+                        "floor_dbm": r["floor_dbm"], "bw_khz": r["bw_khz"],
+                        "persistence": r["persistence"], "label": r["label"],
+                        "session_id": "", "address": "", "room": "", "module": "",
+                        "captured": ""}
+                svg = render_capture_svg(data, meta)
+                # replace the provenance footer with a neutral library line
+                svg = re.sub(r"(<text[^>]*y='\d+'[^>]*>)\s*·\s*session #\s*·\s*·"
+                             r"\s*room:\s*·\s*module:\s*(</text>)",
+                             r"\1Shield Security Systems signal library — "
+                             r"de-identified reference capture\2", svg)
+            except Exception:  # noqa: BLE001 - malformed capture: skip it
+                continue
+            picked.append({"svg": svg, "label": html.escape(r["label"] or ""),
+                           "caption": caption})
+            seen.add(r["id"])
+            break
+    return picked
+
+
 ENGAGEMENT_TERMS_HTML = {
     "onsite": ["On-site engagement: a technician performs the full sweep at the "
                "premises on the scheduled date."],
@@ -270,6 +331,7 @@ def generate_presweep_html(db, cfg, session_id: int, reports_dir: str) -> dict:
         "strip_svg": _strip_svg(baseline) if baseline else "",
         "legend": [{"color": CATEGORY_COLORS[k], "label": CATEGORY_LABELS[k]}
                    for k in CATEGORY_COLORS],
+        "showcase": _showcase_captures(db),
     }
 
     with open(os.path.join(TEMPLATE_DIR, "presweep.html"), encoding="utf-8") as f:

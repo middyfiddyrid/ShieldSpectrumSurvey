@@ -80,6 +80,12 @@
   .legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:8px;font-size:8.5pt;color:var(--grey);}
   .legend .chip{display:inline-block;width:11px;height:11px;border-radius:2px;
                 vertical-align:-1px;margin-right:5px;}
+
+  .figrow{display:flex;gap:16px;margin-top:12px;page-break-inside:avoid;}
+  .fig{flex:1;min-width:0;}
+  .fig svg{width:100%;height:auto;border:1px solid var(--line);display:block;}
+  .fig .figtitle{font-weight:800;color:var(--navy);font-size:9.5pt;margin-bottom:4px;}
+  .fig .figcap{font-size:8.5pt;color:var(--grey);margin-top:5px;}
 </style>
 </head>
 <body>
@@ -243,6 +249,26 @@
   <div class="legend">
     {% for l in legend %}<span><span class="chip" style="background:{{ l.color }}"></span>{{ l.label }}</span>{% endfor %}
   </div>
+
+  {% if showcase %}
+  <h2><span class="secnum">B.</span>APPENDIX B — WHERE COVERT DEVICES HIDE</h2>
+  <p>De-identified reference captures from the {{ company_short }} signal library, recorded
+  with the same instrumentation used on your engagement. Each chart is a high-resolution
+  spectrograph of one slice of spectrum: the <b style="color:#9a7b00">yellow</b> trace holds
+  the strongest energy seen on each frequency (catching brief bursts), the
+  <b style="color:#006c8a">blue</b> trace is the steady average. This is exactly what your
+  technician reads during the sweep — and what a covert transmitter looks like when one is
+  present.</p>
+  <div class="figrow">
+    {% for f in showcase %}
+    <div class="fig">
+      <div class="figtitle">{{ f.label }}</div>
+      {{ f.svg }}
+      <div class="figcap">{{ f.caption }}</div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
 
   <p class="disc" style="margin-top:26px">© {{ year }} {{ company }}. All rights reserved.
   This document, the {{ company }} proprietary TSCM suite, and the methods, baselines, and
