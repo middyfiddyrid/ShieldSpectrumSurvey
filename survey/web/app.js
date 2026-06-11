@@ -108,14 +108,15 @@ $("btn-tech-task-add").onclick = async () => {
 /* ---------- persons of interest / deconfliction ---------- */
 const POI_FIELDS = ["name", "aliases", "relationship", "source", "motive",
   "access_note", "access_tier", "capability_tier", "capability_basis",
-  "resources_note", "conduct_note", "analyst_notes", "status"];
+  "resources_note", "conduct_note", "analyst_notes", "opportunity_vectors", "status"];
 let poiSelected = null;
 const poiEl = {
   name: "poi-name", aliases: "poi-aliases", relationship: "poi-relationship",
   source: "poi-source", motive: "poi-motive", access_note: "poi-access-note",
   access_tier: "poi-access-tier", capability_tier: "poi-capability-tier",
   capability_basis: "poi-capability-basis", resources_note: "poi-resources",
-  conduct_note: "poi-conduct", analyst_notes: "poi-notes", status: "poi-status",
+  conduct_note: "poi-conduct", analyst_notes: "poi-notes",
+  opportunity_vectors: "poi-opportunity", status: "poi-status",
 };
 function poiClear() {
   poiSelected = null;

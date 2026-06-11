@@ -206,7 +206,8 @@ def create_app(db, cfg) -> Flask:
 
     POI_FIELDS = ("name", "aliases", "relationship", "source", "motive",
                   "access_note", "access_tier", "capability_tier", "capability_basis",
-                  "resources_note", "conduct_note", "analyst_notes", "status")
+                  "resources_note", "conduct_note", "analyst_notes",
+                  "opportunity_vectors", "status")
 
     @app.post("/api/poi")
     def poi_save():

@@ -144,6 +144,7 @@ CREATE TABLE IF NOT EXISTS persons_of_interest (
     resources_note TEXT DEFAULT '',    -- means to commission surveillance (relevant assets only)
     conduct_note TEXT DEFAULT '',      -- documented harassment / litigation / restraining orders
     analyst_notes TEXT DEFAULT '',     -- investigator's own subjective judgment
+    opportunity_vectors TEXT DEFAULT '', -- social/institutional areas warranting observation or de-confliction
     status TEXT DEFAULT 'open',        -- cleared | open | concern  (deconfliction state)
     created_utc REAL, updated_utc REAL
 );
@@ -183,6 +184,10 @@ class Database:
             cols = {r["name"] for r in c.execute("PRAGMA table_info(case_files)")}
             if "poi_id" not in cols:
                 c.execute("ALTER TABLE case_files ADD COLUMN poi_id INTEGER")
+            cols = {r["name"] for r in c.execute("PRAGMA table_info(persons_of_interest)")}
+            if "opportunity_vectors" not in cols:
+                c.execute("ALTER TABLE persons_of_interest "
+                          "ADD COLUMN opportunity_vectors TEXT DEFAULT ''")
 
     def _conn(self):
         conn = sqlite3.connect(self.path, timeout=30)

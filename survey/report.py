@@ -875,6 +875,18 @@ def generate_internal_memo(db, cfg, session_id: int, reports_dir: str) -> dict:
                 Paragraph((p["analyst_notes"] or "")[:160], ss["Cell"])])
         el.append(_table(rows, [1.3 * inch, 0.7 * inch, 0.9 * inch, 1.5 * inch,
                                 1.4 * inch, 1.2 * inch], font_size=7))
+        vectors = [p for p in poi if (p.get("opportunity_vectors") or "").strip()]
+        if vectors:
+            el.append(Paragraph("Opportunity vectors — observation / de-confliction",
+                                ss["H1x"]))
+            el.append(Paragraph(
+                "Social or institutional areas where the person's circumstances intersect "
+                "with the client's — venues that would warrant observation or active "
+                "de-confliction. These are investigative hypotheses about <i>where</i> to "
+                "look, not assertions that anything has occurred there.", ss["Body"]))
+            for p in vectors:
+                el.append(Paragraph(
+                    f"<b>{p['name']}</b>: {p['opportunity_vectors']}", ss["Body"]))
     else:
         el.append(Paragraph("No persons of interest recorded for this matter.", ss["Body"]))
 
