@@ -29,10 +29,12 @@ document.querySelectorAll("nav .step").forEach(el => {
   el.onclick = () => show(el.dataset.view);
 });
 function show(view) {
+  if (!$("view-" + view)) view = "session";
   document.querySelectorAll(".view").forEach(v => v.classList.remove("active"));
   document.querySelectorAll("nav .step").forEach(s => s.classList.remove("active"));
   $("view-" + view).classList.add("active");
   document.querySelector(`nav .step[data-view=${view}]`).classList.add("active");
+  if (("#" + view) !== location.hash) history.replaceState(null, "", "#" + view);
   if (view === "baseline") loadBaseline();
   if (view === "rooms") loadRooms();
   if (view === "results") loadResults();
@@ -864,3 +866,11 @@ function renderCalRows(cal) {
 /* ---------- boot ---------- */
 loadSessions();
 poll();
+// deep-link support: localhost:8765/#wiki opens the library directly —
+// the wiki is cross-session and never requires an open sweep session
+const bootView = location.hash.replace("#", "");
+if (bootView && bootView !== "session") show(bootView);
+window.addEventListener("hashchange", () => {
+  const v = location.hash.replace("#", "") || "session";
+  if (!document.getElementById("view-" + v).classList.contains("active")) show(v);
+});

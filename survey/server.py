@@ -417,24 +417,31 @@ def create_app(db, cfg) -> Flask:
 
     @app.post("/api/captures/start")
     def captures_start():
-        session = st.session()
-        if not session:
-            return err("no session")
+        """The wiki is session-independent: attribution comes from the target
+        signal's/capture's own session, so no session needs to be 'open'.
+        Only capture-all-anomalies is inherently about the current session."""
         body = request.get_json(force=True)
+        session_id = None
         if body.get("recapture"):
             row = db.query_one("SELECT * FROM captures WHERE id=?", (body["recapture"],))
             if not row:
                 return err("no such capture", 404)
+            session_id = row["session_id"]
             targets = [{"id": None, "center_mhz": row["center_mhz"],
-                        "bw_khz": row["bw_khz"], "room": row["room"],
+                        "bw_khz": row["bw_khz"], "room": "recapture",
                         "classification": row["classification"],
                         "matched_label": row["matched_label"],
                         "persistence": row["persistence"], "caution": 0}]
         elif body.get("all_anomalies"):
+            session = st.session()
+            if not session:
+                return err("open a session first for capture-all (it is scoped to "
+                           "the current sweep)")
+            session_id = session["id"]
             rows = db.query(
                 "SELECT * FROM signals WHERE session_id=? AND phase='interior' AND "
                 "(classification='UNVERIFIED' OR caution=1) ORDER BY anomaly_score DESC",
-                (session["id"],))
+                (session_id,))
             targets = []
             for r in rows:
                 if not any(abs(r["center_mhz"] - k["center_mhz"]) <= 0.25 for k in targets):
@@ -444,12 +451,15 @@ def create_app(db, cfg) -> Flask:
             targets = db.query(
                 f"SELECT * FROM signals WHERE id IN ({','.join('?' * len(ids))})",
                 ids) if ids else []
+            if targets:
+                session_id = targets[0]["session_id"]
         if not targets:
             return err("no capture targets")
+        sess = db.query_one("SELECT address FROM sessions WHERE id=?", (session_id,))
         try:
-            st.controller.start_captures(session["id"], targets,
+            st.controller.start_captures(session_id, targets,
                                          cfg.abs_path("capture_images"),
-                                         session["address"])
+                                         sess["address"] if sess else "")
         except Exception as e:  # noqa: BLE001
             return err(e, 409)
         return jsonify({"started": True, "targets": len(targets)})
