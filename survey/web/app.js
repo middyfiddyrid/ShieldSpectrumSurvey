@@ -42,7 +42,63 @@ function show(view) {
   if (view === "inventory") loadInventory();
   if (view === "wiki") loadWiki();
   if (view === "session") loadCaseFiles();
+  if (view === "poi") loadPoi();
 }
+
+/* ---------- persons of interest / deconfliction ---------- */
+const POI_FIELDS = ["name", "aliases", "relationship", "source", "motive",
+  "access_note", "access_tier", "capability_tier", "capability_basis",
+  "resources_note", "conduct_note", "analyst_notes", "status"];
+let poiSelected = null;
+const poiEl = {
+  name: "poi-name", aliases: "poi-aliases", relationship: "poi-relationship",
+  source: "poi-source", motive: "poi-motive", access_note: "poi-access-note",
+  access_tier: "poi-access-tier", capability_tier: "poi-capability-tier",
+  capability_basis: "poi-capability-basis", resources_note: "poi-resources",
+  conduct_note: "poi-conduct", analyst_notes: "poi-notes", status: "poi-status",
+};
+function poiClear() {
+  poiSelected = null;
+  POI_FIELDS.forEach(f => { $(poiEl[f]).value = f === "status" ? "open"
+    : (f.endsWith("_tier") ? "unknown" : ""); });
+  $("poi-msg").textContent = "";
+}
+$("btn-poi-new").onclick = poiClear;
+$("btn-poi-save").onclick = async () => {
+  const body = { id: poiSelected };
+  POI_FIELDS.forEach(f => body[f] = $(poiEl[f]).value);
+  try {
+    const r = await api("/api/poi", body);
+    poiSelected = r.id;
+    $("poi-msg").textContent = "saved";
+    loadPoi();
+  } catch (e) { $("poi-msg").textContent = "FAILED: " + e.message; }
+};
+$("btn-poi-delete").onclick = async () => {
+  if (!poiSelected) return poiClear();
+  if (!confirm("Delete this person of interest record?")) return;
+  await api(`/api/poi/${poiSelected}/delete`, {});
+  poiClear(); loadPoi();
+};
+async function loadPoi() {
+  try {
+    const rows = await api("/api/poi");
+    const cls = s => s === "cleared" ? "ok" : s === "concern" ? "failed" : "stale";
+    $("tbl-poi").innerHTML =
+      "<tr><th>Name</th><th>Relationship</th><th>Capability</th><th>Status</th></tr>" +
+      rows.map(p => `<tr onclick='poiOpen(${JSON.stringify(p).replace(/'/g, "&#39;")})' style="cursor:pointer">` +
+        `<td>${esc(p.name)}</td><td>${esc(p.relationship)}</td>` +
+        `<td>${esc(p.capability_tier)}</td>` +
+        `<td><span class="pill ${cls(p.status)}">${esc(p.status).toUpperCase()}</span></td></tr>`).join("")
+      || "<tr><td>no persons of interest — add client-named suspects to clear</td></tr>";
+  } catch (e) { $("tbl-poi").innerHTML = `<tr><td>${esc(e.message)}</td></tr>`; }
+}
+window.poiOpen = (p) => {
+  poiSelected = p.id;
+  POI_FIELDS.forEach(f => $(poiEl[f]).value = p[f] || (f.endsWith("_tier") ? "unknown" : ""));
+  $("poi-status").value = p.status || "open";
+  $("poi-msg").textContent = `editing #${p.id}`;
+};
 
 /* ---------- polling ---------- */
 async function poll() {

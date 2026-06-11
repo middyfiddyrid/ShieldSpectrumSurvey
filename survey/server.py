@@ -97,6 +97,58 @@ def create_app(db, cfg) -> Flask:
         st.session_id = row["id"]
         return jsonify({"session_id": st.session_id})
 
+    # ---------- persons of interest / deconfliction (internal only) ----------
+
+    POI_FIELDS = ("name", "aliases", "relationship", "source", "motive",
+                  "access_note", "access_tier", "capability_tier", "capability_basis",
+                  "resources_note", "conduct_note", "analyst_notes", "status")
+
+    @app.post("/api/poi")
+    def poi_save():
+        session = st.session()
+        if not session:
+            return err("create a session first")
+        body = request.get_json(force=True)
+        if not (body.get("name") or "").strip():
+            return err("name required")
+        # capability tier asserted without an evidence basis is exactly the
+        # fake-precision failure mode we avoid — require the basis
+        if body.get("capability_tier") in ("low", "medium", "high") \
+                and not (body.get("capability_basis") or "").strip():
+            return err("set the evidence basis for the capability tier "
+                       "(profession, credentials, demonstrated skill) — "
+                       "tiers without a factual basis aren't recorded")
+        vals = {k: body.get(k, "") for k in POI_FIELDS}
+        if body.get("id"):
+            sets = ", ".join(f"{k}=?" for k in POI_FIELDS)
+            db.execute(f"UPDATE persons_of_interest SET {sets}, updated_utc=? WHERE id=?",
+                       (*[vals[k] for k in POI_FIELDS], time.time(), body["id"]))
+            pid = body["id"]
+        else:
+            cols = ",".join(POI_FIELDS)
+            ph = ",".join("?" * len(POI_FIELDS))
+            pid = db.execute(
+                f"INSERT INTO persons_of_interest (session_id,{cols},created_utc,updated_utc) "
+                f"VALUES (?,{ph},?,?)",
+                (session["id"], *[vals[k] for k in POI_FIELDS], time.time(), time.time()))
+        return jsonify({"id": pid, "saved": True})
+
+    @app.get("/api/poi")
+    def poi_list():
+        session = st.session()
+        if not session:
+            return err("no session")
+        order = "CASE status WHEN 'concern' THEN 0 WHEN 'open' THEN 1 "\
+                "WHEN 'cleared' THEN 2 ELSE 3 END, name"
+        return jsonify(db.query(
+            f"SELECT * FROM persons_of_interest WHERE session_id=? ORDER BY {order}",
+            (session["id"],)))
+
+    @app.post("/api/poi/<int:pid>/delete")
+    def poi_delete(pid):
+        db.execute("DELETE FROM persons_of_interest WHERE id=?", (pid,))
+        return jsonify({"deleted": True})
+
     # ---------- case files (session attachments) ----------
 
     @app.post("/api/case_files")

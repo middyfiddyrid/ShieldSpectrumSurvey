@@ -122,6 +122,7 @@ footer .sim { color:var(--red); font-weight:bold; }
   <div class="step" data-view="directional"><div class="dot" id="dot-directional"></div>7 · DIRECTIONAL</div>
   <div class="step" data-view="results"><div class="dot" id="dot-results"></div>8 · RESULTS / REPORT</div>
   <div class="sect">TOOLS</div>
+  <div class="step" data-view="poi"><div class="dot" id="dot-poi"></div>PERSONS OF INTEREST</div>
   <div class="step" data-view="wiki"><div class="dot" id="dot-wiki"></div>SIGNAL WIKI</div>
   <div class="step" data-view="inventory"><div class="dot" id="dot-inventory"></div>INVENTORY (WiFi/BT)</div>
   <div class="step" data-view="calibration"><div class="dot" id="dot-calibration"></div>CALIBRATION (shop)</div>
@@ -342,7 +343,71 @@ footer .sim { color:var(--red); font-weight:bold; }
   </div>
 </section>
 
+<!-- ============ PERSONS OF INTEREST ============ -->
+<section class="view" id="view-poi">
+  <h2>PERSONS OF INTEREST / DECONFLICTION <span class="tag">internal working assessment — not in the client report</span></h2>
+  <div class="card">
+    <p class="note">Client-named or investigator-identified persons to <b>clear</b>. Goal is to
+    move people to CLEARED by ruling out access, means, and motive. Capability is assessed from
+    <b>evidence</b> (profession, credentials, demonstrated skill) — record the basis. Internal,
+    investigative hypothesis only; never an FCRA consumer report or basis for adverse action.</p>
+    <div style="display:flex; gap:14px">
+      <div class="scroll" style="flex:1; max-height:540px"><table id="tbl-poi"></table></div>
+      <div style="flex:1.5">
+        <div class="card" style="margin:0">
+          <div class="row">
+            <input type="text" id="poi-name" style="flex:1" placeholder="name *">
+            <select id="poi-status">
+              <option value="open">OPEN</option>
+              <option value="concern">CONCERN</option>
+              <option value="cleared">CLEARED</option>
+            </select>
+          </div>
+          <div class="row">
+            <input type="text" id="poi-relationship" class="small" style="width:180px" placeholder="relationship to client">
+            <input type="text" id="poi-aliases" class="small" style="width:160px" placeholder="aliases">
+            <input type="text" id="poi-source" class="small" style="width:160px" placeholder="source of facts">
+          </div>
+          <label>Motive (client-stated dispute)</label>
+          <textarea id="poi-motive" style="width:100%; height:44px"></textarea>
+          <div class="row" style="margin-top:8px">
+            <label>Access</label>
+            <select id="poi-access-tier"><option value="unknown">unknown</option>
+              <option value="none">none</option><option value="low">low</option><option value="high">high</option></select>
+            <input type="text" id="poi-access-note" style="flex:1" placeholder="could they reach the premises?">
+          </div>
+          <div class="row">
+            <label>Technical capability</label>
+            <select id="poi-capability-tier"><option value="unknown">unknown</option>
+              <option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select>
+          </div>
+          <label>Capability basis (REQUIRED if tier set — profession, credentials, demonstrated skill)</label>
+          <textarea id="poi-capability-basis" style="width:100%; height:44px"></textarea>
+          <label>Resources relevant to commissioning surveillance</label>
+          <textarea id="poi-resources" style="width:100%; height:36px"></textarea>
+          <label>Documented conduct (harassment, litigation, restraining orders)</label>
+          <textarea id="poi-conduct" style="width:100%; height:44px"></textarea>
+          <label>Analyst judgment (your own read)</label>
+          <textarea id="poi-notes" style="width:100%; height:44px"></textarea>
+          <div class="row" style="margin-top:8px">
+            <button class="btn primary" id="btn-poi-save">SAVE</button>
+            <button class="btn" id="btn-poi-new">NEW / CLEAR FORM</button>
+            <button class="btn danger" id="btn-poi-delete">DELETE</button>
+            <span class="note" id="poi-msg"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
 <!-- ============ SIGNAL WIKI ============ -->
+<style>
+#view-poi textarea, #view-poi label { display:block; width:100%; }
+#view-poi label { color:var(--dim); font-size:11px; margin-top:6px; }
+#view-poi textarea { background:#0d1319; color:var(--txt); border:1px solid var(--line);
+  font-family:var(--mono); font-size:12px; padding:6px; }
+</style>
 <section class="view" id="view-wiki">
   <h2>SIGNAL WIKI <span class="tag">internal library — zoom fingerprints across all sweeps</span></h2>
   <div class="card">

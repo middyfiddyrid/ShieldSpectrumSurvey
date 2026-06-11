@@ -114,6 +114,23 @@ CREATE TABLE IF NOT EXISTS captures (
     description TEXT DEFAULT ''  -- auto/AI description
 );
 CREATE INDEX IF NOT EXISTS idx_captures_freq ON captures(center_mhz);
+CREATE TABLE IF NOT EXISTS persons_of_interest (
+    id INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL,
+    name TEXT NOT NULL, aliases TEXT DEFAULT '',
+    relationship TEXT DEFAULT '',      -- to the client (ex-spouse, partner, neighbor…)
+    source TEXT DEFAULT '',            -- where the assessment facts came from (client, court record…)
+    motive TEXT DEFAULT '',            -- client-stated dispute / reason
+    access_note TEXT DEFAULT '',       -- could they physically reach the premises
+    access_tier TEXT DEFAULT 'unknown',        -- none | low | high | unknown
+    capability_tier TEXT DEFAULT 'unknown',    -- technical capability: low | medium | high | unknown
+    capability_basis TEXT DEFAULT '',  -- REQUIRED evidence: profession, credentials, demonstrated skill
+    resources_note TEXT DEFAULT '',    -- means to commission surveillance (relevant assets only)
+    conduct_note TEXT DEFAULT '',      -- documented harassment / litigation / restraining orders
+    analyst_notes TEXT DEFAULT '',     -- investigator's own subjective judgment
+    status TEXT DEFAULT 'open',        -- cleared | open | concern  (deconfliction state)
+    created_utc REAL, updated_utc REAL
+);
 CREATE TABLE IF NOT EXISTS case_files (
     id INTEGER PRIMARY KEY,
     session_id INTEGER NOT NULL,
