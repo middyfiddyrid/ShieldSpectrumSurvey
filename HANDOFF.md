@@ -37,20 +37,24 @@ Continuation brief for a fresh Fable/Claude Code session. Read this first, then 
 - **Engagement workflow** + **technician task checklist** (seeded on engagement save). **Case-file upload**. **Report options** (RF environment & shielding, RF exposure context, glossary) toggled on Results tab.
 - Discord "ask community" (sanitized). CSV export. Session-independent, deep-linkable views (`#wiki`, `#poi`, etc.).
 
-## OPEN WORK (priority order) — this is where to start
+## OPEN WORK — P1–P5 ALL COMPLETED 2026-06-11 (commits 27514bf…ae70350)
 
-**P1 — No report has ever rendered for the operator (pre-sweep OR post-sweep). THE BLOCKER.**
-The endpoints work server-side (verified: `/api/report/generate`, `/api/report/presweep`, `/api/report/internal_memo` all return 200 and write PDFs to `reports/`). But the operator never sees one. Root cause is client-side: `window.open("/reports/<file>")` is almost certainly being blocked by the popup blocker, and/or stale JS after server restarts. **Fix: stop relying on `window.open`.** After any report generates, render a visible, persistent clickable link (and/or auto-navigate a download) in the page, e.g. in the Reports list and a success banner. Make this the first thing you do. Then walk the operator through generating one. (Test scripts that prove the backend works: `tests/expected_check.py`, ad-hoc in `reports/`.)
+**P1 ✅ Reports render as visible links.** All three generate buttons (post-sweep header, pre-sweep on Session tab, internal memo on POI tab) now show a persistent `OPEN PDF / DOWNLOAD` link next to the button — `window.open` removed everywhere. Bonus root-cause fix: on a plain boot (no `#hash`) `show()` never ran, so the engagement form stayed blank and the pre-sweep button would have saved blanks over the real engagement; boot now always routes through `show()`.
 
-**P2 — Per-POI document prompt missing.** When the operator uploads a person's background or adds a POI, there is no nudge to gather/upload additional docs for that POI. Add: when a POI is created, auto-add a technician task ("gather client-authorized background for <name>") and surface an "attach documents" affordance per POI (link case_files to a poi_id). Keep the client-authorized / no-dragnet framing.
+**P2 ✅ Per-POI documents.** Creating a POI auto-adds a technician task to gather that person's client-authorized background; POI panel has an ATTACHED DOCUMENTS block (case_files gained `poi_id`); session Case Files table shows the linked POI.
 
-**P3 — Pre-sweep shielding rec from tower proximity.** The RF environment & shielding section currently (a) keys off broadcast transmitters only and (b) is only in the post-sweep report. Operator wants it in the **pre-sweep** briefing and based on **proximity to cell towers** (OpenCellID / CellMapper import give tower counts + nearest distance) as well as broadcasters. Extend `rf_density()` to fold in cellular tower proximity, and add the optional RF-environment/shielding section to the pre-sweep report (as a report option there too).
+**P3 ✅ Tower-proximity shielding in pre-sweep.** `rf_density()` folds in cellular (per-carrier tower counts deduped across OpenCellID/CellMapper, nearest-tower distance; recommendation triggers on broadcast density OR tower proximity). Section renders in the pre-sweep behind the same `rf_environment` option, now also toggleable from the Session tab. **Note: until the OpenCellID key or a CellMapper import exists, the section honestly reports tower data unavailable.** 6 unit tests cover the logic.
 
-**P4 — POI opportunity vectors.** Add a field/section for **social or institutional opportunity vectors** — areas/relationships that warrant observation/de-confliction (e.g. shared workplace, shared custody, common associates). Internal-only; surface in the internal memo. Keep evidence-based, hypothesis-framed.
+**P4 ✅ POI opportunity vectors.** New internal-only field (shared workplace, custody exchanges, common associates…), rendered in the internal memo as hypothesis-framed "where to look" guidance. Absent from all client documents.
 
-**P5 — Anonymized case-study / device library (referenceable in reports).** Operator wants a library of example unauthorized-device finds — device photo + its signal capture + an **anonymized** case history — that can be cited in reports (educational/credibility). Build a `case_studies` table + UI + optional report section. **Must be genuinely de-identified composites**, never traceable to a real client/subject. Seed with the two operator-provided composites:
-  - A minor attempting to monitor a parent after being disciplined (consumer audio/location device).
-  - A partner of a household dependent who deployed multiple surreptitious devices in the dependent's vehicle — GPS tracker, audio transmitter — plus phone mirroring. (Describe device classes + RF signatures generically; no names, no identifying detail.)
+**P5 ✅ Case-study / device library.** CASE STUDIES tab; entries render in client reports ONLY when the operator attests they are de-identified composites. Both operator composites seeded (household-member consumer device; vehicle GPS/audio kit + phone mirroring). Optional `case_studies` report section in pre- and post-sweep; left OFF for session 16 — per-engagement choice.
+
+### Remaining nice-to-haves (not blocking)
+
+- Operator still needs to be walked through generating his first report (everything verified working in the live UI on 2026-06-11).
+- OpenCellID API key / CellMapper import still unconfigured → cellular proximity reads "unknown" in the shielding section.
+- Test PDFs in `reports/` from verification runs (session16 interim/presweep/memo dated 06-10 and 06-11) — operator should clear these out so they aren't mistaken for the real Grannemann briefing. Test upload artifact archived at `case_files/_test_artifacts/`.
+- Session 19 (502 Winchester Dr, Rolla) exists alongside session 16 (8214 Kenwood, Grannemann). The server auto-opens the NEWEST session on restart — confirm with the operator which matter is active.
 
 ## How to verify your work
 
