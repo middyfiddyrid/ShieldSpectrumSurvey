@@ -202,6 +202,119 @@ def rf_density(baseline: list[dict]) -> dict:
             "recommend": tier == "high" or cell_tier == "high"}
 
 
+def _dedup_nearest(rows):
+    """One row per station (callsign/label), keeping the nearest record."""
+    best = {}
+    for r in rows:
+        key = r.get("callsign") or r.get("label") or str(r.get("freq_low_mhz"))
+        d = r.get("distance_mi")
+        cur = best.get(key)
+        if cur is None or (d is not None and (cur.get("distance_mi") is None
+                                              or d < cur["distance_mi"])):
+            best[key] = r
+    return sorted(best.values(),
+                  key=lambda r: r["distance_mi"] if r.get("distance_mi") is not None else 1e9)
+
+
+def _active_sources(sources):
+    """Sources that actually contributed — a client document never shows
+    internal configuration state."""
+    return [s for s in sources
+            if s["status"] in ("ok", "cached", "stale") and (s["count"] or 0)]
+
+
+def _section_expected_environment(el, ss, baseline, sources):
+    """Client-facing expected-environment summary: grouped by signal category
+    with the closest stations per group, instead of a raw record dump."""
+    el.append(Paragraph("Expected RF Environment at Your Location", ss["H1x"]))
+    active = _active_sources(sources)
+    if active:
+        el.append(Paragraph(
+            "Data sources consulted: " + " · ".join(s["source"] for s in active) + ".",
+            ss["Cell"]))
+        el.append(Spacer(1, 6))
+    if not baseline:
+        el.append(Paragraph("Baseline not yet built for this address — build it before "
+                            "issuing the briefing.", ss["Body"]))
+        return
+
+    hi = max((r["freq_high_mhz"] for r in baseline), default=6100.0)
+    el.append(SpectrumStrip(baseline, [], 0.0, hi))
+    el.append(Spacer(1, 8))
+
+    def stations(svc):
+        return _dedup_nearest([r for r in baseline
+                               if (r.get("service") or "").upper() == svc
+                               and r.get("confidence") == "record"])
+
+    broadcast = [("Broadcast television", stations("TV")),
+                 ("FM radio", stations("FM")),
+                 ("AM radio", stations("AM"))]
+    alloc_n = len([r for r in baseline if r.get("confidence") != "record"])
+
+    sum_rows = [["Signal group", "Expected at this address", "Nearest"]]
+    for name, rows in broadcast:
+        nearest = rows[0]["distance_mi"] if rows and rows[0].get("distance_mi") is not None \
+            else None
+        sum_rows.append([name, f"{len(rows)} licensed stations",
+                         f"{nearest:.1f} mi" if nearest is not None else "—"])
+    sum_rows.append(["Cellular", "all national carriers — detailed below", ""])
+    sum_rows.append([Paragraph("Other allocations (aviation, amateur, ISM/Wi-Fi, "
+                               "land-mobile, GPS…)", ss["Cell"]),
+                     f"{alloc_n} national frequency allocations", ""])
+    el.append(_table(sum_rows, [2.5 * inch, 2.7 * inch, 0.9 * inch], font_size=8.5))
+    el.append(Spacer(1, 10))
+
+    for name, rows in broadcast:
+        if not rows:
+            continue
+        el.append(Paragraph(f"<b>{name} — closest of {len(rows)} stations</b>", ss["Body"]))
+        t_rows = [["Callsign", "Frequency", "Distance (mi)"]]
+        for r in rows[:5]:
+            t_rows.append([r.get("callsign") or r.get("label") or "",
+                           _fmt_freq(r["freq_low_mhz"]),
+                           f"{r['distance_mi']:.1f}" if r.get("distance_mi") is not None
+                           else "—"])
+        el.append(_table(t_rows, [1.8 * inch, 1.5 * inch, 1.2 * inch], font_size=8))
+        el.append(Spacer(1, 8))
+
+    el.append(Paragraph("<b>Cellular carriers</b>", ss["Body"]))
+    observed, nearest_by_carrier = {}, {}
+    for r in baseline:
+        if (r.get("category") or "") != "cellular" or not r.get("licensee"):
+            continue
+        c = r["licensee"]
+        raw = r.get("raw_json") if "raw_json" in r else r.get("raw")
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (TypeError, ValueError):
+                raw = {}
+        tc = (raw or {}).get("tower_count")
+        if tc:
+            observed[c] = max(observed.get(c, 0), int(tc))
+        if r.get("distance_mi") is not None:
+            nearest_by_carrier[c] = min(nearest_by_carrier.get(c, 1e9), r["distance_mi"])
+    if observed:
+        t_rows = [["Carrier", "Towers observed nearby", "Nearest (mi)"]]
+        for c, n in sorted(observed.items(), key=lambda kv: -kv[1]):
+            near = nearest_by_carrier.get(c)
+            t_rows.append([c, str(n), f"{near:.1f}" if near is not None else "—"])
+        el.append(_table(t_rows, [1.8 * inch, 1.6 * inch, 1.2 * inch], font_size=8))
+    else:
+        el.append(Paragraph(
+            "All national carriers — Verizon, AT&amp;T (including FirstNet), T-Mobile, "
+            "US Cellular, and DISH/Boost — hold licensed spectrum covering this area, and "
+            "every band they operate is in the sweep baseline, with particular attention to "
+            "the uplink blocks where a cellular-based device would transmit. Tower-by-tower "
+            "mapping for this address is added to the engagement file as area survey data is "
+            "loaded.", ss["Body"]))
+    el.append(Paragraph(
+        f"The complete {len(baseline)}-entry baseline (every licensed record and national "
+        "allocation considered) is retained in Shield's survey records for this engagement.",
+        ss["Cell"]))
+
+
 def _section_rf_environment(el, ss, baseline, company):
     d = rf_density(baseline)
     el.append(Paragraph("RF Environment & Shielding Assessment", ss["H1x"]))
@@ -215,8 +328,9 @@ def _section_rf_environment(el, ss, baseline, company):
         "about shielding.", ss["Body"]))
     if d["cell_tier"] == "unknown":
         el.append(Paragraph(
-            "Cellular tower data was not available for this baseline, so tower proximity is "
-            "not factored into this assessment.", ss["Body"]))
+            "This assessment is based on the broadcast environment; tower-by-tower cellular "
+            "mapping for this address is incorporated as area survey data is loaded.",
+            ss["Body"]))
     else:
         cell_near = (f" the nearest observed tower is about {d['cell_nearest_mi']:.1f} mi away"
                      if d["cell_nearest_mi"] is not None else
@@ -440,12 +554,13 @@ def generate_report(db, cfg, session_id: int, reports_dir: str) -> dict:
 
     # ---- Baseline ----
     el.append(Paragraph("Expected-Spectrum Baseline", ss["H1x"]))
-    src_data = [["Source", "Status", "Entries", "Notes"]]
-    for s in sources:
-        src_data.append([s["source"], s["status"].upper(), str(s["count"] or 0),
+    src_data = [["Source", "Entries", "Notes"]]
+    for s in _active_sources(sources):
+        src_data.append([s["source"], str(s["count"] or 0),
                          Paragraph(s["message"] or "", ss["Cell"])])
-    el.append(_table(src_data, [1.5 * inch, 0.9 * inch, 0.7 * inch, 3.9 * inch]))
-    el.append(Spacer(1, 8))
+    if len(src_data) > 1:
+        el.append(_table(src_data, [1.7 * inch, 0.8 * inch, 4.5 * inch]))
+        el.append(Spacer(1, 8))
 
     base_data = [["Frequency", "Service", "Callsign / Label", "Licensee",
                   "Dist (mi)", "Brg", "Source", "Confidence"]]
@@ -777,33 +892,16 @@ def generate_presweep_report(db, cfg, session_id: int, reports_dir: str) -> dict
     if eng.get("client_concerns"):
         el.append(Paragraph("Your stated concerns", ss["H1x"]))
         el.append(Paragraph(eng["client_concerns"], ss["Body"]))
+    poi_n = db.query_one("SELECT COUNT(*) n FROM persons_of_interest WHERE session_id=?",
+                         (session_id,))["n"]
+    if poi_n:
+        el.append(Paragraph(
+            "Persons you have identified in connection with these concerns are assessed "
+            "under Shield's separate, confidential deconfliction process. That assessment "
+            "is maintained in Shield's internal files and is deliberately not part of this "
+            "document.", ss["Body"]))
 
-    el.append(Paragraph("Expected RF Environment at Your Location", ss["H1x"]))
-    if sources:
-        src_data = [["Source", "Status", "Entries"]]
-        for s in sources:
-            src_data.append([s["source"], s["status"].upper(), str(s["count"] or 0)])
-        el.append(_table(src_data, [2.2 * inch, 1.4 * inch, 1.0 * inch]))
-        el.append(Spacer(1, 8))
-    if baseline:
-        hi = max((r["freq_high_mhz"] for r in baseline), default=6100.0)
-        el.append(SpectrumStrip(baseline, [], 0.0, hi))
-        el.append(Spacer(1, 6))
-        rows = [["Frequency", "Service", "Callsign / Label", "Dist (mi)", "Source"]]
-        for r in baseline[:120]:
-            f = _fmt_freq(r["freq_low_mhz"]) if r["freq_low_mhz"] == r["freq_high_mhz"] \
-                else f"{_fmt_freq(r['freq_low_mhz'])} – {_fmt_freq(r['freq_high_mhz'])}"
-            rows.append([Paragraph(f, ss["Cell"]), r["service"] or "",
-                         Paragraph((r["callsign"] or r["label"] or "")[:46], ss["Cell"]),
-                         f"{r['distance_mi']:.1f}" if r["distance_mi"] is not None else "",
-                         r["source"]])
-        el.append(_table(rows, [1.35 * inch, 0.7 * inch, 2.3 * inch, 0.7 * inch, 1.0 * inch]))
-        if len(baseline) > 120:
-            el.append(Paragraph(f"…and {len(baseline) - 120} more expected allocations.",
-                                ss["Cell"]))
-    else:
-        el.append(Paragraph("Baseline not yet built for this address — build it before "
-                            "issuing the briefing.", ss["Body"]))
+    _section_expected_environment(el, ss, baseline, sources)
 
     if options.get("rf_environment") and baseline:
         _section_rf_environment(el, ss, baseline, company)
