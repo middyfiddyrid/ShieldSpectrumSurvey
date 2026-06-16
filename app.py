@@ -55,11 +55,16 @@ def main():
     db = Database(os.path.join(BASE_DIR, "data", db_name))
     app = create_app(db, cfg, demo=demo)
 
-    host = cfg.get("app", "host", default="127.0.0.1")
-    port = args.port or cfg.get("app", "port", default=8765)
+    # Hosting: a platform (Render/Fly/etc.) sets $PORT and needs us bound to
+    # 0.0.0.0. Locally we stay on 127.0.0.1 for safety.
+    env_port = os.environ.get("PORT")
+    hosted = bool(env_port)
+    host = "0.0.0.0" if hosted else cfg.get("app", "host", default="127.0.0.1")
+    port = args.port or (int(env_port) if env_port else 0) \
+        or cfg.get("app", "port", default=8765)
     url = f"http://{host}:{port}"
 
-    if not args.no_browser and cfg.get("app", "open_browser", default=True):
+    if not args.no_browser and not hosted and cfg.get("app", "open_browser", default=True):
         threading.Timer(1.2, lambda: webbrowser.open(url)).start()
 
     print(f"Shield TSCM Spectrum Survey — {url}")

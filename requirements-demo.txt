@@ -1,0 +1,9 @@
+# Slim dependency set for the PUBLIC DEMO container.
+# Excludes the hardware libraries (RFExplorer, bleak) — they import lazily and
+# the demo runs simulated, so the server never touches real hardware.
+flask>=3.0
+jinja2>=3.1
+pyserial>=3.5
+requests>=2.31
+PyYAML>=6.0
+reportlab>=4.0
