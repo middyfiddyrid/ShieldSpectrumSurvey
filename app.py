@@ -53,6 +53,13 @@ def main():
     # (data/sweeps.db) is never exposed
     db_name = "demo.db" if demo else "sweeps.db"
     db = Database(os.path.join(BASE_DIR, "data", db_name))
+    if demo:
+        # populate the empty demo DB with the committed PII-free signal library
+        from survey.demo_seed import seed_demo
+        seeded = seed_demo(db, cfg)
+        if seeded:
+            print(f"*** DEMO SEED — populated signal wiki with {seeded} "
+                  f"de-identified reference captures ***")
     app = create_app(db, cfg, demo=demo)
 
     # Hosting: a platform (Render/Fly/etc.) sets $PORT and needs us bound to

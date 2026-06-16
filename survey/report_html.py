@@ -118,15 +118,10 @@ def _showcase_captures(db, limit=2):
                     continue
                 meta = {"center_mhz": r["center_mhz"], "peak_dbm": r["peak_dbm"],
                         "floor_dbm": r["floor_dbm"], "bw_khz": r["bw_khz"],
-                        "persistence": r["persistence"], "label": r["label"],
-                        "session_id": "", "address": "", "room": "", "module": "",
-                        "captured": ""}
-                svg = render_capture_svg(data, meta)
-                # replace the provenance footer with a neutral library line
-                svg = re.sub(r"(<text[^>]*y='\d+'[^>]*>)\s*·\s*session #\s*·\s*·"
-                             r"\s*room:\s*·\s*module:\s*(</text>)",
-                             r"\1Shield Security Systems signal library — "
-                             r"de-identified reference capture\2", svg)
+                        "persistence": r["persistence"], "label": r["label"]}
+                # deidentified=True drops all provenance from the footer — no
+                # source session/address/room/module can leak into the report.
+                svg = render_capture_svg(data, meta, deidentified=True)
             except Exception:  # noqa: BLE001 - malformed capture: skip it
                 continue
             picked.append({"svg": svg, "label": html.escape(r["label"] or ""),

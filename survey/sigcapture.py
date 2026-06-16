@@ -56,8 +56,15 @@ def auto_category(classification: str, matched_label: str, center_mhz: float,
 # SVG fingerprint rendering (pure python, vector = unlimited zoom)
 # ---------------------------------------------------------------------------
 
-def render_capture_svg(data: dict, meta: dict, width=1200, height=560) -> str:
-    """data: {freqs, avg, maxpeak, hits, passes}; meta: annotation fields."""
+def render_capture_svg(data: dict, meta: dict, width=1200, height=560,
+                       deidentified: bool = False) -> str:
+    """data: {freqs, avg, maxpeak, hits, passes}; meta: annotation fields.
+
+    deidentified=True renders the capture for the public signal library / demo:
+    the provenance footer (session #, address, room, module, capture time) is
+    dropped entirely and replaced with a neutral de-identified credit line, so
+    no source client's location can leak through a published spectrograph.
+    """
     freqs, avg, maxp = data["freqs"], data["avg"], data["maxpeak"]
     n = len(freqs)
     if n < 2:
@@ -102,9 +109,17 @@ def render_capture_svg(data: dict, meta: dict, width=1200, height=560) -> str:
     info_right = (f"peak {meta.get('peak_dbm', 0):.1f} dBm · floor {meta.get('floor_dbm', 0):.1f} dBm "
                   f"· bw ~{meta.get('bw_khz', 0):.0f} kHz · persistence "
                   f"{(meta.get('persistence') or 0) * 100:.0f}%")
-    prov = (f"{meta.get('captured', '')} · session #{meta.get('session_id', '?')} "
-            f"· {meta.get('address', '')} · room: {meta.get('room', '?')} "
-            f"· module: {meta.get('module', '?')}")
+    if deidentified:
+        prov = ("Shield Security Systems signal library — de-identified reference "
+                "capture")
+        credit = ("De-identified reference spectrograph — numeric capture only; "
+                  "no client, location, or session data.")
+    else:
+        prov = (f"{meta.get('captured', '')} · session #{meta.get('session_id', '?')} "
+                f"· {meta.get('address', '')} · room: {meta.get('room', '?')} "
+                f"· module: {meta.get('module', '?')}")
+        credit = ("Shield TSCM internal signal library — high-iteration zoom "
+                  "capture (vector; zoom freely)")
 
     return f"""<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 {width} {height}'
      font-family='Consolas,monospace'>
@@ -124,7 +139,7 @@ def render_capture_svg(data: dict, meta: dict, width=1200, height=560) -> str:
   <line x1='{plot_x + plot_w - 190}' y1='{plot_y + 40}' x2='{plot_x + plot_w - 168}' y2='{plot_y + 40}' stroke='#00c8ff' stroke-width='2'/>
   <text x='{plot_x + plot_w - 162}' y='{plot_y + 44}' fill='#00c8ff' font-size='11'>AVERAGE</text>
   <text x='{plot_x}' y='{height - 44}' fill='#6b7b90' font-size='11'>{prov}</text>
-  <text x='{plot_x}' y='{height - 26}' fill='#6b7b90' font-size='11'>Shield TSCM internal signal library — high-iteration zoom capture (vector; zoom freely)</text>
+  <text x='{plot_x}' y='{height - 26}' fill='#6b7b90' font-size='11'>{credit}</text>
 </svg>"""
 
 
