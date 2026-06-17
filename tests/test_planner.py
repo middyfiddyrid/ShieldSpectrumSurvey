@@ -6,6 +6,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from survey.config import Config  # noqa: E402
 from survey.sweep.planner import plan_full_sweep, plan_module_sweep, split_range  # noqa: E402
+from survey.allocations import bug_band_ranges  # noqa: E402
 
 
 class FakeCfg(Config):
@@ -68,6 +69,29 @@ class TestPlanner(unittest.TestCase):
             for s in p.segments:
                 self.assertGreaterEqual(s.avg_passes, 3)
                 self.assertGreaterEqual(s.maxhold_dwell_s, 2.0)
+
+    def test_bug_scan_only_covers_known_bug_bands(self):
+        targets = bug_band_ranges()
+        self.assertTrue(targets, "there should be known bug bands")
+        plans = plan_full_sweep(MODULES, CFG, "standard", targets=targets)
+        segs = [s for p in plans.values() for s in p.segments]
+        self.assertTrue(segs, "bug scan should produce segments")
+        for s in segs:
+            inside = any(s.low_mhz >= lo - 1e-6 and s.high_mhz <= hi + 1e-6
+                         for lo, hi in targets)
+            self.assertTrue(inside, f"segment {s.low_mhz}-{s.high_mhz} is outside the bug bands")
+        for p in plans.values():
+            self.assertEqual(p.scan_mode, "bug")
+
+    def test_bug_scan_skips_broadcast(self):
+        plans = plan_full_sweep(MODULES, CFG, "standard", targets=bug_band_ranges())
+        segs = [s for p in plans.values() for s in p.segments]
+        # FM broadcast (88-108) is not a bug band and must be skipped entirely
+        fm = [s for s in segs if s.low_mhz < 108.0 and s.high_mhz > 88.0]
+        self.assertFalse(fm, "FM broadcast must not be swept in a bug-frequency scan")
+        # but the 433 MHz ISM band (a classic bug band) must be covered
+        ism433 = [s for s in segs if s.low_mhz < 434.79 and s.high_mhz > 433.05]
+        self.assertTrue(ism433, "433 MHz ISM must be covered in a bug-frequency scan")
 
 
 if __name__ == "__main__":

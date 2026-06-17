@@ -49,10 +49,12 @@ class SweepPlan:
     profile: str = "standard"
     estimated_seconds: float = 0.0
     sweep_points: int = 112
+    scan_mode: str = "full"        # full = whole module range | bug = known bug bands only
 
     def to_dict(self):
         return {"segments": [s.to_dict() for s in self.segments],
                 "profile": self.profile,
+                "scan_mode": self.scan_mode,
                 "estimated_seconds": round(self.estimated_seconds, 0),
                 "estimated_minutes": round(self.estimated_seconds / 60.0, 1),
                 "segment_count": len(self.segments),
@@ -70,22 +72,38 @@ def _segment_width_mhz(center_mhz: float, widths: dict, span_scale: float) -> fl
 
 
 def split_range(module: str, lo_mhz: float, hi_mhz: float, widths: dict,
-                span_scale: float, weights: dict) -> list[Segment]:
+                span_scale: float, weights: dict,
+                targets: list[tuple[float, float]] | None = None) -> list[Segment]:
+    """Split [lo,hi] into sweep segments. When `targets` is given (a bug-band
+    scan), only the parts of [lo,hi] that fall inside a target range are
+    segmented — everything else is skipped entirely."""
+    if targets:
+        sub = []
+        for tlo, thi in targets:
+            a, b = max(lo_mhz, tlo), min(hi_mhz, thi)
+            if b - a > 1e-6:
+                sub.append((a, b))
+    else:
+        sub = [(lo_mhz, hi_mhz)]
     segments = []
-    cur = lo_mhz
-    while cur < hi_mhz - 1e-6:
-        width = _segment_width_mhz(cur, widths, span_scale)
-        end = min(cur + width, hi_mhz)
-        tag = band_tag_for_range(cur, end)
-        segments.append(Segment(module, round(cur, 4), round(end, 4), tag,
-                                weights.get(tag, weights.get("default", 1.0))))
-        cur = end
+    for a, b in sub:
+        cur = a
+        while cur < b - 1e-6:
+            width = _segment_width_mhz(cur, widths, span_scale)
+            end = min(cur + width, b)
+            tag = band_tag_for_range(cur, end)
+            segments.append(Segment(module, round(cur, 4), round(end, 4), tag,
+                                    weights.get(tag, weights.get("default", 1.0))))
+            cur = end
     return segments
 
 
 def plan_module_sweep(module: str, lo_mhz: float, hi_mhz: float, cfg,
-                      profile_name: str, custom_minutes: float = 0.0) -> SweepPlan:
-    """Build a plan for one module fitting the selected time budget."""
+                      profile_name: str, custom_minutes: float = 0.0,
+                      targets: list[tuple[float, float]] | None = None) -> SweepPlan:
+    """Build a plan for one module fitting the selected time budget. When
+    `targets` is given, only the known bug bands within the module range are
+    swept (a bug-frequency scan)."""
     widths = cfg.get("sweep", "segment_width_mhz", default={})
     weights = cfg.get("sweep", "band_dwell_weights", default={"default": 1.0})
     profiles = cfg.get("sweep", "profiles", default={})
@@ -101,11 +119,12 @@ def plan_module_sweep(module: str, lo_mhz: float, hi_mhz: float, cfg,
         span_scale = float(prof.get("span_scale", 1.0))
         base_passes = int(prof.get("avg_passes", 10))
 
+    scan_mode = "bug" if targets else "full"
     # Full sweep covers BOTH modules within one budget; each module call gets
     # a share proportional to its span. The caller passes module_share.
-    segments = split_range(module, lo_mhz, hi_mhz, widths, span_scale, weights)
+    segments = split_range(module, lo_mhz, hi_mhz, widths, span_scale, weights, targets)
     if not segments:
-        return SweepPlan([], profile_name, 0.0, points)
+        return SweepPlan([], profile_name, 0.0, points, scan_mode)
 
     budget_s = minutes * 60.0
     overhead = len(segments) * SEGMENT_OVERHEAD_S
@@ -120,32 +139,46 @@ def plan_module_sweep(module: str, lo_mhz: float, hi_mhz: float, cfg,
         s.maxhold_dwell_s = round(max(MIN_MAXHOLD_DWELL_S, t_seg * (1 - AVG_TIME_SHARE)), 1)
 
     est = overhead + sum(s.avg_passes * sps + s.maxhold_dwell_s for s in segments)
-    return SweepPlan(segments, profile_name, est, points)
+    return SweepPlan(segments, profile_name, est, points, scan_mode)
+
+
+def _module_span(m: dict, targets: list[tuple[float, float]] | None) -> float:
+    """Span used for budget sharing. For a bug scan it's the targeted span
+    inside the module (so dwell concentrates on modules that hold bug bands)."""
+    lo, hi = m["min_mhz"], m["max_mhz"]
+    if not targets:
+        return max(hi - lo, 1.0)
+    return sum(max(0.0, min(hi, thi) - max(lo, tlo)) for tlo, thi in targets)
 
 
 def plan_full_sweep(modules: list[dict], cfg, profile_name: str,
-                    custom_minutes: float = 0.0) -> dict[str, SweepPlan]:
+                    custom_minutes: float = 0.0,
+                    targets: list[tuple[float, float]] | None = None
+                    ) -> dict[str, SweepPlan]:
     """modules: [{'side','min_mhz','max_mhz'}, ...] exactly as the hardware
-    reported them. Splits the time budget across modules by span share."""
+    reported them. Splits the time budget across modules by span share. When
+    `targets` is given, only the known bug bands are swept and the budget is
+    shared by each module's targeted span."""
     profiles = cfg.get("sweep", "profiles", default={})
     if profile_name == "custom":
         total_minutes = max(3.0, custom_minutes)
     else:
         total_minutes = float(profiles.get(profile_name, profiles.get("standard", {}))
                               .get("minutes", 45))
-    spans = {m["side"]: max(m["max_mhz"] - m["min_mhz"], 1.0) for m in modules}
-    total_span = sum(spans.values())
+    spans = {m["side"]: _module_span(m, targets) for m in modules}
+    total_span = sum(spans.values()) or 1.0
     plans = {}
     for m in modules:
         share = spans[m["side"]] / total_span
         plans[m["side"]] = plan_module_sweep(
             m["side"], m["min_mhz"], m["max_mhz"], cfg,
-            "custom", total_minutes * share) if profile_name == "custom" else \
-            _plan_with_minutes(m, cfg, profile_name, total_minutes * share)
+            "custom", total_minutes * share, targets) if profile_name == "custom" else \
+            _plan_with_minutes(m, cfg, profile_name, total_minutes * share, targets)
     return plans
 
 
-def _plan_with_minutes(m: dict, cfg, profile_name: str, minutes: float) -> SweepPlan:
+def _plan_with_minutes(m: dict, cfg, profile_name: str, minutes: float,
+                       targets: list[tuple[float, float]] | None = None) -> SweepPlan:
     profiles = cfg.get("sweep", "profiles", default={})
     prof = dict(profiles.get(profile_name, profiles.get("standard", {})))
     prof["minutes"] = minutes
@@ -162,5 +195,6 @@ def _plan_with_minutes(m: dict, cfg, profile_name: str, minutes: float) -> Sweep
             return self._real.get(*keys, default=default)
 
     plan = plan_module_sweep(m["side"], m["min_mhz"], m["max_mhz"],
-                             _ProxyCfg(cfg, prof, profile_name), profile_name)
+                             _ProxyCfg(cfg, prof, profile_name), profile_name,
+                             targets=targets)
     return plan

@@ -135,6 +135,7 @@ body.demo #card-casefiles { display:none !important; }
   <div class="step" data-view="directional"><div class="dot" id="dot-directional"></div>7 · DIRECTIONAL</div>
   <div class="step" data-view="results"><div class="dot" id="dot-results"></div>8 · RESULTS / REPORT</div>
   <div class="sect">TOOLS</div>
+  <div class="step" data-view="bugscan"><div class="dot" id="dot-bugscan"></div>BUG-FREQUENCY SCAN</div>
   <div class="step" data-view="poi"><div class="dot" id="dot-poi"></div>PERSONS OF INTEREST</div>
   <div class="step" data-view="wiki"><div class="dot" id="dot-wiki"></div>SIGNAL WIKI</div>
   <div class="step" data-view="cases"><div class="dot" id="dot-cases"></div>CASE STUDIES</div>
@@ -278,6 +279,35 @@ body.demo #card-casefiles { display:none !important; }
     </div>
   </div>
   <div class="card" id="ambient-status"></div>
+</section>
+
+<!-- ============ BUG-FREQUENCY SCAN ============ -->
+<section class="view" id="view-bugscan">
+  <h2>BUG-FREQUENCY SCAN <span class="tag">known surveillance bands only — focused depth</span></h2>
+  <div class="card">
+    <p class="note">A focused sweep of <b>only the bands covert devices are known to use</b> —
+    315 / 433 / 915 MHz ISM, DECT, 2.4 / 5.8 GHz Wi-Fi, GPS, and the cellular uplink blocks a
+    GSM/LTE bug transmits in — skipping broadcast and general allocations entirely. The full time
+    budget is spent on those bands, so each gets far deeper dwell and finer resolution than a
+    full-spectrum sweep of the same profile. Run it like an interior sweep: omni antenna, both SMA
+    ports in sequence.</p>
+    <div class="row">
+      <label>Room</label><input type="text" id="bug-room" style="width:220px" placeholder="room label (optional)">
+      <label>Depth</label>
+      <select id="bug-profile">
+        <option value="quick">Quick Recon (~15 min)</option>
+        <option value="standard" selected>Standard (~45 min)</option>
+        <option value="deep">Deep (~2 hr)</option>
+        <option value="custom">Custom…</option>
+      </select>
+      <input class="small" id="bug-minutes" value="45" title="custom minutes" style="display:none">
+      <span class="note" id="bug-eta"></span>
+    </div>
+    <div class="row">
+      <button class="btn primary big" id="btn-bugscan">START BUG-FREQUENCY SCAN (both modules)</button>
+    </div>
+  </div>
+  <div class="card" id="bugscan-status"></div>
 </section>
 
 <!-- ============ SWEEP LEFT / RIGHT ============ -->

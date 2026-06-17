@@ -15,6 +15,7 @@ from .geocode import geocode
 from .report import export_csv, generate_report
 from .sweep.calibration import run_calibration
 from .sweep.planner import plan_full_sweep
+from .allocations import bug_band_ranges
 from .sweep.runner import SweepController
 
 log = logging.getLogger("survey.server")
@@ -507,18 +508,22 @@ def create_app(db, cfg, demo=False) -> Flask:
 
     # ---------- planning & sweeping ----------
 
-    def _plans(profile, custom_minutes):
+    def _plans(profile, custom_minutes, scan_mode="full"):
         # auto-(re)connects and lazily reads any module range the connect-time
         # identity pass failed to capture; raises DeviceError if truly absent
         modules = st.controller.module_ranges()
-        return plan_full_sweep(modules, cfg, profile, custom_minutes)
+        # a "bug" scan restricts coverage to the known surveillance bands; with
+        # the same time budget that means far deeper dwell per band
+        targets = bug_band_ranges() if scan_mode == "bug" else None
+        return plan_full_sweep(modules, cfg, profile, custom_minutes, targets=targets)
 
     @app.get("/api/plan")
     def plan_preview():
         profile = request.args.get("profile", "standard")
         minutes = float(request.args.get("custom_minutes", 45))
+        scan_mode = request.args.get("scan_mode", "full")
         try:
-            plans = _plans(profile, minutes)
+            plans = _plans(profile, minutes, scan_mode)
         except Exception as e:  # noqa: BLE001 - device absent/dead included
             return err(e)
         return jsonify({side: p.to_dict() for side, p in plans.items()})
@@ -534,8 +539,9 @@ def create_app(db, cfg, demo=False) -> Flask:
         room = body.get("room", "") or ("exterior" if phase == "ambient" else "")
         profile = body.get("profile", "standard")
         minutes = float(body.get("custom_minutes") or 45)
+        scan_mode = body.get("scan_mode", "full")        # full | bug
         try:
-            plans = _plans(profile, minutes)
+            plans = _plans(profile, minutes, scan_mode)
             plan = plans.get(module)
             if plan is None or not plan.segments:
                 return err(f"no plan for module {module}")

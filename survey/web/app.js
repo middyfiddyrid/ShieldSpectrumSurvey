@@ -676,11 +676,12 @@ $("baseline-filter").oninput = renderBaselineTable;
 $("baseline-source-filter").onchange = renderBaselineTable;
 
 /* ---------- ETA previews ---------- */
-async function updateEta(profileSel, minutesInput, etaEl) {
+async function updateEta(profileSel, minutesInput, etaEl, scanMode) {
   const profile = profileSel.value;
   minutesInput.style.display = profile === "custom" ? "" : "none";
   try {
-    const plans = await api(`/api/plan?profile=${profile}&custom_minutes=${minutesInput.value || 45}`);
+    const plans = await api(`/api/plan?profile=${profile}&custom_minutes=${minutesInput.value || 45}` +
+      `&scan_mode=${scanMode || "full"}`);
     const totalMin = Object.values(plans).reduce((a, p) => a + p.estimated_minutes, 0);
     const segs = Object.values(plans).reduce((a, p) => a + p.segment_count, 0);
     const rbw = Object.values(plans).flatMap(p => p.segments.map(s =>
@@ -689,11 +690,12 @@ async function updateEta(profileSel, minutesInput, etaEl) {
       `RBW ${Math.min(...rbw).toFixed(0)}–${Math.max(...rbw).toFixed(0)} kHz/bin`;
   } catch (e) { etaEl.textContent = e.message; }
 }
-[["ambient-profile", "ambient-minutes", "ambient-eta"],
- ["profile-L", "minutes-L", "eta-L"], ["profile-R", "minutes-R", "eta-R"]]
-  .forEach(([p, m, e]) => {
-    $(p).onchange = () => updateEta($(p), $(m), $(e));
-    $(m).oninput = () => updateEta($(p), $(m), $(e));
+[["ambient-profile", "ambient-minutes", "ambient-eta", "full"],
+ ["profile-L", "minutes-L", "eta-L", "full"], ["profile-R", "minutes-R", "eta-R", "full"],
+ ["bug-profile", "bug-minutes", "bug-eta", "bug"]]
+  .forEach(([p, m, e, mode]) => {
+    $(p).onchange = () => updateEta($(p), $(m), $(e), mode);
+    $(m).oninput = () => updateEta($(p), $(m), $(e), mode);
   });
 
 /* ---------- antenna prompt + sweep sequences ---------- */
@@ -707,9 +709,10 @@ function prompt2(msg, sub) {
   });
 }
 
-async function startPhase(phase, module, room, profile, minutes) {
+async function startPhase(phase, module, room, profile, minutes, scanMode) {
   App.overlayHidden = false;
-  await api("/api/sweep/start", { phase, module, room, profile, custom_minutes: minutes });
+  await api("/api/sweep/start", { phase, module, room, profile,
+    custom_minutes: minutes, scan_mode: scanMode || "full" });
 }
 
 /* sequence = remaining steps after the current sweep finishes */
@@ -721,7 +724,7 @@ async function advanceSeq() {
   const ok = await prompt2(step.msg, step.sub);
   if (!ok) return;
   try {
-    await startPhase(step.phase, step.module, step.room, seq.profile, seq.minutes);
+    await startPhase(step.phase, step.module, step.room, seq.profile, seq.minutes, seq.scanMode);
     App.seq = seq.steps.length ? seq : null;
   } catch (e) {
     // never fail silently — the operator is standing there holding an antenna
@@ -758,6 +761,25 @@ $("btn-ambient").onclick = async () => {
     sub: `This port sweeps ${moduleRange("right")} — ambient reference continues` });
   if (!steps.length) return alert("No modules reported by device.");
   App.seq = { steps, profile, minutes };
+  advanceSeq();
+};
+
+$("btn-bugscan").onclick = async () => {
+  const mods = modulesAvailable();
+  if (!mods.length) return alert("Connect the device first (Session tab).");
+  const profile = $("bug-profile").value, minutes = $("bug-minutes").value;
+  const room = $("bug-room").value || "bug-scan";
+  const steps = [];
+  if (mods.includes("left")) steps.push({
+    phase: "interior", module: "left", room,
+    msg: "ATTACH THE NON-DIRECTIONAL (OMNI) ANTENNA TO THE LEFT SMA PORT",
+    sub: `Bug-frequency scan — known surveillance bands within ${moduleRange("left")}` });
+  if (mods.includes("right")) steps.push({
+    phase: "interior", module: "right", room,
+    msg: "MOVE THE OMNI ANTENNA TO THE RIGHT SMA PORT",
+    sub: `Bug-frequency scan — known surveillance bands within ${moduleRange("right")}` });
+  if (!steps.length) return alert("No modules reported by device.");
+  App.seq = { steps, profile, minutes, scanMode: "bug" };
   advanceSeq();
 };
 

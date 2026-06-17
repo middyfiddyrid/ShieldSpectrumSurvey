@@ -254,3 +254,23 @@ def band_tag_for_range(low_mhz: float, high_mhz: float) -> str:
     if tags == {"broadcast"}:
         return "broadcast"
     return "default"
+
+
+# --- Known surveillance ("bug") frequency bands ---
+# Every allocation flagged caution=True is a band where covert transmitters are
+# known to operate: cheap 315/433/915 MHz ISM bugs, 1.2 GHz analog video senders,
+# DECT room-audio devices, 2.4/5.8 GHz Wi-Fi cameras, GPS repeaters/jammers, and
+# the cellular UPLINK blocks a GSM/LTE bug transmits in. A "bug-frequency scan"
+# dwells ONLY on these — trading total spectrum coverage for far deeper
+# inspection of the bands that actually matter.
+def bug_band_ranges(merge_gap_mhz: float = 1.0) -> list[tuple[float, float]]:
+    """Contiguous (low_mhz, high_mhz) ranges covering the known bug bands — the
+    caution=True allocations, merged where they touch or overlap. Sorted ascending."""
+    bands = sorted((a.low_mhz, a.high_mhz) for a in ALL_ALLOCATIONS if a.caution)
+    merged: list[list[float]] = []
+    for lo, hi in bands:
+        if merged and lo <= merged[-1][1] + merge_gap_mhz:
+            merged[-1][1] = max(merged[-1][1], hi)
+        else:
+            merged.append([lo, hi])
+    return [(lo, hi) for lo, hi in merged]
