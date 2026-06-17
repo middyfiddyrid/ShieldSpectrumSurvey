@@ -127,3 +127,25 @@ account → New → Blueprint → pick the PrivateSweepDemo repo → it builds t
 Dockerfile and deploys free-tier. Container boots `app.py --demo --no-browser`,
 self-seeds the wiki. Then: wire a "Launch live demo" button into the NMP Labs
 post + a nav tab.
+
+## Status update — 2026-06-17 — DEMO IS LIVE
+
+- **Live URL: https://dcs-demo.onrender.com** (Render free tier, Docker/Blueprint
+  from the `PrivateSweepDemo` GitHub repo). Free tier sleeps after ~15 min idle →
+  first hit takes ~30–60s to wake, then snappy. Signal Wiki self-seeded and verified
+  de-identified in production (54 emitters / 7 categories, neutral session labels,
+  sanitized SVG footers, blank room/module).
+- **NMP Labs post wired (Wix Blog REST API).** Site id
+  `9bd91223-9878-4b73-b354-213f1b638274`; post slug
+  `nmp-labs-introducing-deconfliction-systems-dcs`. The post now ends with two
+  **investment-banking tombstone** blocks (divider-bracketed, centered, gold
+  "NMP LABS · VENTURE" eyebrow, italic descriptor, bold link):
+  DCS → the live demo, PsDiary → pagesixdiary.netlify.app. Edited via Draft Posts
+  API; note `action=UPDATE_PUBLICATION` publishes to live immediately (no true draft
+  staging — validated structure on a throwaway draft first).
+- **No separate nav tab.** Wix exposes no public REST API for the classic site
+  navigation menu (only a Restaurants "Menus" API); a top-level tab would require the
+  visual Editor. Matt opted to keep both ventures inside the NMP Labs post instead.
+- Still open from before: `datacenter.nationsmediapartners.com` subdomain (Netlify
+  custom-domain click + Wix DNS CNAME); cinematic hero/licensed audio on the data-
+  center page (deferred).
