@@ -95,3 +95,35 @@ cloud, multi-user; the on-site sweep stays a local companion that syncs up.
 **Standing guardrails reaffirmed this session:** do NOT publish anything about
 client McCullough (the local site-plan files are titled "McCullough Property" —
 never deploy them); no client PII in any public/demo surface; no copyrighted audio.
+
+## Status update — 2026-06-16
+
+**Signal-wiki seeding: DONE (local commit 9b7a2ad).** The --demo DB self-seeds
+the Signal Wiki on first boot from a committed, PII-free seed:
+- `tools/build_demo_seed.py` extracts a curated subset from sweeps.db →
+  `survey/demo_seed.json` (committed). Drops address/room/module/notes + all
+  session linkage; keeps only numeric capture arrays + characteristics + the
+  attested de-identified case studies. PII tripwire derives its denylist from
+  the live archive (no client names hardcoded).
+- `survey/demo_seed.py` `seed_demo()` populates an empty demo DB (idempotent),
+  RE-RENDERING every spectrograph with `render_capture_svg(deidentified=True)`
+  so no source address/room/session leaks. Sessions become neutral
+  "De-identified reference site N". `_showcase_captures` refactored to use the
+  same first-class flag (dropped its fragile regex).
+- Result: 136 reference captures (54 emitters / 7 categories) + 2 case studies.
+  44/44 tests green; zero PII tokens/provenance markers in seeded SVGs or
+  demo.db. demo.db + capture_images/ stay git/docker-ignored — the container
+  regenerates them on boot.
+
+**GitHub: PUSHED (clean).** Repo: https://github.com/middyfiddyrid/PrivateSweepDemo
+(private). Pushed a history-rewritten copy: `HANDOFF.md` and `DCS_PLATFORM.md`
+removed from ALL commits, and the lone test-fixture address in
+`tests/module_switch_check.py` neutralized across history. Verified 0 client
+identifiers anywhere in remote history. Local main was left untouched (full
+history + both docs still here) — the scrub was done in a throwaway clone.
+
+**Remaining to go LIVE — Render (needs Matt's account):** create a Render
+account → New → Blueprint → pick the PrivateSweepDemo repo → it builds the
+Dockerfile and deploys free-tier. Container boots `app.py --demo --no-browser`,
+self-seeds the wiki. Then: wire a "Launch live demo" button into the NMP Labs
+post + a nav tab.
