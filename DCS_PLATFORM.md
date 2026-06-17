@@ -149,3 +149,29 @@ post + a nav tab.
 - Still open from before: `datacenter.nationsmediapartners.com` subdomain (Netlify
   custom-domain click + Wix DNS CNAME); cinematic hero/licensed audio on the data-
   center page (deferred).
+
+### Addendum — DCS positioning thesis + tombstone cards (2026-06-17)
+
+**DCS thesis (Matt's framing):** DCS is not fundamentally "a TSCM tool" — it is
+**applied game theory**. Each DeConfliction System uses modern tools (software, UX,
+the style of engagement) to **attract → inform → inject a non-zero-sum game
+architecture**, moving adversarial actors out of zero-sum conflict into mutually
+beneficial equilibria. The TSCM spectrum platform is the **first deployed instance**
+(it deconflicts an RF/surveillance environment); PsDiary fits the same thesis
+(deconflicts reputation — the verified subject controls the weight of claims). Read:
+**NMP Labs = a studio that builds DeConfliction Systems.**
+
+**Tombstone cards (live):** the post's "More from NMP Labs" section now carries two
+investment-banking-style **tombstone cards** rendered as images (ivory stock, double
+gold/charcoal border, venture emblem, "A venture of NMP Labs" footer): a DCS card
+(thesis-forward — payoff-matrix emblem, "Applied game theory", TSCM as first deployed
+system) and a PsDiary card (its real **P6** navy/gold badge, "Public Reputation
+Ledger"). Each links out (DCS→demo, PsDiary→PsDiary) with a gold fallback text link.
+Source art in `Desktop/_nmp_tombstones/`; images hosted at
+`dcs-demo.onrender.com/static/{dcs,psdiary}_tombstone.png` (committed to the demo repo's
+`survey/web/`), uploaded to Wix Media, placed via the Blog Draft Posts API.
+Implementation notes: Wix `action=UPDATE_PUBLICATION` publishes to live immediately
+(no draft staging); large base64 can't be passed inline to the image-upload tool
+(Read 25k / Bash 30k caps + copy-fidelity) — host at a public URL and use the
+`download_url` form instead. Post BODY still frames DCS concretely as TSCM (a full
+thesis rewrite of the article was offered and deferred).
