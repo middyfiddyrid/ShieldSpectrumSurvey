@@ -224,12 +224,22 @@ class SweepController:
                                   "low": seg.low_mhz, "high": seg.high_mhz,
                                   "ts": frame.ts})
 
+        # An SDR frame is ALREADY a fully-averaged stepped sweep (each PSD bin
+        # averages ~hundreds of FFTs internally), so a handful of host passes is
+        # plenty — unlike the RF Explorer, which needs many fast hardware sweeps.
+        # Without this cap a wideband Pluto sweep takes 20-30 min instead of ~2.
+        avg_passes, dwell = seg.avg_passes, seg.maxhold_dwell_s
+        if getattr(dev, "is_swept_sdr", False):
+            avg_passes = min(avg_passes,
+                             int(self.cfg.get("pluto", "sweep_avg_passes", default=2)))
+            dwell = min(dwell,
+                        float(self.cfg.get("pluto", "sweep_maxhold_dwell_s", default=3.0)))
         # Pass 1 — AVERAGE
         dev.set_calculator("average")
-        dev.collect(seg.avg_passes, on_frame, abort=self.abort_event)
+        dev.collect(avg_passes, on_frame, abort=self.abort_event)
         # Pass 2 — MAX HOLD (device DSP transient capture)
         dev.set_calculator("maxhold")
-        dev.stream(seg.maxhold_dwell_s, on_frame, abort=self.abort_event)
+        dev.stream(dwell, on_frame, abort=self.abort_event)
         dev.set_calculator("normal")
 
         floor, signals = detect_signals(acc.freqs, acc.avg, acc.maxpeak, acc.hits,

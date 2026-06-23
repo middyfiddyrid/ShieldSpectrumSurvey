@@ -61,6 +61,11 @@ DEFAULTS = {
         "sweep_bins": 2048,                # resampled grid points per read_sweep frame (caps host-side cost)
         "gain_mode": "manual",             # "manual" (repeatable baseline) or "slow_attack" (first-look survey)
         "gain_db": 64.0,                   # fixed RX gain when gain_mode == manual
+        # SDR frames are already fully averaged, so cap the runner's host-side
+        # passes/dwell per band (vs the RF Explorer's many fast sweeps) — keeps a
+        # wideband sweep at ~minutes instead of tens of minutes.
+        "sweep_avg_passes": 2,
+        "sweep_maxhold_dwell_s": 3.0,
         # ~approximate~ dBFS -> dBm calibration offset. NOT lab-grade; lean on
         # baseline-delta detection. Tune per-unit in calibration mode.
         "cal_offset_db": -30.0,

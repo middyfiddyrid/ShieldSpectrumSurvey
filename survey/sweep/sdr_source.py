@@ -207,6 +207,9 @@ class AD936xSource(BaseDevice):
 
     # single-RX by default; B220 (2R2T) overrides to 2
     channels = 1
+    # each read_sweep() is a complete, internally-averaged stepped sweep — the
+    # runner uses this to cap redundant host-side averaging passes (speed).
+    is_swept_sdr = True
 
     def __init__(self, cfg):
         self.cfg = cfg
