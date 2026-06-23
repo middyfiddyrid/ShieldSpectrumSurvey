@@ -443,6 +443,9 @@ def create_app(db, cfg, demo=False) -> Flask:
                               "ORDER BY id", (session["id"],))
         return jsonify({
             "session": session,
+            "source": (st.controller.active_source
+                       or os.environ.get("SWEEP_SOURCE")
+                       or cfg.get("device", "source", default="rfexplorer")),
             "device": st.controller.device_info(),
             "sweep": st.controller.state,
             "sweeps": sweeps,
@@ -498,10 +501,18 @@ def create_app(db, cfg, demo=False) -> Flask:
 
     @app.post("/api/device/connect")
     def device_connect():
+        body = request.get_json(silent=True) or {}
+        source = (body.get("source") or "").strip().lower() or None
         try:
-            info = st.controller.connect_device()
+            info = st.controller.connect_device(source=source)
         except Exception as e:  # noqa: BLE001
             return err(e, 502)
+        # remember the operator's pick so the next launch defaults to it
+        if source:
+            try:
+                cfg.set_and_save(("device", "source"), source)
+            except Exception:  # noqa: BLE001
+                log.exception("could not persist device.source")
         if st.session_id:
             db.set_device_info(st.session_id, info.to_dict())
         return jsonify(info.to_dict())

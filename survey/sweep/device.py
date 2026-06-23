@@ -562,11 +562,11 @@ class OfficialRFEDevice(BaseDevice):
             self.rfe = None
 
 
-def open_device(cfg) -> BaseDevice:
-    """Driver selection. Source family first (env SWEEP_SOURCE overrides config
-    device.source; default 'rfexplorer' so existing behaviour is unchanged), then
-    within RF Explorer: simulator (explicit only) -> official lib -> raw UART."""
-    source = (os.environ.get("SWEEP_SOURCE")
+def open_device(cfg, source=None) -> BaseDevice:
+    """Driver selection. Source precedence: explicit `source` arg (operator's
+    runtime pick) -> env SWEEP_SOURCE -> config device.source -> 'rfexplorer'.
+    Within RF Explorer: simulator (explicit only) -> official lib -> raw UART."""
+    source = (source or os.environ.get("SWEEP_SOURCE")
               or cfg.get("device", "source", default="rfexplorer")).strip().lower()
     if source in ("pluto", "sdr", "ad936x"):
         from .sdr_source import PlutoSource

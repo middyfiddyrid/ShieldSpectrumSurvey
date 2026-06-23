@@ -40,6 +40,7 @@ class SweepController:
         self.db = db
         self.cfg = cfg
         self.device = None
+        self.active_source = None        # which spectrum source is connected (rfexplorer|pluto)
         self._thread = None
         self.abort_event = threading.Event()
         self.state = {"running": False, "phase": None, "module": None, "room": None,
@@ -51,7 +52,7 @@ class SweepController:
 
     # ---- device ----
 
-    def connect_device(self):
+    def connect_device(self, source=None):
         from .device import open_device
         old, self.device = self.device, None   # never leave a dead handle assigned
         if old is not None:
@@ -59,7 +60,10 @@ class SweepController:
                 old.close()
             except Exception:  # noqa: BLE001
                 pass
-        self.device = open_device(self.cfg)
+        self.device = open_device(self.cfg, source=source)
+        self.active_source = (source or os.environ.get("SWEEP_SOURCE")
+                              or self.cfg.get("device", "source",
+                                              default="rfexplorer")).strip().lower()
         return self.device.info
 
     def _ensure_device(self):

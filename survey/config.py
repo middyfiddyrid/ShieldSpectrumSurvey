@@ -49,6 +49,7 @@ DEFAULTS = {
     # ADALM-Pluto / AD936x SDR source. Only used when device.source == "pluto".
     "pluto": {
         "uri": "ip:192.168.2.1",          # env PLUTO_URI overrides; or "usb:"
+        "libiio_dir": "",                  # Windows: dir with libiio.dll; "" => %LOCALAPPDATA%\\libiio\\bin
         "sample_rate": 20_000_000,         # instantaneous bandwidth per tune (<= ~20 MSPS sustained on USB2)
         "keep_fraction": 0.8,              # central fraction of each segment kept (analog filter edge rolloff)
         "overlap": 0.5,                    # inter-segment overlap; >=0.5 also covers each tune-center's DC notch

@@ -322,6 +322,12 @@ function render(st) {
   $("ft-bat").textContent = dev && dev.battery ? dev.battery : "—";
   $("ft-sim").innerHTML = dev && dev.simulated ? '<span class="sim">⚠ SIMULATED DEVICE</span>' : "";
   $("ft-msg").textContent = st.sweep.message || "idle";
+  // sync the device-source picker to the active/last-used source on first load
+  // (don't fight the operator if they've changed it this session)
+  if ($("device-source") && !App._srcSynced && st.source) {
+    $("device-source").value = st.source;
+    App._srcSynced = true;
+  }
 
   // nav dots
   dot("session", st.session ? "done" : "");
@@ -564,9 +570,10 @@ $("btn-create").onclick = async () => {
 };
 
 $("btn-connect").onclick = async () => {
-  $("device-msg").textContent = "connecting…";
+  const src = $("device-source") ? $("device-source").value : null;
+  $("device-msg").textContent = `connecting to ${src === "pluto" ? "Pluto" : "RF Explorer"}…`;
   try {
-    const d = await api("/api/device/connect", {});
+    const d = await api("/api/device/connect", src ? { source: src } : {});
     $("device-msg").textContent = "connected";
     $("device-detail").innerHTML =
       `<div>Model</div><div>${esc(d.model)} (driver: ${esc(d.driver)})</div>` +
@@ -740,6 +747,15 @@ function modulesAvailable() {
   return dev ? dev.modules.map(m => m.side) : [];
 }
 
+// true when the CONNECTED radio is the single-RX Pluto (drives antenna-prompt
+// wording). Keyed off the device driver so it's correct regardless of how the
+// source was picked; falls back to the selected source before connect.
+function isPlutoDevice() {
+  const dev = App.state && App.state.device;
+  if (dev && dev.driver) return dev.driver === "pluto";
+  return App.state && App.state.source === "pluto";
+}
+
 function moduleRange(side) {
   const dev = App.state && App.state.device;
   const m = dev && dev.modules.find(x => x.side === side);
@@ -750,15 +766,24 @@ $("btn-ambient").onclick = async () => {
   const mods = modulesAvailable();
   if (!mods.length) return alert("Connect the device first (Session tab).");
   const profile = $("ambient-profile").value, minutes = $("ambient-minutes").value;
+  const pluto = isPlutoDevice();
   const steps = [];
-  if (mods.includes("left")) steps.push({
-    phase: "ambient", module: "left", room: "exterior",
-    msg: "ATTACH THE NON-DIRECTIONAL (OMNI) ANTENNA TO THE LEFT SMA PORT",
-    sub: `This port sweeps ${moduleRange("left")} — ambient reference, run OUTSIDE / vehicle at the curb` });
-  if (mods.includes("right")) steps.push({
-    phase: "ambient", module: "right", room: "exterior",
-    msg: "MOVE THE OMNI ANTENNA TO THE RIGHT SMA PORT",
-    sub: `This port sweeps ${moduleRange("right")} — ambient reference continues` });
+  if (pluto) {
+    // single wideband RX — one step, no SMA-port dance
+    steps.push({
+      phase: "ambient", module: "right", room: "exterior",
+      msg: "ATTACH THE OMNI ANTENNA TO THE PLUTO RX SMA",
+      sub: `Pluto sweeps ${moduleRange("right")} — ambient reference, run OUTSIDE / vehicle at the curb` });
+  } else {
+    if (mods.includes("left")) steps.push({
+      phase: "ambient", module: "left", room: "exterior",
+      msg: "ATTACH THE NON-DIRECTIONAL (OMNI) ANTENNA TO THE LEFT SMA PORT",
+      sub: `This port sweeps ${moduleRange("left")} — ambient reference, run OUTSIDE / vehicle at the curb` });
+    if (mods.includes("right")) steps.push({
+      phase: "ambient", module: "right", room: "exterior",
+      msg: "MOVE THE OMNI ANTENNA TO THE RIGHT SMA PORT",
+      sub: `This port sweeps ${moduleRange("right")} — ambient reference continues` });
+  }
   if (!steps.length) return alert("No modules reported by device.");
   App.seq = { steps, profile, minutes };
   advanceSeq();

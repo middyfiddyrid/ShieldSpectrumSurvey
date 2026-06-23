@@ -45,6 +45,28 @@ from .device import BaseDevice, DeviceError, DeviceInfo, ModuleInfo, SweepFrame
 log = logging.getLogger("survey.sdr")
 
 
+def _ensure_libiio_on_path(libiio_dir: str = ""):
+    """On Windows, pyadi-iio/pylibiio need the native libiio.dll discoverable. A
+    process launched from a GUI/shortcut may not have inherited the user PATH
+    edit, so explicitly register the bundled libiio dir (config pluto.libiio_dir,
+    else %LOCALAPPDATA%\\libiio\\bin) before importing adi. No-op off Windows."""
+    if os.name != "nt":
+        return
+    candidates = [libiio_dir] if libiio_dir else []
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        candidates.append(os.path.join(local, "libiio", "bin"))
+    for d in candidates:
+        if d and os.path.isdir(d):
+            try:
+                os.add_dll_directory(d)
+            except (OSError, AttributeError):
+                pass
+            if d.lower() not in os.environ.get("PATH", "").lower():
+                os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+            return
+
+
 # ---------------------------------------------------------------------------
 # Pure DSP — no hardware, unit-tested in tests/test_sdr_source.py
 # ---------------------------------------------------------------------------
@@ -229,7 +251,12 @@ class AD936xSource(BaseDevice):
         self._set_buffer_size(self._nsamp)
         self._set_gain(self._gain_mode, self._gain_db)
         lo_min, lo_max = self._probe_tuning_range()
-        self.info.modules = [ModuleInfo("rx", self.info.model or "AD936x",
+        # The Pluto has ONE wideband RX front end. The rest of the app models the
+        # device as left/right SMA ports (RF Explorer dual-module); map our single
+        # RX onto "right" (the RFE's wideband expansion port) so the existing
+        # ambient / bug-scan / interior sweep flows drive it with no UI changes.
+        # The future B220 (2R2T) will report two modules.
+        self.info.modules = [ModuleInfo("right", self.info.model or "AD936x",
                                         lo_min / 1e6, lo_max / 1e6)]
         # NOTE: DeviceInfo.check_expected() is RF-Explorer-specific (6G Combo
         # PLUS / fw 03.45) and is intentionally NOT called here.
@@ -395,18 +422,29 @@ class PlutoSource(AD936xSource):
                      or cfg.get("pluto", "uri", default="ip:192.168.2.1"))
 
     def _open_radio(self):
+        _ensure_libiio_on_path(self.cfg.get("pluto", "libiio_dir", default=""))
         try:
             import adi
         except ImportError as e:
             raise DeviceError(
                 "pyadi-iio not installed (pip install pyadi-iio) — and on "
                 "Windows the native libiio runtime must be on PATH") from e
-        try:
-            self.sdr = adi.Pluto(uri=self._uri)
-        except Exception as e:  # noqa: BLE001 - libiio raises bare OSError/Exception
+        # A fast reconnect can race the previous libiio context's release (the
+        # radio reports busy for a beat), so retry a few times before giving up.
+        last = None
+        for attempt in range(4):
+            try:
+                self.sdr = adi.Pluto(uri=self._uri)
+                last = None
+                break
+            except Exception as e:  # noqa: BLE001 - libiio raises bare OSError/Exception
+                last = e
+                time.sleep(0.6)
+        if last is not None:
             raise DeviceError(
-                f"could not open Pluto at {self._uri}: {e}. Is it plugged in and "
-                f"are the ADI USB drivers installed?") from e
+                f"could not open Pluto at {self._uri}: {last}. Is it plugged in, "
+                f"are the ADI USB drivers installed, and is another copy of the app "
+                f"already using it?") from last
         self.info.port = self._uri
         ctx = getattr(self.sdr, "_ctx", None)
         self.info.model = "ADALM-Pluto (AD936x)"

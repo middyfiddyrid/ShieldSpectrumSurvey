@@ -166,9 +166,16 @@ body.demo #card-casefiles { display:none !important; }
   <div class="card">
     <h3>DEVICE</h3>
     <div class="row">
-      <button class="btn" id="btn-connect">CONNECT RF EXPLORER</button>
+      <label class="note" for="device-source">Source</label>
+      <select id="device-source">
+        <option value="rfexplorer">RF Explorer (6G Combo)</option>
+        <option value="pluto">ADALM-Pluto (SDR)</option>
+      </select>
+      <button class="btn" id="btn-connect">CONNECT</button>
       <span id="device-msg" class="note">not connected</span>
     </div>
+    <p class="note">Pick whichever radio is plugged in, then CONNECT. Your choice is
+       remembered for next time. Only one program can use a given radio at a time.</p>
     <div id="device-detail" class="kv"></div>
   </div>
   <div class="card">
