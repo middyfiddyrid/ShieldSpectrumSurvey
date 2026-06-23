@@ -117,10 +117,11 @@ band around DC** → stitch onto a stable frequency grid.
 | `overlap` | 0.5 | inter-segment overlap. **Must be ≥ 0.5** so every tune-center is refilled by a neighbour (else an emitter on a center is lost to the DC guard). Higher overlap = cleaner centers, slower sweep. |
 | `dc_guard_hz` | 250 kHz | central guard **discarded** at each tune center to remove the LO-leakage spike. This is the DC mitigation (chosen over offset-tuning, which can't fit with 80% keep). A TSCM sweep must never flag its own LO. |
 | `fft_size` | 1024 | Welch segment length. |
-| `capture_samples` | 65536 | IQ samples per tune. |
+| `capture_samples` | 32768 | IQ samples per tune (~32 FFT averages; tuned for fast USB transfer with a stable noise floor). |
 | `sweep_bins` | 2048 | resampled grid points per frame (caps the host-side detector cost). |
 | `gain_mode` / `gain_db` | manual / 64 | **manual at a fixed level for repeatable baselines**; use `slow_attack` AGC only for first-look survey. |
-| `settle_seconds` | 0.05 | post-retune settle before discarding the stale buffer. |
+| `settle_seconds` | 0.01 | post-retune settle before discarding the stale buffer (tuned; the flush already drops the first stale buffer). |
+| `sweep_avg_passes` / `sweep_maxhold_dwell_s` | 2 / 3.0 | host-side passes per band for SDR sources — each Pluto frame is already fully averaged, so few are needed (a wideband sweep is ~minutes, not tens of minutes). |
 
 Retune latency (tens of ms/step) dominates wide sweeps; the per-frame stepped-
 sweep duration is logged and exposed as `DeviceInfo.last_sweep_seconds`.

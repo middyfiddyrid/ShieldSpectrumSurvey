@@ -54,8 +54,8 @@ DEFAULTS = {
         "keep_fraction": 0.8,              # central fraction of each segment kept (analog filter edge rolloff)
         "overlap": 0.5,                    # inter-segment overlap; >=0.5 also covers each tune-center's DC notch
         "fft_size": 1024,                  # Welch segment length
-        "capture_samples": 65536,          # IQ samples per tune
-        "settle_seconds": 0.05,            # post-retune settle before discarding the stale buffer
+        "capture_samples": 32768,          # IQ samples per tune (tuned: ~32 FFT averages, fast USB transfer)
+        "settle_seconds": 0.01,            # post-retune settle before discarding the stale buffer (tuned)
         "dc_notch_bins": 2,                # +/- bins for the notch_dc() helper (read_sweep uses dc_guard_hz)
         "dc_guard_hz": 250_000,            # central guard band discarded at each tune center (LO leakage); refilled by overlap
         "sweep_bins": 2048,                # resampled grid points per read_sweep frame (caps host-side cost)
