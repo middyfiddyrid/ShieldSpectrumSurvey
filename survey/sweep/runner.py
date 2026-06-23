@@ -225,15 +225,16 @@ class SweepController:
                                   "ts": frame.ts})
 
         # An SDR frame is ALREADY a fully-averaged stepped sweep (each PSD bin
-        # averages ~hundreds of FFTs internally), so a handful of host passes is
-        # plenty — unlike the RF Explorer, which needs many fast hardware sweeps.
-        # Without this cap a wideband Pluto sweep takes 20-30 min instead of ~2.
+        # averages ~hundreds of FFTs internally), so the RF Explorer's many host
+        # AVERAGE passes are redundant — cap those. DO NOT cap the MAX-HOLD
+        # dwell: dwell is real time spent watching each band for intermittent /
+        # bursty / frequency-hopping emitters, which is the entire point of a
+        # TSCM sweep. Dwell stays governed by the operator's profile (Quick /
+        # Standard / Deep) and the per-band risk weighting (more on ISM bug bands).
         avg_passes, dwell = seg.avg_passes, seg.maxhold_dwell_s
         if getattr(dev, "is_swept_sdr", False):
             avg_passes = min(avg_passes,
                              int(self.cfg.get("pluto", "sweep_avg_passes", default=2)))
-            dwell = min(dwell,
-                        float(self.cfg.get("pluto", "sweep_maxhold_dwell_s", default=3.0)))
         # Pass 1 — AVERAGE
         dev.set_calculator("average")
         dev.collect(avg_passes, on_frame, abort=self.abort_event)

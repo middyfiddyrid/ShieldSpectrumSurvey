@@ -121,7 +121,7 @@ band around DC** → stitch onto a stable frequency grid.
 | `sweep_bins` | 2048 | resampled grid points per frame (caps the host-side detector cost). |
 | `gain_mode` / `gain_db` | manual / 64 | **manual at a fixed level for repeatable baselines**; use `slow_attack` AGC only for first-look survey. |
 | `settle_seconds` | 0.01 | post-retune settle before discarding the stale buffer (tuned; the flush already drops the first stale buffer). |
-| `sweep_avg_passes` / `sweep_maxhold_dwell_s` | 2 / 3.0 | host-side passes per band for SDR sources — each Pluto frame is already fully averaged, so few are needed (a wideband sweep is ~minutes, not tens of minutes). |
+| `sweep_avg_passes` | 2 | host-side AVERAGE passes per band for SDR sources — each Pluto frame is already fully averaged, so few are needed. **Max-hold dwell is NOT capped** — it's real watch-time for intermittent/bursty emitters and is set by the sweep profile (Quick/Standard/Deep) + per-band risk weighting. Pick a longer profile for more dwell on each band. |
 
 Retune latency (tens of ms/step) dominates wide sweeps; the per-frame stepped-
 sweep duration is logged and exposed as `DeviceInfo.last_sweep_seconds`.
