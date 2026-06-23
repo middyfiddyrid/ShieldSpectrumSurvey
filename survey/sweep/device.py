@@ -21,6 +21,7 @@ mode, module select). No transmit capability exists in this protocol use.
 """
 
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass, field, asdict
@@ -73,6 +74,7 @@ class DeviceInfo:
     simulated: bool = False
     driver: str = ""
     battery: str = ""                               # raw #BAT report if the unit sends one
+    last_sweep_seconds: float = 0.0                 # SDR sources report stepped-sweep duration
     warnings: list = field(default_factory=list)
 
     def to_dict(self):
@@ -124,9 +126,16 @@ class SweepFrame:
 
 
 class BaseDevice:
-    """Interface shared by the official-lib driver, raw driver, and simulator."""
+    """Interface shared by the official-lib driver, raw driver, simulator, and
+    the SDR sources (Pluto / future B220)."""
 
     info: DeviceInfo
+
+    # number of independent RX channels. 1 for RF Explorer and Pluto (1R1T);
+    # 2 for the B220 (2R2T) so the interface can express simultaneous dual-channel
+    # DF later with no contract change. The dual-antenna workflow on a 1-channel
+    # source is a SEQUENTIAL pass / SMA swap, not simultaneous.
+    channels: int = 1
 
     def is_alive(self) -> bool:
         return True
@@ -137,6 +146,13 @@ class BaseDevice:
     def set_calculator(self, mode_name: str): ...
     def read_sweep(self, timeout_s: float = 5.0) -> Optional[SweepFrame]: ...
     def close(self): ...
+
+    def capture_iq(self, center_hz: float, sample_rate: float, n_samples: int):
+        """Raw complex IQ at one center frequency — for demod / BLE listen layers.
+        Amplitude-only sources (RF Explorer) cannot provide this."""
+        raise NotImplementedError(
+            f"{type(self).__name__} is amplitude-only and cannot capture IQ")
+
 
     def stream(self, seconds: float, on_sweep: Callable[[SweepFrame], None],
                abort: Optional[threading.Event] = None) -> int:
@@ -547,7 +563,17 @@ class OfficialRFEDevice(BaseDevice):
 
 
 def open_device(cfg) -> BaseDevice:
-    """Driver selection: simulator (explicit config only) -> official lib -> raw UART."""
+    """Driver selection. Source family first (env SWEEP_SOURCE overrides config
+    device.source; default 'rfexplorer' so existing behaviour is unchanged), then
+    within RF Explorer: simulator (explicit only) -> official lib -> raw UART."""
+    source = (os.environ.get("SWEEP_SOURCE")
+              or cfg.get("device", "source", default="rfexplorer")).strip().lower()
+    if source in ("pluto", "sdr", "ad936x"):
+        from .sdr_source import PlutoSource
+        dev = PlutoSource(cfg)
+        dev.connect()
+        return dev
+
     if cfg.get("device", "simulate", default=False):
         from .simulator import SimulatedDevice
         dev = SimulatedDevice()

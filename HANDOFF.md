@@ -80,6 +80,82 @@ Claude cannot create the account/credentials. Alternative he already uses: expor
 CellMapper session via `tools/cellmapper_capture.js` into `data/cellmapper_towers.json`. Until
 one exists, the carriers section uses the all-national-carriers wording (no counts).
 
+## OPERATOR ASKS — 2026-06-20 voice dump (explainer demo + positioning + Shield partnership)
+
+Core complaint: **the demos currently on the website (DCS demo + NMP Labs post) do NOT explain
+what the product is — especially the TSCM side.** A prospect can't tell what it does or why it
+matters. Need a demo that *explains* and *sells*.
+
+- **D1 — Explainer demo for the website.** A demo that can be shown to people and actually
+  conveys what DCS/TSCM is and its value (not just a bare tool a prospect has to decode).
+- **D2 — Before/after sweep narrative.** Core story = the difference the software makes:
+  the OLD way (technician writing readings down by hand on paper/clipboard, nothing visible
+  to the client) vs. the NEW way (signals appearing on screen in real time; the customer can
+  *watch what comes back* live). Make the contrast the centerpiece.
+- **D3 — Video of someone conducting a sweep.** Wants actual footage of a sweep, before vs.
+  after. (Claude can't shoot live video — deliverable is a shot-by-shot storyboard + voiceover
+  script for Shield to film, and/or an auto-playing animated/web "replay" that looks like a
+  live sweep and can be screen-recorded with narration.)
+- **D4 — Competitive market research / positioning.** Go research the TSCM market and the tools
+  competitors use; determine whether — and specifically *why* — DCS is better. Claims must be
+  substantiated (see flag below).
+- **D5 — Professional-use positioning.** Any professional engaged should be using Shield/DCS
+  software (i.e. the software is the standard the operator works to).
+- **D6 — First partnership announcement: Shield Security.** Announce DCS's first partnership
+  with Shield Security; for now Shield Security has **EXCLUSIVE access** to the software.
+  Counterparty/public-facing → draft carefully, confirm exact entity name + exclusivity terms
+  before publishing.
+
+### 2026-06-20 — explainer page DEPLOYED to the public demo (replaces bare tool on NMP)
+
+- Built `marketing/dcs_explainer.html` (self-contained explainer + auto-playing before/after sweep
+  animation). Matt approved ("that's beautiful") and asked to put it live "instead of the one we've
+  got currently on NMP."
+- **Deployed via the Render demo, NOT Wix** (the page is live JS/canvas — can't be a Wix blog post).
+  The NMP Labs post already links DCS → `dcs-demo.onrender.com`, so making the explainer the front
+  door of that URL auto-replaces what NMP shows. No Wix nav surgery needed.
+- Change made in the **PrivateSweepDemo** repo (github.com/middyfiddyrid/PrivateSweepDemo, Render
+  source; cloned fresh to verify — git creds are cached, push works): added `survey/web/explainer.html`
+  + remapped routes in `survey/server.py` — **`/` now serves the explainer; the interactive tool moved
+  to `/app`** (assets are absolute `/static/..` + `/api/..`, so the move is safe). Commit e00609c,
+  pushed to `main` → Render auto-deploy.
+- **DIVERGENCE (intentional):** only the PUBLIC DEMO repo has `/`=explainer, tool=`/app`. The
+  **operational app in THIS repo is unchanged — `/` is still the tool** (the on-site operator wants
+  the tool at root). If the demo build is ever regenerated from this repo, re-apply the route swap.
+- **OPEN — partnership wording is now PUBLIC:** the page states "Shield Security — exclusive launch
+  partner." Matt's dump said "Shield Security System(s) … has exclusive access." Confirm exact legal
+  entity name + whether to read "exclusive access" vs "exclusive launch partner" → one-word edit +
+  redeploy. Formal announcement still drafted (unpublished) at
+  `marketing/shield_partnership_announcement_DRAFT.md`.
+
+## 2026-06-23 — ADALM-Pluto SDR source added (RF Explorer repoint)
+
+The sweep engine can now run from an **ADALM-Pluto** SDR as well as the RF
+Explorer. Selected by `device.source: pluto` in config or `SWEEP_SOURCE=pluto`
+(default stays `rfexplorer` — existing behaviour byte-for-byte unchanged).
+
+- **New file `survey/sweep/sdr_source.py`**: `AD936xSource` (stepped-sweep + Welch
+  PSD + DC-guard + stitch; numpy-only) and concrete `PlutoSource`. Implemented as
+  a `BaseDevice`, so planner/runner/detector/UI/reports are **untouched** — it
+  synthesises the same `SweepFrame(freqs_mhz, amps_dbm)` the RF Explorer produces.
+- `BaseDevice` gained a `channels` property (1 for RFE/Pluto, 2 for the July
+  **B220** which will subclass `AD936xSource` for simultaneous dual-channel DF)
+  and a `capture_iq()` hook (for the future demod/BLE listen layer — RFE can't).
+- **Hardware verified live** on a real Pluto (Rev.C **AD9363A**): contiguous
+  2.4 GHz sweep, DC/LO-leakage spike removed (median center artifact ≈0.7 dB),
+  `capture_iq()` round-trips. See `tests/pluto_live_check.py` (live) and
+  `tests/test_sdr_source.py` (hardware-free DSP, in the 55-test suite).
+- **Stock range only**: this AD9363A tunes **325 MHz–3.8 GHz** (probe-confirmed;
+  no 5.8 GHz / FM). Operator chose NOT to apply the AD9364 frequency extension for
+  now — `SDR_SETUP.md` documents the unlock + the `require_extended` startup guard.
+- **Windows deps installed**: `pyadi-iio`==0.0.21 (+ pinned in requirements),
+  native **libiio v0.25** DLLs in `%LOCALAPPDATA%\libiio\bin` (on user PATH), and
+  the ADI **PlutoSDR-M2k USB drivers**. Full setup in `SDR_SETUP.md`.
+- **Calibration is approximate** (`pluto.cal_offset_db`, default -30): relative
+  dBFS+offset, NOT lab-grade dBm — lean on baseline-delta detection.
+- Demod/BLE (`demod.py`/`ble.py` in the brief) do NOT exist yet; only the
+  `capture_iq()` hook was added, per `DEMOD_LISTEN_DESIGN.md` (a future build).
+
 ### Remaining nice-to-haves (not blocking)
 
 - Operator still needs to be walked through generating his first report (everything verified working in the live UI on 2026-06-11).
@@ -97,6 +173,6 @@ one exists, the carriers section uses the all-national-carriers wording (no coun
 
 ## Key files
 
-`app.py` · `survey/server.py` (routes) · `survey/report.py` (all PDFs) · `survey/sweep/{device,runner,planner,detector,calibration,simulator}.py` · `survey/sigcapture.py` (wiki) · `survey/expected.py` · `survey/correlation.py` · `survey/baseline/*` · `survey/web/{index.html,app.js}` · `config.yaml` · `tests/*`
+`app.py` · `survey/server.py` (routes) · `survey/report.py` (all PDFs) · `survey/sweep/{device,runner,planner,detector,calibration,simulator,sdr_source}.py` · `survey/sigcapture.py` (wiki) · `survey/expected.py` · `survey/correlation.py` · `survey/baseline/*` · `survey/web/{index.html,app.js}` · `config.yaml` · `SDR_SETUP.md` · `tests/*`
 
 Standing notes: never delete files (move/rename). All client/business language in the PDFs (engagement terms, exposure wording, confidentiality block) is draft and needs the operator's/counsel's review before regular use.
