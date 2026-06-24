@@ -756,6 +756,43 @@ function isPlutoDevice() {
   return App.state && App.state.source === "pluto";
 }
 
+/* ---------- sigidwiki signal identification ---------- */
+function renderIdentify(r) {
+  let html = "";
+  const f = r.features;
+  if (f) {
+    html += `<p class="note">Measured from IQ: SNR ${f.snr_db} dB, ~${f.occupied_bw_khz} kHz, `
+      + `${f.continuity}, class <b>${esc(f.modulation_class)}</b>`
+      + (f.fsk_states >= 2 ? `, ${f.fsk_states}-state FSK shift ${f.fsk_shift_khz} kHz` : "")
+      + `, spectral flatness ${f.spectral_flatness}.</p>`;
+  }
+  if (!r.candidates || !r.candidates.length) {
+    $("id-results").innerHTML = html + "<p class='note'>No candidate matches.</p>";
+    return;
+  }
+  html += "<table><tr><th>Candidate</th><th>Score</th><th>Mode</th><th>Why it matched</th><th></th></tr>";
+  for (const c of r.candidates) {
+    html += `<tr><td>${esc(c.name)}</td><td>${c.score}</td><td>${esc(c.mode)}</td>`
+      + `<td class="note">${c.reasons.map(esc).join("; ")}`
+      + (c.tscm ? `<br><b>TSCM:</b> ${esc(c.tscm)}` : "") + "</td>"
+      + `<td><a href="${esc(c.url)}" target="_blank" rel="noopener">sigidwiki ↗</a></td></tr>`;
+  }
+  $("id-results").innerHTML = html + "</table>";
+}
+
+$("btn-identify").onclick = async () => {
+  const c = parseFloat($("id-center").value);
+  if (!c) return alert("Enter a center frequency in MHz (e.g. 433.92).");
+  const bw = parseFloat($("id-bw").value);
+  $("id-msg").textContent = isPlutoDevice() ? "capturing IQ & analyzing…" : "matching…";
+  $("id-results").innerHTML = "";
+  try {
+    const r = await api("/api/identify", { center_mhz: c, bw_khz: isNaN(bw) ? null : bw });
+    $("id-msg").textContent = r.note || (r.features ? "identified from live IQ" : "");
+    renderIdentify(r);
+  } catch (e) { $("id-msg").textContent = "FAILED: " + e.message; }
+};
+
 function moduleRange(side) {
   const dev = App.state && App.state.device;
   const m = dev && dev.modules.find(x => x.side === side);

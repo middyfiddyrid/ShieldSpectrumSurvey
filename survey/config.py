@@ -66,6 +66,10 @@ DEFAULTS = {
         # capped: it's real watch-time for intermittent/bursty emitters and is
         # governed by the sweep profile + per-band risk weighting.)
         "sweep_avg_passes": 2,
+        # sigidwiki identify: take the best-SNR of N short IQ captures so bursty
+        # emitters (Wi-Fi/BLE) get caught; an empty channel reads noise across all.
+        "identify_samples": 131072,
+        "identify_captures": 8,
         # ~approximate~ dBFS -> dBm calibration offset. NOT lab-grade; lean on
         # baseline-delta detection. Tune per-unit in calibration mode.
         "cal_offset_db": -30.0,

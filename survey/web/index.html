@@ -179,6 +179,22 @@ body.demo #card-casefiles { display:none !important; }
     <div id="device-detail" class="kv"></div>
   </div>
   <div class="card">
+    <h3>SIGNAL ID <span class="tag">sigidwiki — what is this emitter?</span></h3>
+    <p class="note">Enter a frequency (and bandwidth if known), or paste a detected signal's
+       frequency. With the <b>Pluto</b> connected this captures live IQ, measures the
+       modulation, and ranks the closest known signal types from a sigidwiki-style reference —
+       then confirm against the linked sigidwiki page. (RF Explorer: frequency/bandwidth match only.)</p>
+    <div class="row">
+      <label class="note" for="id-center">Center MHz</label>
+      <input id="id-center" type="text" placeholder="e.g. 433.92" style="width:110px">
+      <label class="note" for="id-bw">BW kHz</label>
+      <input id="id-bw" type="text" placeholder="optional" style="width:90px">
+      <button class="btn" id="btn-identify">IDENTIFY</button>
+      <span id="id-msg" class="note"></span>
+    </div>
+    <div id="id-results"></div>
+  </div>
+  <div class="card">
     <h3>BUILD BASELINE</h3>
     <p class="note">Queries FCC FM/AM/TV, ULS extract, OpenCellID and the static national
        allocation table in parallel. Results cached to disk — repeat visits work with

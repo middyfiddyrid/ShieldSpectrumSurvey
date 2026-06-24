@@ -517,6 +517,64 @@ def create_app(db, cfg, demo=False) -> Flask:
             db.set_device_info(st.session_id, info.to_dict())
         return jsonify(info.to_dict())
 
+    @app.post("/api/identify")
+    def identify_signal():
+        """sigidwiki-style ID of an emitter. With a connected Pluto, captures IQ
+        at the frequency and matches by modulation features; otherwise matches by
+        frequency/bandwidth only. Accepts {center_mhz,bw_khz} or {signal_id} /
+        {capture_id}."""
+        from .identify import identify, iq_features, load_reference, spectrogram
+        body = request.get_json(silent=True) or {}
+        center_mhz = body.get("center_mhz")
+        bw_khz = body.get("bw_khz")
+        for table, key in (("captures", "capture_id"), ("signals", "signal_id")):
+            if center_mhz is None and body.get(key):
+                row = db.query_one(f"SELECT center_mhz,bw_khz FROM {table} WHERE id=?",
+                                   (body[key],))
+                if row:
+                    center_mhz, bw_khz = row["center_mhz"], row["bw_khz"]
+        if center_mhz is None:
+            return err("need center_mhz (or a signal_id / capture_id)")
+        center_mhz = float(center_mhz)
+
+        ref = load_reference(cfg.abs_path("data/sigidwiki_ref.json"))
+        feats, spec, note = None, None, ""
+        dev = st.controller.device
+        is_sdr = dev is not None and hasattr(dev, "capture_iq") and \
+            getattr(dev, "is_swept_sdr", False)
+        if is_sdr and st.controller.busy():
+            note = "a sweep is running — stop it first to capture IQ; matched on frequency only"
+        elif is_sdr:
+            try:
+                sr = int(cfg.get("pluto", "sample_rate", default=20_000_000))
+                n = int(cfg.get("pluto", "identify_samples", default=131072))
+                reps = max(1, int(cfg.get("pluto", "identify_captures", default=8)))
+                # bursty emitters (Wi-Fi/BLE) only show in some snapshots — take
+                # the highest-SNR of several captures so we catch a burst, while a
+                # genuinely empty channel still reads as noise across all of them.
+                best_iq = None
+                for _ in range(reps):
+                    iq = dev.capture_iq(center_mhz * 1e6, sr, n)
+                    fe = iq_features(iq, sr)
+                    if feats is None or fe["snr_db"] > feats["snr_db"]:
+                        feats, best_iq = fe, iq
+                spec = spectrogram(best_iq, sr)
+                if not feats.get("signal_present"):
+                    note = (f"no clear signal above the noise floor at {center_mhz:.3f} MHz "
+                            f"(best SNR {feats['snr_db']} dB over {reps} captures) — likely an "
+                            f"empty channel; the candidates are what COULD occupy this band, "
+                            f"not a detected emitter")
+            except Exception as e:  # noqa: BLE001
+                log.exception("identify IQ capture failed")
+                note = f"IQ capture failed ({e}); matched on frequency only"
+        else:
+            note = ("connect the Pluto (SDR) for modulation-based identification — "
+                    "matched on frequency/bandwidth only")
+        candidates = identify(center_mhz * 1e6, feats, ref)
+        return jsonify({"center_mhz": center_mhz, "bw_khz": bw_khz,
+                        "source": st.controller.active_source, "features": feats,
+                        "note": note, "candidates": candidates, "spectrogram": spec})
+
     # ---------- planning & sweeping ----------
 
     def _plans(profile, custom_minutes, scan_mode="full"):
