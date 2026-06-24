@@ -685,6 +685,140 @@ function renderBaselineTable() {
 $("baseline-filter").oninput = renderBaselineTable;
 $("baseline-source-filter").onchange = renderBaselineTable;
 
+/* ---------- Web Audio chunked playback (smooth live listen) ----------
+   The <audio src="/api/listen"> path stutters: the werkzeug dev server delivers
+   the WAV stream at ~0.8x real-time and the media element has no jitter buffer,
+   so any underrun stalls or resets currentTime=0. Instead we fetch the raw-PCM
+   stream (/api/listen_pcm), parse int16 frames as they arrive, and schedule small
+   AudioBuffers back-to-back against the AudioContext clock. A small lead-in
+   (PCM_PLAY_LEAD_S) absorbs delivery jitter so brief gaps don't become audible
+   gaps; if delivery falls behind and the schedule cursor goes stale, we re-anchor
+   to "now + lead" rather than playing a burst of backlog. */
+const Listen = {
+  ctx: null, gain: null, reader: null, abort: null,
+  nextAt: 0,          // AudioContext time the next buffer should start
+  rate: 0,            // PCM sample rate from the stream header
+  leftover: null,     // trailing odd byte carried between chunks (int16 alignment)
+  active: false,
+};
+const PCM_PLAY_LEAD_S = 0.25;    // schedule this far ahead of the clock (jitter buffer)
+const PCM_MAGIC = "SHLDPCM1";
+
+function listenStop() {
+  Listen.active = false;
+  if (Listen.abort) { try { Listen.abort.abort(); } catch (e) {} Listen.abort = null; }
+  Listen.reader = null;
+  if (Listen.gain && Listen.ctx) {
+    try { Listen.gain.gain.cancelScheduledValues(Listen.ctx.currentTime); } catch (e) {}
+  }
+  Listen.nextAt = 0; Listen.leftover = null; Listen.rate = 0;
+}
+
+// must be called from a user gesture (the click that opens inspect) so the
+// browser autoplay policy lets the AudioContext start/resume.
+async function listenStart(center, modeOverride, onState) {
+  listenStop();
+  const Ctor = window.AudioContext || window.webkitAudioContext;
+  if (!Ctor) { onState("Web Audio not supported — using <audio> fallback", false); return false; }
+  if (!Listen.ctx) {
+    Listen.ctx = new Ctor();
+    Listen.gain = Listen.ctx.createGain();
+    Listen.gain.connect(Listen.ctx.destination);
+  }
+  try { await Listen.ctx.resume(); } catch (e) {}
+  Listen.active = true;
+  Listen.abort = new AbortController();
+  const url = `/api/listen_pcm?center_mhz=${encodeURIComponent(center)}` +
+              (modeOverride ? `&mode=${encodeURIComponent(modeOverride)}` : "");
+  let r;
+  try {
+    r = await fetch(url, { signal: Listen.abort.signal, cache: "no-store" });
+  } catch (e) {
+    if (Listen.active) onState("stream failed: " + e.message, false);
+    return false;
+  }
+  if (!r.ok) {
+    let msg = r.statusText;
+    try { msg = (await r.json()).error || msg; } catch (e) {}
+    onState(msg, false);
+    return false;
+  }
+  if (!r.body || !r.body.getReader) {
+    onState("streaming unsupported — using <audio> fallback", false);
+    return false;
+  }
+  Listen.reader = r.body.getReader();
+  pumpPcm(onState).catch(() => {});
+  return true;
+}
+
+async function pumpPcm(onState) {
+  let headerDone = false, headerBuf = "";
+  const ctx = Listen.ctx;
+  while (Listen.active && Listen.reader) {
+    let chunk;
+    try { chunk = await Listen.reader.read(); }
+    catch (e) { break; }                       // aborted / disconnected
+    if (chunk.done) break;
+    let bytes = chunk.value;                    // Uint8Array
+    if (!headerDone) {
+      // header is PCM_MAGIC + one JSON line terminated by '\n'
+      let nl = -1;
+      for (let i = 0; i < bytes.length; i++) { if (bytes[i] === 10) { nl = i; break; } }
+      headerBuf += new TextDecoder().decode(nl >= 0 ? bytes.subarray(0, nl) : bytes);
+      if (nl < 0) continue;                     // header spans chunks (rare)
+      const meta = parseListenHeader(headerBuf);
+      if (!meta) { onState("bad stream header", false); break; }
+      Listen.rate = meta.rate;
+      if (meta.mode) onState("● live", true, meta.mode);
+      else onState("● live", true);
+      headerDone = true;
+      bytes = bytes.subarray(nl + 1);           // remainder is PCM
+      if (!bytes.length) continue;
+    }
+    schedulePcmBytes(bytes);
+  }
+  if (Listen.active) onState("stream ended", false);
+}
+
+function parseListenHeader(s) {
+  if (s.slice(0, PCM_MAGIC.length) !== PCM_MAGIC) return null;
+  try { return JSON.parse(s.slice(PCM_MAGIC.length)); } catch (e) { return null; }
+}
+
+function schedulePcmBytes(bytes) {
+  const ctx = Listen.ctx;
+  if (!ctx || !Listen.rate) return;
+  // re-attach any trailing odd byte from the previous chunk (int16 alignment)
+  if (Listen.leftover) {
+    const merged = new Uint8Array(Listen.leftover.length + bytes.length);
+    merged.set(Listen.leftover, 0); merged.set(bytes, Listen.leftover.length);
+    bytes = merged; Listen.leftover = null;
+  }
+  const usable = bytes.length - (bytes.length % 2);
+  if (usable < bytes.length) Listen.leftover = bytes.subarray(usable);
+  if (usable < 2) return;
+  // copy into an aligned buffer so Int16Array can view it (subarray may be odd-offset)
+  const aligned = bytes.buffer.byteLength === bytes.length && (bytes.byteOffset % 2 === 0)
+    ? bytes.subarray(0, usable)
+    : bytes.slice(0, usable);
+  const i16 = new Int16Array(aligned.buffer, aligned.byteOffset, usable / 2);
+  const n = i16.length;
+  if (!n) return;
+  const f32 = new Float32Array(n);
+  for (let i = 0; i < n; i++) f32[i] = i16[i] / 32768;
+  const buf = ctx.createBuffer(1, n, Listen.rate);
+  buf.getChannelData(0).set(f32);
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.connect(Listen.gain);
+  // schedule back-to-back; if we've fallen behind the clock, re-anchor with lead
+  const now = ctx.currentTime;
+  if (Listen.nextAt < now + 0.005) Listen.nextAt = now + PCM_PLAY_LEAD_S;
+  src.start(Listen.nextAt);
+  Listen.nextAt += buf.duration;
+}
+
 /* ---------- tune & inspect (analyzer + waterfall + audio) ---------- */
 function blCenter(r) {
   return r.freq_low_mhz === r.freq_high_mhz ? r.freq_low_mhz
@@ -731,6 +865,7 @@ function openInspect(idx, modeOverride) {
     `${fmtF(center)} MHz · ${r.callsign || r.label || r.service || ""} (${idx + 1}/${list.length})`;
   $("inspect-panel").scrollIntoView({ behavior: "smooth", block: "center" });
   stopSpectrumPoll();
+  listenStop();
   const au = $("insp-audio"); au.pause(); au.removeAttribute("src");
   clearInspectCanvases();
   const rc = inRangeClient(center);
@@ -744,9 +879,20 @@ function openInspect(idx, modeOverride) {
   }
   $("insp-note").textContent = "";
   $("insp-msg").textContent = "tuning & streaming…";
-  au.src = `/api/listen?center_mhz=${encodeURIComponent(center)}` +
-           (modeOverride ? `&mode=${encodeURIComponent(modeOverride)}` : "");
-  au.play().catch(() => {});
+  // Prefer smooth Web Audio chunked playback (/api/listen_pcm); fall back to the
+  // plain <audio> element (/api/listen) only if Web Audio / fetch-streaming is
+  // unavailable or the stream fails to start.
+  const onState = (msg, live, mode) => {
+    $("insp-msg").textContent = msg;
+    if (mode) $("insp-mode").value = mode;
+  };
+  listenStart(center, modeOverride, onState).then((ok) => {
+    if (!ok && App.inspIdx === idx) {       // guard: don't stomp a newer tune
+      au.src = `/api/listen?center_mhz=${encodeURIComponent(center)}` +
+               (modeOverride ? `&mode=${encodeURIComponent(modeOverride)}` : "");
+      au.play().catch(() => {});
+    }
+  });
   startSpectrumPoll();
 }
 
@@ -811,6 +957,7 @@ $("insp-prev").onclick = () => openInspect((App.inspIdx ?? 0) - 1);
 $("insp-mode").onchange = () => openInspect(App.inspIdx ?? 0, $("insp-mode").value);
 $("insp-close").onclick = () => {
   stopSpectrumPoll();
+  listenStop();
   $("inspect-panel").style.display = "none";
   const a = $("insp-audio"); a.pause(); a.removeAttribute("src");
 };

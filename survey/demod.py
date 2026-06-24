@@ -131,3 +131,24 @@ def wav_stream_header(rate: int) -> bytes:
     return (b"RIFF" + struct.pack("<I", big) + b"WAVE"
             + b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
             + b"data" + struct.pack("<I", big - 36))
+
+
+# Magic preamble for the raw-PCM stream consumed by the Web Audio client. It is a
+# single newline-terminated JSON line followed by an unbounded run of mono
+# little-endian int16 PCM samples. Unlike the WAV stream this carries NO data-size
+# lie, so the browser never treats the stream as a finite, seekable file — the
+# client parses the header, then schedules every PCM frame it receives against the
+# AudioContext clock (see app.js startListen). Keeping a magic + version lets the
+# next agent evolve the framing without silently mis-decoding old clients.
+PCM_STREAM_MAGIC = b"SHLDPCM1"
+
+
+def pcm_stream_header(rate: int, mode: str = "") -> bytes:
+    """One-line self-describing preamble for /api/listen_pcm.
+
+    Format: PCM_STREAM_MAGIC + b"<json>\\n", where json declares the audio
+    sample rate, sample format, channel count, and demod mode. Everything after
+    the newline is raw mono '<i2' PCM."""
+    import json as _json
+    meta = {"rate": int(rate), "format": "s16le", "channels": 1, "mode": mode}
+    return PCM_STREAM_MAGIC + (_json.dumps(meta, separators=(",", ":")) + "\n").encode()
