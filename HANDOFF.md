@@ -4,7 +4,52 @@ Continuation brief for a fresh Fable/Claude Code session. Read this first, then 
 
 ---
 
-# ⚡ LATEST SESSION HANDOFF — 2026-06-24 — ADALM-Pluto SDR repoint (READ THIS FIRST)
+# ⚡ LATEST SESSION HANDOFF — 2026-06-24 (later) — demod backlog #1+#2 + Web Audio fix (READ THIS FIRST)
+
+Four tasks off the prior handoff's PENDING list landed on `pluto-sdr-source` (now **18 commits
+ahead of main, still NOT merged**). **75 unit tests green** (`python -m unittest discover -s tests`).
+Each task was built by a separate agent; integrated, tested, and committed by the orchestrator.
+
+DONE this session:
+1. **Loose Jun 19–20 working-tree files committed** (`76a31d2`) — DEMOD_LISTEN_DESIGN.md,
+   FIELD_KIT_BOM.md, SIGNAL_IDENTIFICATION_GUIDE.md, tools/{export_appendix_a,listen_helper,
+   render_gallery}.py, marketing/{dcs_explainer.html, partnership DRAFT}. Secret-scanned before
+   commit; `marketing/netlify_build/` gitignored as a deploy duplicate; README +14 lines.
+2. **SSB (USB/LSB) + CW demod** (`34e5052`) — added to `survey/demod.py` demodulate()/pick_mode()
+   and the `#insp-mode` <select>. New mode keys: `usb`, `lsb`, `cw`. 4 new tone/selectivity tests.
+   They flow straight through /api/listen[_pcm] (no server-side allowlist).
+3. **Web Audio chunked playback** (`36e29a2`) — fixes the real-browser audio stutter. Server:
+   `_validate_listen_request()` + `_audio_blocks()` shared generator (owns the
+   preempt/device_lock/teardown contract); NEW **`/api/listen_pcm`** (raw int16 + one-line JSON
+   header) alongside `/api/listen` (WAV, now the fallback). Client: `Listen` module fetch-streams
+   PCM and schedules AudioBuffers against the AudioContext clock (0.25 s lead, re-anchors on
+   underrun). `openInspect` prefers it, falls back to the `<audio>` element.
+4. **Listen on ALL signals** (`0faa788`) — `inspectByFreq(center,label,mode?)` core entry point;
+   listen affordances added to Results (`#tbl-anomalies`), detected Signals (`#tbl-signals`), and
+   the Signal Wiki (a ▶ in `#tbl-wiki`). The shared delegate runs in the **capture phase** so the
+   wiki ▶ doesn't also open the row's detail editor. **POI got NONE** — `persons_of_interest` has
+   no frequency field and inventing one would breach the POI-internal-only guardrail. Also fixed a
+   long-standing double-"MHz" in the inspect title + out-of-range message (`fmtF` already carries
+   the unit and emits GHz/kHz too).
+
+⚠️ STILL NEEDS THE OPERATOR / HARDWARE (could not be verified headless — no Pluto, preview can't
+play audio):
+- **Smooth audio in a REAL browser** is the one unverified thing. Routes + engine are proven (75
+  tests; both stream routes return clean 409/400 via the Flask test client, no 500s), but audio
+  can't sound in the headless preview. VERIFY: `python app.py` → connect the Pluto (**antenna on
+  the RX SMA**) → click a listen frequency on a Results/Wiki/baseline row → press ▶ if autoplay is
+  blocked → expect continuous audio + a moving analyzer/waterfall with no stutter. If it stutters,
+  raise `PCM_PLAY_LEAD_S` in `survey/web/app.js`.
+- Confirm the new Results/Wiki listen affordances actually tune + play on a connected unit.
+
+▶ STILL PENDING from the demod backlog (NOT started):
+- **Digital decoders (POCSAG first)** — the hard one; scope per the older handoff block below.
+- Secondary audio items still open: werkzeug ~0.8× delivery / true gapless buffer
+  (`set_kernel_buffers_count` reset between snapshot and stream); calibration is approximate.
+
+---
+
+# SESSION HANDOFF — 2026-06-24 (earlier) — ADALM-Pluto SDR repoint
 
 The whole session repointed the app from RF Explorer to the **ADALM-Pluto SDR** and built a
 tune/view/listen/identify stack on it. All work is on branch **`pluto-sdr-source`** (13 commits,
