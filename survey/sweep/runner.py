@@ -47,6 +47,7 @@ class SweepController:
         self.device_lock = threading.Lock()
         self.listen_stop = threading.Event()   # set to stop the active audio stream
         self.listening = False
+        self.listen_spectrum = None            # latest live analyzer+waterfall from the audio stream
         self.state = {"running": False, "phase": None, "module": None, "room": None,
                       "segment_index": 0, "segment_total": 0, "percent": 0.0,
                       "eta_seconds": 0, "signal_count": 0, "message": "idle",

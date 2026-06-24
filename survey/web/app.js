@@ -698,7 +698,28 @@ $("tbl-baseline").addEventListener("click", (e) => {
   openInspect(parseInt(a.dataset.i, 10));
 });
 
-async function openInspect(idx, modeOverride) {
+function inRangeClient(center) {
+  const dev = App.state && App.state.device;
+  if (!dev || !dev.modules || !dev.modules.length)
+    return { ok: false, msg: "connect a device first (Session tab)." };
+  if (dev.driver !== "pluto")
+    return { ok: false, msg: "tune / view / listen needs the Pluto (SDR) — the RF Explorer is amplitude-only." };
+  const lo = Math.min(...dev.modules.map(m => m.min_mhz));
+  const hi = Math.max(...dev.modules.map(m => m.max_mhz));
+  if (center < lo || center > hi)
+    return { ok: false, msg: `${fmtF(center)} MHz is outside the radio's ${fmtF(lo)}–${fmtF(hi)} MHz range.` };
+  return { ok: true };
+}
+
+function clearInspectCanvases() {
+  for (const id of ["insp-analyzer", "insp-waterfall"]) {
+    const c = $(id); c.getContext("2d").clearRect(0, 0, c.width, c.height);
+  }
+}
+
+// click a frequency -> tune the Pluto, stream audio, and LIVE-poll the analyzer
+// + waterfall (both fed by the same stream, so they move). Next/Prev step.
+function openInspect(idx, modeOverride) {
   const list = App.blView || [];
   if (!list.length) return;
   idx = Math.max(0, Math.min(idx, list.length - 1));
@@ -708,38 +729,42 @@ async function openInspect(idx, modeOverride) {
   $("inspect-panel").style.display = "";
   $("insp-title").textContent =
     `${fmtF(center)} MHz · ${r.callsign || r.label || r.service || ""} (${idx + 1}/${list.length})`;
-  $("insp-note").textContent = "";
-  $("insp-msg").textContent = "tuning…";
   $("inspect-panel").scrollIntoView({ behavior: "smooth", block: "center" });
-  const body = { center_mhz: center, label: r.label || r.service || "" };
-  if (modeOverride) body.mode = modeOverride;
-  try {
-    const d = await api("/api/inspect", body);
-    App.inspData = d;
-    renderInspect(d);
-  } catch (e) { $("insp-msg").textContent = "FAILED: " + e.message; }
-}
-
-function renderInspect(d) {
-  $("insp-msg").textContent = "";
-  $("insp-note").textContent = d.note || "";
-  if (d.mode) $("insp-mode").value = d.mode;
-  const an = $("insp-analyzer"), wf = $("insp-waterfall"), au = $("insp-audio");
-  const ac = an.getContext("2d"), wc = wf.getContext("2d");
-  ac.clearRect(0, 0, an.width, an.height);
-  wc.clearRect(0, 0, wf.width, wf.height);
-  au.pause(); au.removeAttribute("src");
-  if (!d.in_range) {
+  stopSpectrumPoll();
+  const au = $("insp-audio"); au.pause(); au.removeAttribute("src");
+  clearInspectCanvases();
+  const rc = inRangeClient(center);
+  if (!rc.ok) {
+    $("insp-note").textContent = rc.msg + "  (Next steps through the rest.)";
+    $("insp-msg").textContent = "";
+    const ac = $("insp-analyzer").getContext("2d");
     ac.fillStyle = "#e0a030"; ac.font = "13px monospace";
-    ac.fillText(d.note || "unavailable", 12, 26);
+    ac.fillText(rc.msg, 12, 26);
     return;
   }
-  drawAnalyzer(ac, an, d.analyzer);
-  drawWaterfall(wc, wf, d.waterfall);
-  // continuous live audio — streams until the element's src is cleared (Close/Next)
-  au.src = `/api/listen?center_mhz=${encodeURIComponent(d.center_mhz)}` +
-           `&mode=${encodeURIComponent(d.mode)}`;
+  $("insp-note").textContent = "";
+  $("insp-msg").textContent = "tuning & streaming…";
+  au.src = `/api/listen?center_mhz=${encodeURIComponent(center)}` +
+           (modeOverride ? `&mode=${encodeURIComponent(modeOverride)}` : "");
   au.play().catch(() => {});
+  startSpectrumPoll();
+}
+
+function startSpectrumPoll() {
+  stopSpectrumPoll();
+  App.specPoll = setInterval(async () => {
+    let s;
+    try { s = await api("/api/listen_spectrum"); } catch (e) { return; }
+    if (!s || s.center_mhz == null) return;
+    if (s.mode) $("insp-mode").value = s.mode;
+    $("insp-msg").textContent = "● live";
+    if (s.analyzer) drawAnalyzer($("insp-analyzer").getContext("2d"), $("insp-analyzer"), s.analyzer);
+    if (s.waterfall) drawWaterfall($("insp-waterfall").getContext("2d"), $("insp-waterfall"), s.waterfall);
+  }, 400);
+}
+
+function stopSpectrumPoll() {
+  if (App.specPoll) { clearInterval(App.specPoll); App.specPoll = null; }
 }
 
 function drawAnalyzer(ctx, cv, a) {
@@ -785,6 +810,7 @@ $("insp-next").onclick = () => openInspect((App.inspIdx ?? 0) + 1);
 $("insp-prev").onclick = () => openInspect((App.inspIdx ?? 0) - 1);
 $("insp-mode").onchange = () => openInspect(App.inspIdx ?? 0, $("insp-mode").value);
 $("insp-close").onclick = () => {
+  stopSpectrumPoll();
   $("inspect-panel").style.display = "none";
   const a = $("insp-audio"); a.pause(); a.removeAttribute("src");
 };

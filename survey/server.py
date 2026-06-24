@@ -639,7 +639,12 @@ def create_app(db, cfg, demo=False) -> Flask:
         demodulating live IQ to a WAV stream until the client disconnects (or a
         sweep/inspect preempts it). One stream at a time, serialised on the
         radio. The browser <audio> plays it continuously."""
+        import collections
+        import time as _time
+        import numpy as _np
         from .demod import demodulate, pick_mode, wav_stream_header
+        from .identify import spectrogram
+        from .sweep.sdr_source import welch_psd
         if request.args.get("center_mhz") is None:
             return err("need center_mhz")
         center_mhz = float(request.args["center_mhz"])
@@ -655,14 +660,17 @@ def create_app(db, cfg, demo=False) -> Flask:
         if not (lo_mhz <= center_mhz <= hi_mhz):
             return err(f"{center_mhz:.3f} MHz is outside the radio's range", 416)
 
-        fs = float(cfg.get("pluto", "stream_sample_rate", default=600_000))
-        n_block = int(fs * float(cfg.get("pluto", "listen_block_seconds", default=0.25)))
+        fs = float(cfg.get("pluto", "stream_sample_rate", default=2_400_000))
+        n_block = int(fs * float(cfg.get("pluto", "listen_block_seconds", default=0.5)))
+        cal = float(cfg.get("pluto", "cal_offset_db", default=-30.0))
         st.controller.listen_stop.set()      # preempt whatever stream is running now
+        wf_rows = collections.deque(maxlen=96)
 
         def gen():
             with st.controller.device_lock:  # wait for the previous user of the radio to release
                 st.controller.listen_stop.clear()
                 st.controller.listening = True
+                st.controller.listen_spectrum = None
                 stop = st.controller.listen_stop
                 first = True
                 try:
@@ -675,12 +683,42 @@ def create_app(db, cfg, demo=False) -> Flask:
                             yield wav_stream_header(arate)
                             first = False
                         yield pcm.tobytes()
+                        # live analyzer + scrolling waterfall from a subset of this
+                        # block (cheap) — published for the UI to poll & redraw.
+                        try:
+                            sub = iq[:262144]
+                            bb, psd = welch_psd(sub, fs, nperseg=1024)
+                            step = max(1, bb.size // 400)
+                            af = [round((center_mhz * 1e6 + f) / 1e6, 5) for f in bb[::step]]
+                            ap = [round(float(p) + cal, 1) for p in psd[::step]]
+                            spec = spectrogram(sub, fs, n_time=6, nperseg=200)
+                            for row in spec["db"]:
+                                wf_rows.append(row)
+                            flat = _np.asarray(list(wf_rows))
+                            st.controller.listen_spectrum = {
+                                "center_mhz": center_mhz, "mode": mode, "ts": _time.time(),
+                                "analyzer": {"freqs_mhz": af, "power_dbm": ap},
+                                "waterfall": {
+                                    "freqs_mhz": [round((center_mhz * 1e6 + f) / 1e6, 4)
+                                                  for f in spec["freqs_hz"]],
+                                    "db": list(wf_rows),
+                                    "vmin": float(_np.percentile(flat, 5)),
+                                    "vmax": float(_np.percentile(flat, 99))}}
+                        except Exception:  # noqa: BLE001
+                            pass
                 except Exception:  # noqa: BLE001 - client disconnect / device error
                     pass
                 finally:
                     st.controller.listening = False
+                    st.controller.listen_spectrum = None
         return Response(stream_with_context(gen()), mimetype="audio/wav",
                         headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+    @app.get("/api/listen_spectrum")
+    def listen_spectrum_frame():
+        """Latest live analyzer + waterfall produced by the active audio stream
+        (polled by the inspect panel for moving visuals)."""
+        return jsonify(st.controller.listen_spectrum or {"center_mhz": None})
 
     # ---------- planning & sweeping ----------
 
