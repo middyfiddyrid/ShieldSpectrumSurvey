@@ -201,8 +201,12 @@ def classify_modulation(f: dict) -> str:
 # Reference set + matching
 # ---------------------------------------------------------------------------
 
-def load_reference(path: str) -> list[dict]:
-    with open(path, "r", encoding="utf-8") as fh:
+# reference set ships WITH the package (data/ is gitignored for runtime DBs)
+DEFAULT_REF_PATH = os.path.join(os.path.dirname(__file__), "sigidwiki_ref.json")
+
+
+def load_reference(path: str | None = None) -> list[dict]:
+    with open(path or DEFAULT_REF_PATH, "r", encoding="utf-8") as fh:
         return (json.load(fh) or {}).get("signals", [])
 
 

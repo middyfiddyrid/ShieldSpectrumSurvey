@@ -537,7 +537,7 @@ def create_app(db, cfg, demo=False) -> Flask:
             return err("need center_mhz (or a signal_id / capture_id)")
         center_mhz = float(center_mhz)
 
-        ref = load_reference(cfg.abs_path("data/sigidwiki_ref.json"))
+        ref = load_reference()    # ships with the package (survey/sigidwiki_ref.json)
         feats, spec, note = None, None, ""
         dev = st.controller.device
         is_sdr = dev is not None and hasattr(dev, "capture_iq") and \

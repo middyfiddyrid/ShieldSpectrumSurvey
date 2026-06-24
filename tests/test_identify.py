@@ -10,7 +10,7 @@ from survey.identify import (classify_modulation, identify, iq_features,
                              load_reference)
 
 REF_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                        "data", "sigidwiki_ref.json")
+                        "survey", "sigidwiki_ref.json")
 
 
 def cw(fs, n, f0=50e3, noise=1e-3):
