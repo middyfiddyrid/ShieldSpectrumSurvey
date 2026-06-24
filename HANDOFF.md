@@ -2,6 +2,95 @@
 
 Continuation brief for a fresh Fable/Claude Code session. Read this first, then `git log --oneline -20` and skim `README.md`.
 
+---
+
+# ⚡ LATEST SESSION HANDOFF — 2026-06-24 — ADALM-Pluto SDR repoint (READ THIS FIRST)
+
+The whole session repointed the app from RF Explorer to the **ADALM-Pluto SDR** and built a
+tune/view/listen/identify stack on it. All work is on branch **`pluto-sdr-source`** (13 commits,
+**NOT merged to main**). 71 unit tests green (`python -m unittest discover -s tests`).
+
+## Environment (already set up on THIS machine — a fresh clone elsewhere must redo these)
+- `pip install pyadi-iio` (0.0.21) + `pylibiio` installed (user site). numpy present.
+- **Native libiio v0.25 DLLs** copied to `%LOCALAPPDATA%\libiio\bin` and added to the **user PATH**
+  (libiio.dll, libusb-1.0, libxml2, libserialport-0, msvcp140, vcruntime140, iio_info.exe).
+  Without this, `import adi` fails with `LoadLibrary() argument 1 must be str, not None`.
+- **ADI PlutoSDR-M2k USB drivers** installed (RNDIS + WinUSB), else Device Manager shows the RNDIS
+  and IIO functions in *Error* and nothing reaches the radio.
+- **AD9364 frequency extension APPLIED to the physical Pluto** (it's an AD9363A): serial console
+  COM5, login root/analog, `fw_setenv attr_name compatible` + `fw_setenv attr_val ad9364` + reboot.
+  Now tunes **70 MHz–6 GHz** + up to **56 MHz BW**. REVERSIBLE: set `attr_val ad9363`. The
+  pluto serial-console / probe scripts are in `%TEMP%\pluto_*.py` (transient).
+- **`config.yaml` is now UNTRACKED + gitignored** (it holds the OpenCellID key, ULS path, the
+  extended freq range, and pluto tuning). The app runs on `survey/config.py` DEFAULTS if absent.
+- Run live: `python app.py` then pick **ADALM-Pluto** in the DEVICE dropdown (or `SWEEP_SOURCE=pluto`,
+  or `device.source: pluto`). Default source is still `rfexplorer` (unchanged behaviour).
+- **Drive/verify in the browser via the preview tool** (`preview_start` config `spectrum-survey-live`,
+  port 8765). NOTE the preview is a **headless/sandboxed browser → media (audio) does NOT play there**;
+  spectrum/data verify fine, but audio playback must be checked in a REAL browser.
+
+## What was built (all on the branch; commit ids in `git log main..HEAD`)
+1. **`survey/sweep/sdr_source.py`** — `AD936xSource` + `PlutoSource` as a `BaseDevice` (so planner/
+   runner/detector/UI are untouched). Synthesises a wide `SweepFrame(MHz,dBm)` via tune→IQ→Welch
+   PSD→**DC-guard discard**→stitch. `capture_iq()`, `stream_iq()` (gapless via
+   `set_kernel_buffers_count(4)` at connect), `channels` (1; B220→2). numpy-only DSP.
+2. **Runtime device picker** (DEVICE card): RF Explorer ⇆ Pluto, persists to `device.source`.
+   `/api/device/connect` takes `{source}`; `/api/state` reports active `source`.
+3. **sigidwiki identification** — `survey/identify.py` (IQ modulation features: occupied BW, FSK
+   shift/states, duty, spectral flatness, SNR; SNR-gated so empty channels read `noise_floor`) +
+   `survey/sigidwiki_ref.json` (curated ref; **lives in survey/ because data/ is gitignored**) +
+   `/api/identify` (best-of-N IQ to catch bursts) + the "SIGNAL ID" card.
+4. **Baseline sources configured**: **FCC ULS** (downloaded Land Mobile extracts → gitignored
+   `data/uls_extract/`, ~1.3 GB; `uls.extract_dir` set; ~23s first scan then cached) and
+   **OpenCellID** (key in config; **fixed its bbox bug** — getInArea caps at 4 km², now tiled).
+   FCC FM/AM/TV work but need broadcast radius ~25 mi (transmitters are 10–40 mi out — UI note added).
+   Still NOT configured (need operator creds): RadioReference, CellMapper import.
+5. **Click-to-inspect / tune-view-listen**: click any frequency in the EXPECTED-SPECTRUM BASELINE →
+   tune the Pluto → **live analyzer + scrolling waterfall + demodulated audio**, with Next/Prev.
+   Backend: `/api/listen` (open-ended WAV stream; tune once, demod live IQ blocks; WFM/NFM/AM via
+   `survey/demod.py`) + `/api/listen_spectrum` (latest analyzer+waterfall, polled every 400 ms by
+   the UI). Device access serialised by `controller.device_lock` + `listen_stop` (sweep/inspect
+   preempt the stream). `.freqlink` styled theme-cyan.
+
+## ⚠️ OPEN ISSUES (verify/fix these first)
+- **Audio playback in a REAL browser is UNVERIFIED.** The continuous stream works server-side
+  (proven: bytes keep flowing; spectrum frames advance). But the headless preview can't play audio
+  (`currentTime=0`), and the **werkzeug dev server throttles the stream to ~0.8× real-time → likely
+  rebuffers/stutters.** Probable proper fix: **Web Audio API chunked playback** (fetch + decode +
+  schedule) instead of `<audio src=/api/listen>`, and/or a real streaming server. **Confirm in the
+  operator's browser first** (refresh, click an in-range freq, press ▶ if autoplay blocked).
+- **Antenna**: a live test saw FM 98.5 at ~−124 dBm (noise floor) → make sure an antenna is on the
+  Pluto **RX SMA**, else everything looks flat/sounds like hiss.
+- **Gapless/real-time**: `set_kernel_buffers_count(4)` is set at connect, but an inspect/`capture_iq`
+  before a stream recreates the buffer and resets it → stream ~0.6–0.8×. True gapless needs avoiding
+  buffer destroy/recreate between snapshot and stream (or feeding the snapshot from the stream).
+- **Calibration**: `pluto.cal_offset_db = -30` is approximate, NOT lab-grade. Use baseline-delta.
+
+## ▶ PENDING — operator-requested demod work (selected 2026-06-24, NOT STARTED). Build all three:
+1. **Listen on ALL signals, not just baseline rows.** Wire the existing tune→demod→audio+waterfall
+   (the `openInspect`/inspect-panel flow in `survey/web/app.js`) onto the **sweep-detected signals
+   (Results tab), the Signal Wiki, and POI**. Mostly UI wiring: make an `inspectByFreq(center,label,
+   mode?)` entry point not tied to `App.blView`, and add clickable "listen" affordances on those
+   lists. Backend (`/api/listen`, `/api/listen_spectrum`) already supports any freq.
+2. **More analog modes: SSB (USB/LSB) + CW.** Add to `survey/demod.py` `demodulate(iq,fs,mode)`:
+   USB/LSB (complex frequency-shift to put the sideband at baseband, low-pass, take real) and CW
+   (beat against a BFO offset → audible tone). Add to the mode `<select>` and `pick_mode()`. Unit-test
+   in `tests/test_demod.py` like the existing FM/AM tone tests.
+3. **Digital decoders (POCSAG / DMR / etc.).** Substantial new DSP per protocol — scope carefully.
+   **Start with POCSAG** (2-FSK paging → readable text: discriminate FM, slice bits at 512/1200/2400
+   bps, sync on the preamble/frame-sync word, decode BCH/text) as the most tractable, highest-TSCM-value
+   one (paging is plaintext). DMR/P25/etc. are much harder — consider an external decoder or defer.
+   Surface decoded output in the inspect panel / wiki.
+
+## Key new/changed files this session
+New: `survey/sweep/sdr_source.py` · `survey/identify.py` · `survey/sigidwiki_ref.json` ·
+`survey/demod.py` · `SDR_SETUP.md` · `tests/{test_sdr_source,test_identify,test_demod,pluto_live_check}.py`.
+Changed: `survey/sweep/{device,runner}.py` · `survey/server.py` · `survey/config.py` ·
+`survey/web/{index.html,app.js}` · `.gitignore` · `requirements.txt`.
+Read **`SDR_SETUP.md`** for the SDR config knobs, the extension procedure, and the calibration note.
+
+---
+
 ## What this is / how to run
 
 - TSCM field spectrum survey app. Python/Flask local web UI at `localhost:8765`.
