@@ -1,0 +1,514 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DCS — Bug Sweeps You Can Watch Happen | DeConfliction Systems · Shield TSCM</title>
+<meta name="description" content="DCS turns a professional bug sweep into something your client can watch in real time — every signal classified against what's actually licensed at the address, then an automatic report. Powered by Shield Security.">
+<style>
+  :root{
+    --bg:#0b0f14; --bg2:#0d1319; --panel:#15202b; --panel2:#1c2733;
+    --line:#2c3a49; --line-soft:#42506033;
+    --text:#e6edf5; --muted:#9fb0c0; --dim:#7b8794;
+    --green:#2ecc71; --green-bg:#0d3321;
+    --amber:#f39c12; --amber-bg:#33270d;
+    --red:#e74c3c; --red-bg:#33120d;
+    --blue:#3498db; --teal:#1abc9c; --gold:#f39c12;
+    --mono:"SFMono-Regular",ui-monospace,"Cascadia Mono","Consolas",monospace;
+    --sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:
+      radial-gradient(900px 500px at 80% -5%, #14202c 0%, transparent 60%),
+      radial-gradient(700px 500px at -10% 10%, #101a24 0%, transparent 55%),
+      var(--bg);
+    color:var(--text);font-family:var(--sans);line-height:1.55;-webkit-font-smoothing:antialiased}
+  a{color:var(--blue);text-decoration:none}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 22px}
+  .mono{font-family:var(--mono)}
+  .eyebrow{font-family:var(--mono);font-size:12px;letter-spacing:.22em;text-transform:uppercase;color:var(--teal);margin:0 0 14px}
+
+  /* ---- top bar ---- */
+  header.bar{position:sticky;top:0;z-index:30;backdrop-filter:blur(10px);
+    background:rgba(11,15,20,.72);border-bottom:1px solid var(--line)}
+  .bar .wrap{display:flex;align-items:center;justify-content:space-between;height:58px}
+  .brand{font-family:var(--mono);font-weight:700;letter-spacing:.04em;font-size:15px}
+  .brand b{color:var(--text)} .brand span{color:var(--teal)} .brand i{color:var(--dim);font-style:normal;font-weight:400}
+  .bar nav a{color:var(--muted);font-size:13px;margin-left:20px}
+  .bar nav a:hover{color:var(--text)}
+  .btn{display:inline-block;background:var(--blue);color:#04121d;font-weight:700;
+    padding:11px 18px;border-radius:9px;font-size:14px;border:1px solid #4aa9e6;
+    transition:transform .12s ease, box-shadow .12s ease}
+  .btn:hover{transform:translateY(-1px);box-shadow:0 8px 24px -10px var(--blue)}
+  .btn.ghost{background:transparent;color:var(--text);border-color:var(--line)}
+  .btn.ghost:hover{border-color:var(--blue);box-shadow:none}
+
+  /* ---- hero ---- */
+  .hero{padding:74px 0 30px}
+  .hero h1{font-size:clamp(33px,5.4vw,58px);line-height:1.04;margin:0 0 18px;letter-spacing:-.02em;font-weight:800}
+  .hero h1 .hl{color:var(--green)}
+  .hero p.lead{font-size:clamp(17px,2.1vw,21px);color:var(--muted);max-width:640px;margin:0 0 26px}
+  .cta-row{display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+  .partner-chip{display:inline-flex;align-items:center;gap:9px;border:1px solid var(--line);
+    background:var(--panel);border-radius:999px;padding:7px 14px 7px 11px;font-size:12.5px;color:var(--muted);
+    font-family:var(--mono);letter-spacing:.02em}
+  .partner-chip .dot{width:8px;height:8px;border-radius:50%;background:var(--gold);box-shadow:0 0 10px var(--gold)}
+  .partner-chip b{color:var(--text)}
+
+  section{padding:54px 0;border-top:1px solid var(--line-soft)}
+  h2.sec{font-size:clamp(24px,3.4vw,34px);margin:6px 0 10px;letter-spacing:-.01em}
+  .sub{color:var(--muted);max-width:680px;margin:0 0 30px;font-size:16.5px}
+
+  /* ---- the live demo stage ---- */
+  .stage-frame{border:1px solid var(--line);border-radius:16px;overflow:hidden;background:var(--bg2);
+    box-shadow:0 30px 80px -40px #000}
+  .stage-top{display:flex;align-items:center;gap:8px;padding:11px 15px;border-bottom:1px solid var(--line);
+    background:linear-gradient(180deg,#101924,#0d1319)}
+  .stage-top .tl{display:flex;gap:7px}
+  .stage-top .tl i{width:11px;height:11px;border-radius:50%;display:inline-block}
+  .stage-top .tl i:nth-child(1){background:#e74c3c} .stage-top .tl i:nth-child(2){background:#f39c12} .stage-top .tl i:nth-child(3){background:#2ecc71}
+  .stage-top .ttl{font-family:var(--mono);font-size:12.5px;color:var(--dim);margin-left:6px}
+  .stage-top .live{margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--green);
+    display:flex;align-items:center;gap:6px;letter-spacing:.12em}
+  .stage-top .live .blink{width:8px;height:8px;border-radius:50%;background:var(--green);animation:blink 1.1s infinite}
+  @keyframes blink{0%,100%{opacity:1}50%{opacity:.25}}
+
+  .split{display:grid;grid-template-columns:1fr 1.35fr;min-height:430px}
+  @media(max-width:820px){.split{grid-template-columns:1fr}}
+  .pane{padding:18px 18px 20px}
+  .pane.left{border-right:1px solid var(--line);background:repeating-linear-gradient(0deg,#10161d,#10161d 27px,#0f151c 27px,#0f151c 28px)}
+  @media(max-width:820px){.pane.left{border-right:none;border-bottom:1px solid var(--line)}}
+  .pane h4{margin:0 0 4px;font-size:13px;letter-spacing:.12em;font-family:var(--mono);text-transform:uppercase}
+  .pane.left h4{color:var(--red)} .pane.right h4{color:var(--green)}
+  .pane .way{font-size:12px;color:var(--dim);margin:0 0 16px}
+
+  /* clipboard / manual side */
+  .clip{font-family:var(--mono);font-size:13.5px}
+  .clip .row{display:flex;justify-content:space-between;padding:3px 0;color:#c8bfae;opacity:0;transform:translateY(4px);
+    border-bottom:1px dashed #2a2a1f}
+  .clip .row.show{opacity:1;transform:none;transition:all .35s ease}
+  .clip .row .q{color:#9a8e74}
+  .scribble{font-family:"Bradley Hand","Segoe Script","Comic Sans MS",cursive;color:#d9cfb8}
+  .manual-foot{margin-top:16px;font-size:12px;color:var(--dim);border-top:1px solid #2a2a1f;padding-top:12px}
+  .manual-foot .bad{color:var(--red)}
+  .client-sees{margin-top:13px;font-family:var(--mono);font-size:11.5px;color:var(--dim);
+    border:1px dashed #3a2c20;border-radius:8px;padding:9px 11px;background:#140f0b}
+  .client-sees b{color:#caa37a}
+
+  /* live DCS side */
+  .scope-wrap{position:relative;border:1px solid var(--line);border-radius:9px;overflow:hidden;background:#06090d}
+  #scope{display:block;width:100%;height:118px}
+  .scope-lbl{position:absolute;top:7px;left:9px;font-family:var(--mono);font-size:10px;color:#52708a;letter-spacing:.1em}
+  #waterfall{display:block;width:100%;height:74px;background:#000208;border:1px solid var(--line);border-top:none;border-radius:0 0 9px 9px}
+  .counter{display:flex;gap:14px;align-items:baseline;margin:13px 0 9px;font-family:var(--mono);font-size:12px;color:var(--dim)}
+  .counter b{font-size:21px}
+  .counter .u b{color:var(--red)} .counter .v b{color:var(--green)}
+  .ledger{list-style:none;margin:0;padding:0;max-height:152px;overflow:hidden}
+  .ledger li{display:flex;align-items:center;gap:10px;padding:6px 8px;border-radius:7px;margin-bottom:5px;
+    font-family:var(--mono);font-size:12.5px;background:#101a24;border:1px solid #1d2a36;
+    opacity:0;transform:translateX(10px)}
+  .ledger li.in{opacity:1;transform:none;transition:all .4s ease}
+  .ledger li .pill{font-size:10px;letter-spacing:.08em;padding:2px 7px;border-radius:5px;font-weight:700}
+  .pill.U{background:var(--red-bg);color:var(--red)}
+  .pill.V{background:var(--green-bg);color:var(--green)}
+  .pill.P{background:var(--amber-bg);color:var(--amber)}
+  .ledger li .freq{color:var(--text);min-width:78px}
+  .ledger li .desc{color:var(--dim);flex:1;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .ledger li.flip{animation:flipglow .6s ease}
+  @keyframes flipglow{0%{background:#0d3321}100%{background:#101a24}}
+
+  .stage-caption{text-align:center;padding:16px;font-size:15px;color:var(--muted);border-top:1px solid var(--line);background:#0c1217}
+  .stage-caption b{color:var(--text)}
+  .replay{display:inline-flex;gap:7px;align-items:center;cursor:pointer;color:var(--blue);font-size:12.5px;
+    font-family:var(--mono);margin-left:10px;border:1px solid var(--line);border-radius:7px;padding:3px 9px}
+  .replay:hover{border-color:var(--blue)}
+
+  /* ---- steps ---- */
+  .steps{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+  @media(max-width:780px){.steps{grid-template-columns:1fr}}
+  .step{border:1px solid var(--line);border-radius:13px;padding:20px;background:linear-gradient(180deg,var(--panel),#111a23)}
+  .step .n{font-family:var(--mono);color:var(--teal);font-size:12px;letter-spacing:.18em}
+  .step h3{margin:9px 0 7px;font-size:18px}
+  .step p{margin:0;color:var(--muted);font-size:14.5px}
+
+  /* ---- why grid ---- */
+  .why{display:grid;grid-template-columns:repeat(2,1fr);gap:16px}
+  @media(max-width:780px){.why{grid-template-columns:1fr}}
+  .card{border:1px solid var(--line);border-radius:13px;padding:20px 20px 18px;background:var(--panel);position:relative}
+  .card .ic{font-size:20px}
+  .card h3{margin:10px 0 7px;font-size:17px}
+  .card p{margin:0;color:var(--muted);font-size:14.5px}
+  .card .vs{margin-top:11px;font-family:var(--mono);font-size:11.5px;color:var(--dim);border-top:1px solid var(--line-soft);padding-top:9px}
+  .card .vs b{color:var(--green)}
+
+  /* ---- compare table ---- */
+  .cmp{width:100%;border-collapse:collapse;font-size:14px;border:1px solid var(--line);border-radius:12px;overflow:hidden}
+  .cmp th,.cmp td{padding:13px 15px;text-align:left;border-bottom:1px solid var(--line-soft)}
+  .cmp thead th{background:var(--panel2);font-family:var(--mono);font-size:12px;letter-spacing:.08em;color:var(--muted)}
+  .cmp tbody td:first-child{color:var(--muted)}
+  .cmp .yes{color:var(--green);font-weight:700}
+  .cmp .no{color:var(--red)}
+  .cmp .mid{color:var(--amber)}
+  .cmp col.dcs,.cmp th.dcs{background:#0f1d18}
+  .cmp td.dcs{background:#0d1a15}
+
+  /* ---- partner band ---- */
+  .partner{border:1px solid #3a2f12;border-radius:16px;padding:30px;background:
+      linear-gradient(180deg,#1a1407,#120e09);text-align:center}
+  .partner .eyebrow{color:var(--gold)}
+  .partner h2{font-size:clamp(22px,3vw,30px);margin:4px 0 12px}
+  .partner p{color:var(--muted);max-width:640px;margin:0 auto 8px;font-size:15.5px}
+  .partner .ex{display:inline-block;margin-top:14px;font-family:var(--mono);font-size:12px;color:var(--gold);
+    border:1px solid #4a3a14;border-radius:999px;padding:7px 15px;letter-spacing:.06em}
+
+  /* ---- final cta ---- */
+  .final{text-align:center}
+  .final h2{font-size:clamp(26px,4vw,40px);margin:0 0 12px}
+  .final p{color:var(--muted);max-width:560px;margin:0 auto 24px;font-size:17px}
+
+  footer{border-top:1px solid var(--line);padding:30px 0 50px;color:var(--dim);font-size:12.5px}
+  footer .wrap{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}
+  .disc{max-width:640px;line-height:1.6}
+</style>
+</head>
+<body>
+
+<header class="bar">
+  <div class="wrap">
+    <div class="brand"><b>DCS</b> <i>/</i> <span>DeConfliction&nbsp;Systems</span> <i>· TSCM</i></div>
+    <nav>
+      <a href="#what">What it is</a>
+      <a href="#demo">Watch a sweep</a>
+      <a href="#why">Why DCS</a>
+      <a href="#book" class="btn ghost" style="padding:8px 14px">Book a sweep</a>
+    </nav>
+  </div>
+</header>
+
+<!-- HERO -->
+<div class="wrap hero" id="what">
+  <p class="eyebrow">Technical Surveillance Counter-Measures, made visible</p>
+  <h1>A bug sweep your client can <span class="hl">actually watch happen.</span></h1>
+  <p class="lead">A professional sweep checks a room for hidden cameras, microphones, and trackers by
+    reading the radio spectrum. The old way, the client sees a technician scribble numbers on a
+    clipboard and waits a week for a PDF. <b>DCS puts the whole sweep on screen</b> — every signal
+    sorted, live, into <span style="color:var(--green)">verified</span>,
+    <span style="color:var(--amber)">plausible</span>, or
+    <span style="color:var(--red)">unknown</span> — so they can watch the unknown list empty out.</p>
+  <div class="cta-row">
+    <a href="#demo" class="btn">▶ Watch the 15-second sweep</a>
+    <a href="#book" class="btn ghost">Book a sweep with Shield</a>
+    <span class="partner-chip"><span class="dot"></span>Exclusive launch partner: <b>Shield&nbsp;Security</b></span>
+  </div>
+</div>
+
+<!-- THE DEMO -->
+<section id="demo">
+  <div class="wrap">
+    <p class="eyebrow">The difference, side by side</p>
+    <h2 class="sec">The old way vs. on screen, in real time</h2>
+    <p class="sub">Left: a sweep recorded by hand — the client sees nothing and can't read the result.
+      Right: the same sweep in DCS. Signals stream in flagged <span style="color:var(--red)">UNKNOWN</span>,
+      then resolve against what's actually licensed at the address. Plays automatically.</p>
+
+    <div class="stage-frame">
+      <div class="stage-top">
+        <span class="tl"><i></i><i></i><i></i></span>
+        <span class="ttl mono">SHIELD TSCM // SPECTRUM SURVEY — 18 Maple Ct · 50&nbsp;kHz–6.1&nbsp;GHz</span>
+        <span class="live"><span class="blink"></span>SWEEPING</span>
+      </div>
+      <div class="split">
+        <!-- MANUAL -->
+        <div class="pane left">
+          <h4>The old way · by hand</h4>
+          <p class="way">Technician reads a handheld, writes it down.</p>
+          <div class="clip" id="clip"></div>
+          <div class="client-sees">CLIENT SEES: <b id="clientSees">…nothing on a screen.</b></div>
+          <div class="manual-foot">Result: a stack of frequencies the client can't interpret —
+            <span class="bad">written report mailed ~1 week later.</span></div>
+        </div>
+        <!-- DCS LIVE -->
+        <div class="pane right">
+          <h4>With DCS · live on screen</h4>
+          <p class="way">The same sweep — sorted as it comes back.</p>
+          <div class="scope-wrap">
+            <span class="scope-lbl">LIVE TRACE · MaxHold</span>
+            <canvas id="scope" width="640" height="118"></canvas>
+          </div>
+          <canvas id="waterfall" width="640" height="74"></canvas>
+          <div class="counter">
+            <span class="u">UNKNOWN <b id="cU">0</b></span>
+            <span class="v">VERIFIED <b id="cV">0</b></span>
+            <span style="margin-left:auto;color:var(--teal)" id="cStatus">scanning…</span>
+          </div>
+          <ul class="ledger" id="ledger"></ul>
+        </div>
+      </div>
+      <div class="stage-caption">
+        <b>Manual TSCM asks the client to trust a clipboard. DCS lets them watch the red list empty out.</b>
+        <span class="replay" id="replay">↻ replay</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- HOW IT WORKS -->
+<section>
+  <div class="wrap">
+    <p class="eyebrow">Three steps</p>
+    <h2 class="sec">How a DCS sweep works</h2>
+    <div class="steps">
+      <div class="step"><div class="n">01 · BASELINE</div><h3>Start with the address</h3>
+        <p>Before anyone walks in, DCS builds the expected radio picture for that exact location from
+          public records — licensed FM/AM/TV, FCC licenses, nearby cell towers. Now it knows what
+          <i>should</i> be there.</p></div>
+      <div class="step"><div class="n">02 · LIVE SWEEP</div><h3>Sweep, on screen</h3>
+        <p>A spectrum analyzer sweeps 50&nbsp;kHz–6.1&nbsp;GHz. Every signal it hears is checked against
+          the baseline in real time and sorted: <span style="color:var(--green)">verified</span>,
+          <span style="color:var(--amber)">plausible</span>, or
+          <span style="color:var(--red)">unknown</span> — the client watching the whole time.</p></div>
+      <div class="step"><div class="n">03 · REPORT</div><h3>The report writes itself</h3>
+        <p>A clean, client-ready PDF — band-by-band clearance, anomalies, recommendations — generated
+          from the sweep. Every visit is remembered, so the next sweep flags anything that
+          <i>changed</i>.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- WHY DCS -->
+<section id="why">
+  <div class="wrap">
+    <p class="eyebrow">Why DCS</p>
+    <h2 class="sec">What actually makes this different</h2>
+    <p class="sub">Other professional tools can analyze spectrum and print a report. Two things are rare:
+      making the sweep something the client can <i>watch</i>, and doing it without a six-figure kit or a
+      gated, certification-locked platform.</p>
+    <div class="why">
+      <div class="card"><div class="ic">👁️</div><h3>The client watches it happen</h3>
+        <p>Most sweeps are invisible to the client — they get a PDF days later. DCS puts the live trace,
+          waterfall, and a known-vs-unknown ledger on screen, so credibility is something they see, not
+          something they take on faith.</p>
+        <div class="vs">Old way: clipboard + a report a week later → <b>DCS: live, in the room.</b></div></div>
+
+      <div class="card"><div class="ic">🎯</div><h3>Every signal judged against the address</h3>
+        <p>Signals aren't just listed — they're checked against what's actually licensed at that location
+          and tagged verified, plausible, or unknown automatically. No manual database wrangling before
+          the job.</p>
+        <div class="vs">No setup, no frequency-database curation → <b>address in, baseline ready.</b></div></div>
+
+      <div class="card"><div class="ic">🧠</div><h3>A signal wiki that remembers</h3>
+        <p>Every signal from every visit is archived. Come back in six months and DCS flags what changed —
+          including a new device <i>hiding inside a band you'd normally ignore</i>. Most operators rebuild
+          context from scratch each time.</p>
+        <div class="vs">Cross-session memory → <b>catch the signal that wasn't there last time.</b></div></div>
+
+      <div class="card"><div class="ic">💸</div><h3>Professional-grade, not six-figure</h3>
+        <p>A full dedicated TSCM hardware suite can run into six figures and hundreds of training hours.
+          DCS delivers a real reporting workflow on accessible, commodity hardware — putting a credible
+          sweep within reach of the operators who are otherwise stuck on a clipboard.</p>
+        <div class="vs">No $150K kit, no gated platform → <b>set up in an afternoon.</b></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- COMPARE -->
+<section>
+  <div class="wrap">
+    <p class="eyebrow">At a glance</p>
+    <h2 class="sec">The clipboard, the six-figure kit, and DCS</h2>
+    <p class="sub">An honest comparison. DCS doesn't out-detect a top-end hardware suite on raw sensitivity —
+      it wins on visibility, automation, and access.</p>
+    <table class="cmp">
+      <colgroup><col><col><col><col class="dcs"></colgroup>
+      <thead><tr><th>&nbsp;</th><th>Manual / handheld</th><th>Six-figure hardware suite</th><th class="dcs">DCS</th></tr></thead>
+      <tbody>
+        <tr><td>Client watches the sweep live</td><td class="no">✕ sees nothing</td><td class="mid">~ operator screen only</td><td class="dcs yes">✓ client-facing</td></tr>
+        <tr><td>Signals auto-classified vs. the address</td><td class="no">✕ by hand</td><td class="mid">~ with setup</td><td class="dcs yes">✓ automatic</td></tr>
+        <tr><td>Report generated from the sweep</td><td class="no">✕ typed up later</td><td class="mid">~ post-session</td><td class="dcs yes">✓ auto PDF</td></tr>
+        <tr><td>Remembers prior visits &amp; flags changes</td><td class="no">✕</td><td class="mid">~ baseline compare</td><td class="dcs yes">✓ signal wiki</td></tr>
+        <tr><td>Cost &amp; setup to get started</td><td class="yes">low</td><td class="no">very high</td><td class="dcs yes">low</td></tr>
+        <tr><td>Raw detection range / sensitivity</td><td class="no">limited</td><td class="yes">best-in-class</td><td class="dcs mid">solid entry tier</td></tr>
+      </tbody>
+    </table>
+    <p style="color:var(--dim);font-size:12.5px;margin-top:12px">~ = possible but typically manual, operator-only, or post-session. DCS is built around accessible spectrum hardware; for the widest, most sensitive sweeps a dedicated suite still leads on raw range.</p>
+  </div>
+</section>
+
+<!-- PARTNER -->
+<section>
+  <div class="wrap">
+    <div class="partner">
+      <p class="eyebrow">First partnership</p>
+      <h2>Powered by Shield Security</h2>
+      <p>DCS is launching with <b>Shield Security</b> as its first partner. Every Shield sweep is run on
+        DCS — so when you book with Shield, you get the live, on-screen sweep and the address-verified
+        report, conducted by a professional working to the DCS standard.</p>
+      <span class="ex">★ Shield Security — exclusive launch partner of DCS</span>
+    </div>
+  </div>
+</section>
+
+<!-- FINAL CTA -->
+<section class="final" id="book">
+  <div class="wrap">
+    <h2>See what's really in the room.</h2>
+    <p>Book a professional bug sweep with Shield Security — and watch every signal resolve in real time.</p>
+    <div class="cta-row" style="justify-content:center">
+      <a href="#" class="btn">Book a sweep</a>
+      <a href="https://dcs-demo.onrender.com" class="btn ghost" target="_blank" rel="noopener">Try the live demo →</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="disc">
+      <div class="brand" style="margin-bottom:10px"><b>DCS</b> <i>/</i> <span>DeConfliction Systems</span></div>
+      DCS is a TSCM spectrum-survey platform. Illustrative demo above; live results depend on the
+      environment and equipment used. DCS uses accessible spectrum-analysis hardware and is positioned on
+      real-time client visibility, automated baselining, and reporting — not as a replacement for the raw
+      sensitivity of dedicated high-end hardware suites. No surveillance device is detectable in every case.
+    </div>
+    <div>© DeConfliction Systems · Shield Security<br>An NMP Labs venture</div>
+  </div>
+</footer>
+
+<script>
+(function(){
+  "use strict";
+  // ---- the scripted sweep: shared timeline for manual + live panes ----
+  // Each signal: freq, final verdict (V/P/U), label. They stream in as UNKNOWN, then resolve.
+  var SIGNALS = [
+    {f:"88.5 MHz",  v:"V", t:"V", d:"FM broadcast — licensed here"},
+    {f:"162.5 MHz", v:"V", t:"V", d:"NOAA weather — expected"},
+    {f:"700 MHz",   v:"V", t:"V", d:"LTE cell — carrier tower 0.4mi"},
+    {f:"2.412 GHz", v:"P", t:"P", d:"Wi-Fi ch.1 — owned router?"},
+    {f:"433.9 MHz", v:"U", t:"U", d:"not in any public database"},
+    {f:"1.27 GHz",  v:"V", t:"V", d:"GPS L2 — expected"},
+    {f:"5.8 GHz",   v:"U", t:"U", d:"video band — UNACCOUNTED"},
+    {f:"915 MHz",   v:"P", t:"P", d:"ISM — smart meter?"}
+  ];
+  var clipEl=document.getElementById("clip"), ledgerEl=document.getElementById("ledger");
+  var cU=document.getElementById("cU"), cV=document.getElementById("cV"),
+      cStatus=document.getElementById("cStatus"), clientSees=document.getElementById("clientSees");
+  var timers=[], raf=null;
+
+  // ---- waterfall + scope canvases ----
+  var wf=document.getElementById("waterfall"), wctx=wf.getContext("2d");
+  var sc=document.getElementById("scope"), sctx=sc.getContext("2d");
+  var W=640, Hw=74, Hs=118;
+  var peaks=[]; // persistent peaks for scope (freq positions of detected signals)
+  function rgb(v){ // intensity 0..1 -> blue/green/red heat
+    if(v<.45){var t=v/.45;return "rgb("+Math.round(8+t*8)+","+Math.round(20+t*60)+","+Math.round(40+t*90)+")";}
+    if(v<.75){var t=(v-.45)/.3;return "rgb("+Math.round(16+t*30)+","+Math.round(80+t*120)+","+Math.round(130-t*90)+")";}
+    var t=(v-.75)/.25;return "rgb("+Math.round(46+t*200)+","+Math.round(200-t*120)+","+Math.round(40-t*30)+")";
+  }
+  function noiseAt(x){var n=0.12+0.06*Math.sin(x*0.06)+0.05*Math.sin(x*0.21+1);return n;}
+  function animate(){
+    // shift waterfall down by 1px
+    var img=wctx.getImageData(0,0,W,Hw-1);
+    wctx.putImageData(img,0,1);
+    // draw new top line
+    for(var x=0;x<W;x++){
+      var v=noiseAt(x)+ (Math.random()*0.06);
+      for(var p=0;p<peaks.length;p++){
+        var dx=x-peaks[p].x; var amp=peaks[p].on?peaks[p].amp:0;
+        v+=amp*Math.exp(-(dx*dx)/(2*peaks[p].w*peaks[p].w));
+      }
+      if(v>1)v=1;
+      wctx.fillStyle=rgb(v); wctx.fillRect(x,0,1,1);
+    }
+    // scope (live trace) redraw
+    sctx.clearRect(0,0,W,Hs);
+    sctx.strokeStyle="#13212e";sctx.lineWidth=1;
+    for(var gy=0;gy<Hs;gy+=24){sctx.beginPath();sctx.moveTo(0,gy);sctx.lineTo(W,gy);sctx.stroke();}
+    sctx.beginPath();
+    for(var x=0;x<W;x++){
+      var v=noiseAt(x)+Math.random()*0.05;
+      for(var p=0;p<peaks.length;p++){
+        var dx=x-peaks[p].x;var amp=peaks[p].on?peaks[p].amp:0;
+        v+=amp*Math.exp(-(dx*dx)/(2*peaks[p].w*peaks[p].w));
+      }
+      if(v>1)v=1;
+      var y=Hs-8-v*(Hs-18);
+      if(x===0)sctx.moveTo(x,y);else sctx.lineTo(x,y);
+    }
+    sctx.strokeStyle="#2ea0e6";sctx.lineWidth=1.4;sctx.stroke();
+    // peak color dots on scope
+    for(var p=0;p<peaks.length;p++){if(!peaks[p].on)continue;
+      var col=peaks[p].t==="V"?"#2ecc71":peaks[p].t==="P"?"#f39c12":"#e74c3c";
+      sctx.fillStyle=col;sctx.beginPath();
+      sctx.arc(peaks[p].x,Hs-8-peaks[p].amp*(Hs-18),3,0,7);sctx.fill();
+    }
+    raf=requestAnimationFrame(animate);
+  }
+
+  function reset(){
+    timers.forEach(clearTimeout);timers=[];
+    clipEl.innerHTML="";ledgerEl.innerHTML="";peaks=[];
+    cU.textContent="0";cV.textContent="0";cStatus.textContent="scanning…";
+    clientSees.textContent="…nothing on a screen.";
+    wctx.fillStyle="#000208";wctx.fillRect(0,0,W,Hw);
+  }
+  function later(fn,ms){var id=setTimeout(fn,ms);timers.push(id);}
+
+  function run(){
+    reset();
+    var unknown=0, verified=0;
+    SIGNALS.forEach(function(s,i){
+      var base=600+i*1250; // stagger arrivals
+      // --- manual side: a scribbled line appears ---
+      later(function(){
+        var row=document.createElement("div");row.className="row";
+        row.innerHTML='<span class="scribble">'+s.f+'</span><span class="q">= ?</span>';
+        clipEl.appendChild(row);requestAnimationFrame(function(){row.classList.add("show");});
+        if(i===2)clientSees.textContent="…the technician's pen.";
+      },base);
+      // --- live side: appears as UNKNOWN, with a scope/waterfall peak ---
+      later(function(){
+        var px=40+ i*(560/SIGNALS.length) + (i%2?18:-12);
+        var pk={x:px,w:7+Math.random()*5,amp:0.45+Math.random()*0.4,on:true,t:"U"};
+        peaks.push(pk); s._pk=pk;
+        var li=document.createElement("li");li.id="lg"+i;
+        li.innerHTML='<span class="pill U">UNKNOWN</span><span class="freq">'+s.f+'</span><span class="desc">detected — checking…</span>';
+        ledgerEl.appendChild(li);requestAnimationFrame(function(){li.classList.add("in");});
+        unknown++;cU.textContent=unknown;cStatus.textContent="classifying signals…";
+      },base+260);
+      // --- resolve to its verdict ---
+      later(function(){
+        var li=document.getElementById("lg"+i);if(!li)return;
+        var pill=li.querySelector(".pill"),desc=li.querySelector(".desc");
+        if(s.t!=="U"){
+          unknown--;cU.textContent=unknown;
+          if(s.t==="V"){verified++;cV.textContent=verified;pill.className="pill V";pill.textContent="VERIFIED";li.classList.add("flip");}
+          else{pill.className="pill P";pill.textContent="PLAUSIBLE";}
+          if(s._pk)s._pk.t=s.t;
+        } else {
+          pill.className="pill U";pill.textContent="UNKNOWN";
+        }
+        desc.textContent=s.d;
+      },base+1050);
+    });
+    // wrap-up
+    var endAt=600+SIGNALS.length*1250+1400;
+    later(function(){
+      cStatus.textContent="✓ sweep complete — report ready";
+      clientSees.textContent="…still nothing.";
+    },endAt);
+    later(run, endAt+3600); // loop
+  }
+
+  // start when demo scrolls into view (and on load anyway)
+  var started=false;
+  function boot(){if(started)return;started=true;wctx.fillStyle="#000208";wctx.fillRect(0,0,W,Hw);animate();run();}
+  if("IntersectionObserver" in window){
+    var io=new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting)boot();});},{threshold:.2});
+    io.observe(document.getElementById("demo"));
+  }
+  window.addEventListener("load",function(){setTimeout(boot,400);});
+  document.getElementById("replay").addEventListener("click",function(){if(!started){boot();return;}run();});
+})();
+</script>
+</body>
+</html>
