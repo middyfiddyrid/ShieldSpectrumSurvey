@@ -664,14 +664,17 @@ function renderBaselineTable() {
   const src = $("baseline-source-filter").value;
   const rows = (App.baseline ? App.baseline.rows : []).filter(r =>
     (!src || r.source === src) &&
-    (!f || JSON.stringify(r).toLowerCase().includes(f)));
+    (!f || JSON.stringify(r).toLowerCase().includes(f)))
+    .sort((a, b) => a.freq_low_mhz - b.freq_low_mhz)
+    .slice(0, 1500);
+  App.blView = rows;                 // ordered list the inspect panel steps through
   $("tbl-baseline").innerHTML =
     "<tr><th>Frequency</th><th>Service</th><th>Callsign/Label</th><th>Licensee</th>" +
     "<th>Dist mi</th><th>Brg</th><th>Source</th><th>Confidence</th><th></th></tr>" +
-    rows.slice(0, 1500).map(r => {
+    rows.map((r, i) => {
       const f1 = r.freq_low_mhz === r.freq_high_mhz ? fmtF(r.freq_low_mhz) :
         fmtF(r.freq_low_mhz) + " – " + fmtF(r.freq_high_mhz);
-      return `<tr><td>${f1}</td><td>${esc(r.service)}</td>` +
+      return `<tr><td><a href="#" class="freqlink" data-i="${i}">${f1}</a></td><td>${esc(r.service)}</td>` +
         `<td>${esc(r.callsign || r.label)}</td><td>${esc(r.licensee)}</td>` +
         `<td>${r.distance_mi != null ? r.distance_mi.toFixed(1) : ""}</td>` +
         `<td>${r.bearing_deg != null ? r.bearing_deg.toFixed(0) + "°" : ""}</td>` +
@@ -681,6 +684,107 @@ function renderBaselineTable() {
 }
 $("baseline-filter").oninput = renderBaselineTable;
 $("baseline-source-filter").onchange = renderBaselineTable;
+
+/* ---------- tune & inspect (analyzer + waterfall + audio) ---------- */
+function blCenter(r) {
+  return r.freq_low_mhz === r.freq_high_mhz ? r.freq_low_mhz
+    : (r.freq_low_mhz + r.freq_high_mhz) / 2;
+}
+
+$("tbl-baseline").addEventListener("click", (e) => {
+  const a = e.target.closest(".freqlink");
+  if (!a) return;
+  e.preventDefault();
+  openInspect(parseInt(a.dataset.i, 10));
+});
+
+async function openInspect(idx, modeOverride) {
+  const list = App.blView || [];
+  if (!list.length) return;
+  idx = Math.max(0, Math.min(idx, list.length - 1));
+  App.inspIdx = idx;
+  const r = list[idx];
+  const center = blCenter(r);
+  $("inspect-panel").style.display = "";
+  $("insp-title").textContent =
+    `${fmtF(center)} MHz · ${r.callsign || r.label || r.service || ""} (${idx + 1}/${list.length})`;
+  $("insp-note").textContent = "";
+  $("insp-msg").textContent = "tuning…";
+  $("inspect-panel").scrollIntoView({ behavior: "smooth", block: "center" });
+  const body = { center_mhz: center, label: r.label || r.service || "" };
+  if (modeOverride) body.mode = modeOverride;
+  try {
+    const d = await api("/api/inspect", body);
+    App.inspData = d;
+    renderInspect(d);
+  } catch (e) { $("insp-msg").textContent = "FAILED: " + e.message; }
+}
+
+function renderInspect(d) {
+  $("insp-msg").textContent = "";
+  $("insp-note").textContent = d.note || "";
+  if (d.mode) $("insp-mode").value = d.mode;
+  const an = $("insp-analyzer"), wf = $("insp-waterfall"), au = $("insp-audio");
+  const ac = an.getContext("2d"), wc = wf.getContext("2d");
+  ac.clearRect(0, 0, an.width, an.height);
+  wc.clearRect(0, 0, wf.width, wf.height);
+  au.pause(); au.removeAttribute("src");
+  if (!d.in_range) {
+    ac.fillStyle = "#e0a030"; ac.font = "13px monospace";
+    ac.fillText(d.note || "unavailable", 12, 26);
+    return;
+  }
+  drawAnalyzer(ac, an, d.analyzer);
+  drawWaterfall(wc, wf, d.waterfall);
+  if (d.audio) { au.src = d.audio; au.play().catch(() => {}); }
+}
+
+function drawAnalyzer(ctx, cv, a) {
+  const p = a.power_dbm, fr = a.freqs_mhz, n = p.length, W = cv.width, H = cv.height;
+  if (!n) return;
+  let lo = Math.min(...p), hi = Math.max(...p);
+  if (hi - lo < 10) hi = lo + 10;
+  ctx.strokeStyle = "#00c8ff"; ctx.lineWidth = 1.2; ctx.beginPath();
+  for (let i = 0; i < n; i++) {
+    const x = W * i / (n - 1);
+    const y = H - ((p[i] - lo) / (hi - lo)) * (H - 14) - 7;
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  }
+  ctx.stroke();
+  ctx.fillStyle = "#6b7b90"; ctx.font = "10px monospace";
+  ctx.fillText(fr[0].toFixed(3) + " MHz", 3, H - 3);
+  ctx.fillText(fr[n - 1].toFixed(3), W - 56, H - 3);
+  ctx.fillText(hi.toFixed(0) + " dBm", 3, 11);
+}
+
+function heat(t) {
+  t = Math.max(0, Math.min(1, t));
+  const r = Math.round(255 * Math.min(1, Math.max(0, 1.6 * t - 0.5)));
+  const g = Math.round(255 * Math.min(1, Math.max(0, t < 0.5 ? 1.8 * t : 2.1 - 2.0 * t)));
+  const b = Math.round(255 * Math.min(1, Math.max(0, 1.1 - 1.8 * t)));
+  return `rgb(${r},${g},${b})`;
+}
+
+function drawWaterfall(ctx, cv, wf) {
+  const g = wf.db, rows = g.length, cols = rows ? g[0].length : 0;
+  if (!rows || !cols) return;
+  const vmin = wf.vmin, vmax = Math.max(wf.vmax, vmin + 1);
+  const cw = cv.width / cols, ch = cv.height / rows;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      ctx.fillStyle = heat((g[r][c] - vmin) / (vmax - vmin));
+      ctx.fillRect(c * cw, r * ch, cw + 1, ch + 1);
+    }
+  }
+}
+
+$("insp-next").onclick = () => openInspect((App.inspIdx ?? 0) + 1);
+$("insp-prev").onclick = () => openInspect((App.inspIdx ?? 0) - 1);
+$("insp-mode").onchange = () => openInspect(App.inspIdx ?? 0, $("insp-mode").value);
+$("insp-close").onclick = () => {
+  $("inspect-panel").style.display = "none";
+  const a = $("insp-audio"); a.pause(); a.removeAttribute("src");
+};
 
 /* ---------- ETA previews ---------- */
 async function updateEta(profileSel, minutesInput, etaEl, scanMode) {

@@ -70,6 +70,9 @@ DEFAULTS = {
         # emitters (Wi-Fi/BLE) get caught; an empty channel reads noise across all.
         "identify_samples": 131072,
         "identify_captures": 8,
+        # "tune & listen" inspect panel: IQ capture for analyzer + waterfall + audio
+        "listen_sample_rate": 2_400_000,
+        "listen_seconds": 0.5,
         # ~approximate~ dBFS -> dBm calibration offset. NOT lab-grade; lean on
         # baseline-delta detection. Tune per-unit in calibration mode.
         "cal_offset_db": -30.0,

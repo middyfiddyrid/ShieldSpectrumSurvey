@@ -278,7 +278,29 @@ body.demo #card-casefiles { display:none !important; }
     <canvas id="strip"></canvas>
     <p class="note">Colored bands = expected allocations · markers appear after sweeping
       (green verified · amber plausible · red unverified)</p>
+    <p class="note">Click any <b>frequency</b> below to tune the Pluto there — see the analyzer
+       &amp; waterfall and hear the demodulated audio, then step with Next. (Frequencies below
+       325 MHz need the AD9364 extension.)</p>
     <div class="scroll" style="max-height:480px"><table id="tbl-baseline"></table></div>
+  </div>
+  <div class="card" id="inspect-panel" style="display:none">
+    <div class="row">
+      <b id="insp-title">—</b>
+      <label class="note" for="insp-mode">Mode</label>
+      <select id="insp-mode">
+        <option value="nfm">NFM</option><option value="wfm">WFM</option><option value="am">AM</option>
+      </select>
+      <button class="btn" id="insp-prev">◂ Prev</button>
+      <button class="btn" id="insp-next">Next ▾</button>
+      <button class="btn" id="insp-close">Close ✕</button>
+      <span id="insp-msg" class="note"></span>
+    </div>
+    <p id="insp-note" class="note"></p>
+    <div class="note">ANALYZER (power vs frequency)</div>
+    <canvas id="insp-analyzer" width="660" height="170" style="width:100%;background:#04070c;border:1px solid #26303d"></canvas>
+    <div class="note" style="margin-top:6px">WATERFALL (time ↓ × frequency)</div>
+    <canvas id="insp-waterfall" width="660" height="150" style="width:100%;background:#04070c;border:1px solid #26303d"></canvas>
+    <div class="row" style="margin-top:6px"><audio id="insp-audio" controls style="width:100%"></audio></div>
   </div>
 </section>
 

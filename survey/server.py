@@ -575,6 +575,61 @@ def create_app(db, cfg, demo=False) -> Flask:
                         "source": st.controller.active_source, "features": feats,
                         "note": note, "candidates": candidates, "spectrogram": spec})
 
+    @app.post("/api/inspect")
+    def inspect_signal():
+        """Tune the Pluto to a frequency and return an analyzer trace + waterfall
+        + demodulated audio (WAV) so the operator can SEE and HEAR it. Degrades
+        cleanly when the radio isn't connected, is busy, or can't reach the freq."""
+        import base64
+        from .demod import demodulate, pick_mode, wav_bytes
+        from .identify import spectrogram
+        from .sweep.sdr_source import welch_psd
+        body = request.get_json(silent=True) or {}
+        if body.get("center_mhz") is None:
+            return err("need center_mhz")
+        center_mhz = float(body["center_mhz"])
+        label = body.get("label", "")
+        mode = (body.get("mode") or pick_mode(center_mhz, label)).lower()
+
+        dev = st.controller.device
+        is_sdr = dev is not None and hasattr(dev, "capture_iq") and \
+            getattr(dev, "is_swept_sdr", False)
+        base = {"center_mhz": center_mhz, "label": label, "mode": mode, "in_range": False}
+        if not is_sdr:
+            return jsonify({**base, "note": "connect the Pluto (SDR) to tune, view and listen"})
+        if st.controller.busy():
+            return jsonify({**base, "note": "a sweep is running — stop it to tune & listen"})
+        mods = dev.info.modules
+        lo_mhz = min(m.min_mhz for m in mods)
+        hi_mhz = max(m.max_mhz for m in mods)
+        if not (lo_mhz <= center_mhz <= hi_mhz):
+            return jsonify({**base, "note": f"{center_mhz:.3f} MHz is outside the radio's "
+                            f"{lo_mhz:.0f}-{hi_mhz:.0f} MHz range — apply the AD9364 extension to reach it"})
+        try:
+            fs = float(cfg.get("pluto", "listen_sample_rate", default=2_400_000))
+            n = int(fs * float(cfg.get("pluto", "listen_seconds", default=0.5)))
+            iq = dev.capture_iq(center_mhz * 1e6, fs, n)
+        except Exception as e:  # noqa: BLE001
+            log.exception("inspect capture failed")
+            return jsonify({**base, "note": f"capture failed: {e}"})
+
+        cal = float(cfg.get("pluto", "cal_offset_db", default=-30.0))
+        bb, psd_db = welch_psd(iq, fs, nperseg=2048)
+        step = max(1, bb.size // 480)
+        analyzer = {"freqs_mhz": [round((center_mhz * 1e6 + f) / 1e6, 5) for f in bb[::step]],
+                    "power_dbm": [round(float(p) + cal, 1) for p in psd_db[::step]]}
+        wf = spectrogram(iq, fs, n_time=90, nperseg=200)
+        waterfall = {"freqs_mhz": [round((center_mhz * 1e6 + f) / 1e6, 4) for f in wf["freqs_hz"]],
+                     "db": wf["db"], "vmin": wf["vmin"], "vmax": wf["vmax"]}
+        audio = None
+        try:
+            pcm, arate = demodulate(iq, fs, mode)
+            audio = "data:audio/wav;base64," + base64.b64encode(wav_bytes(pcm, arate)).decode()
+        except Exception:  # noqa: BLE001
+            log.exception("demod failed")
+        return jsonify({**base, "in_range": True, "analyzer": analyzer,
+                        "waterfall": waterfall, "audio": audio, "note": ""})
+
     # ---------- planning & sweeping ----------
 
     def _plans(profile, custom_minutes, scan_mode="full"):
