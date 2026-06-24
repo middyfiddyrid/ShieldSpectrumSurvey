@@ -79,3 +79,12 @@ def wav_bytes(pcm16: np.ndarray, rate: int) -> bytes:
     return (b"RIFF" + struct.pack("<I", 36 + n) + b"WAVE"
             + b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
             + b"data" + struct.pack("<I", n) + data)
+
+
+def wav_stream_header(rate: int) -> bytes:
+    """WAV header for an OPEN-ENDED stream: declare a max-size data chunk so the
+    browser keeps playing PCM as it arrives, until the connection is closed."""
+    big = 0xFFFFFFFF
+    return (b"RIFF" + struct.pack("<I", big) + b"WAVE"
+            + b"fmt " + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16)
+            + b"data" + struct.pack("<I", big - 36))

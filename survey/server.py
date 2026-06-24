@@ -6,7 +6,8 @@ import os
 import threading
 import time
 
-from flask import Flask, jsonify, request, send_file, send_from_directory
+from flask import (Flask, Response, jsonify, request, send_file,
+                   send_from_directory, stream_with_context)
 
 from .baseline.base import DiskCache
 from .baseline.manager import build_baseline
@@ -608,7 +609,9 @@ def create_app(db, cfg, demo=False) -> Flask:
         try:
             fs = float(cfg.get("pluto", "listen_sample_rate", default=2_400_000))
             n = int(fs * float(cfg.get("pluto", "listen_seconds", default=0.5)))
-            iq = dev.capture_iq(center_mhz * 1e6, fs, n)
+            st.controller.listen_stop.set()        # preempt any live audio stream
+            with st.controller.device_lock:        # serialise radio access
+                iq = dev.capture_iq(center_mhz * 1e6, fs, n)
         except Exception as e:  # noqa: BLE001
             log.exception("inspect capture failed")
             return jsonify({**base, "note": f"capture failed: {e}"})
@@ -629,6 +632,55 @@ def create_app(db, cfg, demo=False) -> Flask:
             log.exception("demod failed")
         return jsonify({**base, "in_range": True, "analyzer": analyzer,
                         "waterfall": waterfall, "audio": audio, "note": ""})
+
+    @app.get("/api/listen")
+    def listen_stream():
+        """Open-ended demodulated-audio stream: tune the Pluto and keep
+        demodulating live IQ to a WAV stream until the client disconnects (or a
+        sweep/inspect preempts it). One stream at a time, serialised on the
+        radio. The browser <audio> plays it continuously."""
+        from .demod import demodulate, pick_mode, wav_stream_header
+        if request.args.get("center_mhz") is None:
+            return err("need center_mhz")
+        center_mhz = float(request.args["center_mhz"])
+        mode = (request.args.get("mode") or pick_mode(center_mhz)).lower()
+        dev = st.controller.device
+        if not (dev is not None and hasattr(dev, "stream_iq")
+                and getattr(dev, "is_swept_sdr", False)):
+            return err("connect the Pluto (SDR) to listen", 409)
+        if st.controller.busy():
+            return err("a sweep is running — stop it to listen", 409)
+        mods = dev.info.modules
+        lo_mhz, hi_mhz = min(m.min_mhz for m in mods), max(m.max_mhz for m in mods)
+        if not (lo_mhz <= center_mhz <= hi_mhz):
+            return err(f"{center_mhz:.3f} MHz is outside the radio's range", 416)
+
+        fs = float(cfg.get("pluto", "stream_sample_rate", default=600_000))
+        n_block = int(fs * float(cfg.get("pluto", "listen_block_seconds", default=0.25)))
+        st.controller.listen_stop.set()      # preempt whatever stream is running now
+
+        def gen():
+            with st.controller.device_lock:  # wait for the previous user of the radio to release
+                st.controller.listen_stop.clear()
+                st.controller.listening = True
+                stop = st.controller.listen_stop
+                first = True
+                try:
+                    for iq in dev.stream_iq(center_mhz * 1e6, fs, n_block, stop):
+                        try:
+                            pcm, arate = demodulate(iq, fs, mode)
+                        except Exception:  # noqa: BLE001
+                            continue
+                        if first:
+                            yield wav_stream_header(arate)
+                            first = False
+                        yield pcm.tobytes()
+                except Exception:  # noqa: BLE001 - client disconnect / device error
+                    pass
+                finally:
+                    st.controller.listening = False
+        return Response(stream_with_context(gen()), mimetype="audio/wav",
+                        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
     # ---------- planning & sweeping ----------
 

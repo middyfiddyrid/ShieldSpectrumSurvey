@@ -398,6 +398,42 @@ class AD936xSource(BaseDevice):
         self._set_buffer_size(self._nsamp)
         return iq
 
+    def stream_iq(self, center_hz: float, sample_rate: float, n_block: int, stop):
+        """Continuous IQ generator for live audio: tune ONCE, then yield blocks
+        until `stop` (a threading.Event) is set. Restores the sweep config on
+        exit so a later sweep/read is unaffected. Caller must serialise device
+        access (only one stream/capture/sweep at a time)."""
+        self._set_sample_rate(int(sample_rate))
+        self._set_rf_bandwidth(int(sample_rate))
+        self._set_lo(int(center_hz))
+        # Re-assert gapless DMA HERE: a prior capture/sweep destroys+recreates the
+        # rx buffer, which resets the kernel-buffer count to 1 (single-buffer
+        # refill gap => ~0.6x). Destroy, set count, THEN build the buffer and
+        # never destroy it again inside the loop.
+        try:
+            self.sdr.rx_destroy_buffer()
+            self.sdr._rxadc.set_kernel_buffers_count(4)
+        except Exception:  # noqa: BLE001
+            pass
+        self._set_buffer_size(int(n_block))
+        if self._settle_s > 0:
+            time.sleep(self._settle_s)
+        try:
+            self.sdr.rx()      # prime (first buffer post-retune is stale)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            while not stop.is_set():
+                yield np.asarray(self._read_iq(), dtype=np.complex64) / self.ADC_FULL_SCALE
+        finally:
+            try:
+                self.sdr.rx_destroy_buffer()
+            except Exception:  # noqa: BLE001
+                pass
+            self._set_sample_rate(int(self._fs))
+            self._set_rf_bandwidth(int(self._fs))
+            self._set_buffer_size(self._nsamp)
+
     def is_alive(self) -> bool:
         return self.sdr is not None
 
@@ -449,6 +485,12 @@ class PlutoSource(AD936xSource):
                 f"are the ADI USB drivers installed, and is another copy of the app "
                 f"already using it?") from last
         self.info.port = self._uri
+        # gapless DMA for real-time audio streaming — set ONCE, before any rx
+        # buffer is created, so it persists for the whole session.
+        try:
+            self.sdr._rxadc.set_kernel_buffers_count(4)
+        except Exception:  # noqa: BLE001
+            pass
         ctx = getattr(self.sdr, "_ctx", None)
         self.info.model = "ADALM-Pluto (AD936x)"
         if ctx is not None:

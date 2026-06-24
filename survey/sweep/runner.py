@@ -43,6 +43,10 @@ class SweepController:
         self.active_source = None        # which spectrum source is connected (rfexplorer|pluto)
         self._thread = None
         self.abort_event = threading.Event()
+        # serialise radio access across sweep / snapshot-capture / live audio stream
+        self.device_lock = threading.Lock()
+        self.listen_stop = threading.Event()   # set to stop the active audio stream
+        self.listening = False
         self.state = {"running": False, "phase": None, "module": None, "room": None,
                       "segment_index": 0, "segment_total": 0, "percent": 0.0,
                       "eta_seconds": 0, "signal_count": 0, "message": "idle",
@@ -112,6 +116,8 @@ class SweepController:
                     plan, on_done=None):
         if self.busy():
             raise RuntimeError("a sweep is already running")
+        self.listen_stop.set()           # stop any live audio stream and let it release the radio
+        time.sleep(0.4)
         self._ensure_device()
         self.abort_event.clear()
         sweep_id = self.db.execute(
@@ -280,6 +286,8 @@ class SweepController:
         targets: signal rows (need center_mhz, bw_khz; room/module/etc. optional)."""
         if self.busy():
             raise RuntimeError("a sweep is already running")
+        self.listen_stop.set()           # stop any live audio stream and let it release the radio
+        time.sleep(0.4)
         self._ensure_device()
         self.abort_event.clear()
         os.makedirs(images_dir, exist_ok=True)
@@ -421,6 +429,8 @@ class SweepController:
                           room: str):
         if self.busy():
             raise RuntimeError("a sweep is already running")
+        self.listen_stop.set()           # stop any live audio stream and let it release the radio
+        time.sleep(0.4)
         self._ensure_device()
         self.abort_event.clear()
         span_mhz = max(2.0, (bw_khz / 1000.0) * 4)

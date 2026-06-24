@@ -736,7 +736,10 @@ function renderInspect(d) {
   }
   drawAnalyzer(ac, an, d.analyzer);
   drawWaterfall(wc, wf, d.waterfall);
-  if (d.audio) { au.src = d.audio; au.play().catch(() => {}); }
+  // continuous live audio — streams until the element's src is cleared (Close/Next)
+  au.src = `/api/listen?center_mhz=${encodeURIComponent(d.center_mhz)}` +
+           `&mode=${encodeURIComponent(d.mode)}`;
+  au.play().catch(() => {});
 }
 
 function drawAnalyzer(ctx, cv, a) {
