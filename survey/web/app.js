@@ -832,6 +832,27 @@ $("tbl-baseline").addEventListener("click", (e) => {
   openInspect(parseInt(a.dataset.i, 10));
 });
 
+// .freqlink affordances on the non-baseline lists carry the center freq + label
+// in data-* and tune via the freq-based entry point (no baseline stepping).
+// One shared delegated handler covers Results (anomalies), detected Signals, and
+// the Signal Wiki. The wiki row has a bubble-phase inline onclick that opens the
+// detail editor; that <tr> sits BELOW this table in the tree, so it would fire
+// first on bubble and stopPropagation here would be too late. We register in the
+// CAPTURE phase instead — a freqlink click is caught at the table on the way down
+// and stopPropagation pre-empts the row onclick (listen WITHOUT opening it). A
+// non-freqlink click returns without stopping, so normal row clicks still work.
+function freqLinkDelegate(e) {
+  const a = e.target.closest(".freqlink");
+  if (!a || a.dataset.center == null) return;
+  e.preventDefault();
+  e.stopPropagation();
+  listenAt(parseFloat(a.dataset.center), a.dataset.label || "", a.dataset.mode || undefined);
+}
+["tbl-anomalies", "tbl-signals", "tbl-wiki"].forEach(id => {
+  const el = $(id);
+  if (el) el.addEventListener("click", freqLinkDelegate, true);  // capture: beat the row onclick
+});
+
 function inRangeClient(center) {
   const dev = App.state && App.state.device;
   if (!dev || !dev.modules || !dev.modules.length)
@@ -841,7 +862,7 @@ function inRangeClient(center) {
   const lo = Math.min(...dev.modules.map(m => m.min_mhz));
   const hi = Math.max(...dev.modules.map(m => m.max_mhz));
   if (center < lo || center > hi)
-    return { ok: false, msg: `${fmtF(center)} MHz is outside the radio's ${fmtF(lo)}–${fmtF(hi)} MHz range.` };
+    return { ok: false, msg: `${fmtF(center)} is outside the radio's ${fmtF(lo)}–${fmtF(hi)} range.` };
   return { ok: true };
 }
 
@@ -851,18 +872,17 @@ function clearInspectCanvases() {
   }
 }
 
-// click a frequency -> tune the Pluto, stream audio, and LIVE-poll the analyzer
-// + waterfall (both fed by the same stream, so they move). Next/Prev step.
-function openInspect(idx, modeOverride) {
-  const list = App.blView || [];
-  if (!list.length) return;
-  idx = Math.max(0, Math.min(idx, list.length - 1));
-  App.inspIdx = idx;
-  const r = list[idx];
-  const center = blCenter(r);
+// CORE entry point: tune the Pluto to `center`, stream audio, and LIVE-poll the
+// analyzer + waterfall (both fed by the same stream, so they move). Not tied to
+// App.blView — any list can call this with a center + display label. `mode` is
+// an optional demod override (WFM/NFM/AM/USB/LSB/CW); omit to let the backend
+// pick_mode / the <select> decide. The `tuneId` guards against a stale async
+// fallback stomping a newer tune (multiple lists can drive the same panel).
+function inspectByFreq(center, label, mode) {
+  const tuneId = (App.tuneId = (App.tuneId || 0) + 1);
+  App.inspCenter = center; App.inspLabel = label;   // for mode <select> re-tune
   $("inspect-panel").style.display = "";
-  $("insp-title").textContent =
-    `${fmtF(center)} MHz · ${r.callsign || r.label || r.service || ""} (${idx + 1}/${list.length})`;
+  $("insp-title").textContent = `${fmtF(center)} · ${label || ""}`;   // fmtF already carries the unit
   $("inspect-panel").scrollIntoView({ behavior: "smooth", block: "center" });
   stopSpectrumPoll();
   listenStop();
@@ -870,7 +890,8 @@ function openInspect(idx, modeOverride) {
   clearInspectCanvases();
   const rc = inRangeClient(center);
   if (!rc.ok) {
-    $("insp-note").textContent = rc.msg + "  (Next steps through the rest.)";
+    $("insp-note").textContent = rc.msg +
+      (App.inspContext === "baseline" ? "  (Next steps through the rest.)" : "");
     $("insp-msg").textContent = "";
     const ac = $("insp-analyzer").getContext("2d");
     ac.fillStyle = "#e0a030"; ac.font = "13px monospace";
@@ -882,18 +903,53 @@ function openInspect(idx, modeOverride) {
   // Prefer smooth Web Audio chunked playback (/api/listen_pcm); fall back to the
   // plain <audio> element (/api/listen) only if Web Audio / fetch-streaming is
   // unavailable or the stream fails to start.
-  const onState = (msg, live, mode) => {
+  const onState = (msg, live, m) => {
     $("insp-msg").textContent = msg;
-    if (mode) $("insp-mode").value = mode;
+    if (m) $("insp-mode").value = m;
   };
-  listenStart(center, modeOverride, onState).then((ok) => {
-    if (!ok && App.inspIdx === idx) {       // guard: don't stomp a newer tune
+  listenStart(center, mode, onState).then((ok) => {
+    if (!ok && App.tuneId === tuneId) {     // guard: don't stomp a newer tune
       au.src = `/api/listen?center_mhz=${encodeURIComponent(center)}` +
-               (modeOverride ? `&mode=${encodeURIComponent(modeOverride)}` : "");
+               (mode ? `&mode=${encodeURIComponent(mode)}` : "");
       au.play().catch(() => {});
     }
   });
   startSpectrumPoll();
+}
+
+// Baseline-table entry point: steps App.blView[idx] and preserves Next/Prev.
+// Computes center + label from the baseline row, then delegates to the core.
+function openInspect(idx, modeOverride) {
+  const list = App.blView || [];
+  if (!list.length) return;
+  idx = Math.max(0, Math.min(idx, list.length - 1));
+  App.inspIdx = idx;
+  App.inspContext = "baseline";          // Next/Prev step the baseline list
+  const r = list[idx];
+  const center = blCenter(r);
+  const label = `${r.callsign || r.label || r.service || ""} (${idx + 1}/${list.length})`;
+  setInspNav(true);
+  inspectByFreq(center, label, modeOverride);
+}
+
+// Show or hide the Next/Prev controls. They only make sense while stepping the
+// baseline list; entering from any other list disables them so they can't jump
+// the operator into an unrelated baseline row.
+function setInspNav(enabled) {
+  for (const id of ["insp-next", "insp-prev"]) {
+    const b = $(id);
+    if (b) { b.disabled = !enabled; b.style.display = enabled ? "" : "none"; }
+  }
+}
+
+// Entry point for the NON-baseline lists (Results / detected signals / Wiki).
+// Disables Next/Prev (no list to step) and tunes the given center+label.
+function listenAt(center, label, mode) {
+  if (center == null || isNaN(center)) return;
+  App.inspContext = "freq";
+  App.inspIdx = null;
+  setInspNav(false);
+  inspectByFreq(center, label, mode);
 }
 
 function startSpectrumPoll() {
@@ -952,9 +1008,17 @@ function drawWaterfall(ctx, cv, wf) {
   }
 }
 
-$("insp-next").onclick = () => openInspect((App.inspIdx ?? 0) + 1);
-$("insp-prev").onclick = () => openInspect((App.inspIdx ?? 0) - 1);
-$("insp-mode").onchange = () => openInspect(App.inspIdx ?? 0, $("insp-mode").value);
+// Next/Prev only step the baseline list (hidden in any other context).
+$("insp-next").onclick = () => { if (App.inspContext === "baseline") openInspect((App.inspIdx ?? 0) + 1); };
+$("insp-prev").onclick = () => { if (App.inspContext === "baseline") openInspect((App.inspIdx ?? 0) - 1); };
+// Mode <select> re-tune works from any list: re-tune the SAME center with the
+// chosen demod. In baseline context re-run openInspect (keeps the m/n title);
+// otherwise re-tune the current center via the core entry point.
+$("insp-mode").onchange = () => {
+  const mode = $("insp-mode").value;
+  if (App.inspContext === "baseline") openInspect(App.inspIdx ?? 0, mode);
+  else if (App.inspCenter != null) inspectByFreq(App.inspCenter, App.inspLabel, mode);
+};
 $("insp-close").onclick = () => {
   stopSpectrumPoll();
   listenStop();
@@ -1262,7 +1326,9 @@ async function loadResults() {
       "<th>In/Out Δ</th><th>Strongest room</th><th>Class</th><th>Why not verified</th><th></th></tr>" +
       anomalies.map(s =>
         `<tr><td class="${s.anomaly_score >= 60 ? "score-hi" : "score-md"}">${(s.anomaly_score || 0).toFixed(0)}</td>` +
-        `<td>${fmtF(s.center_mhz)}</td><td>${s.peak_dbm}</td><td>${s.bw_khz}</td>` +
+        `<td><a href="#" class="freqlink" data-center="${s.center_mhz}" ` +
+        `data-label="${esc(s.matched_label || s.match_reason || "anomaly")}">${fmtF(s.center_mhz)}</a></td>` +
+        `<td>${s.peak_dbm}</td><td>${s.bw_khz}</td>` +
         `<td>${((s.persistence || 0) * 100).toFixed(0)}%</td>` +
         `<td>${s.interior_delta_db != null ? "+" + s.interior_delta_db + " dB" : "—"}</td>` +
         `<td>${esc(s.strongest_room || "")}${s.localization_score ? ` (+${s.localization_score} dB)` : ""}</td>` +
@@ -1336,7 +1402,9 @@ async function loadSignals() {
     $("tbl-signals").innerHTML =
       "<tr><th>Frequency</th><th>Peak</th><th>Persist</th><th>Phase</th><th>Module</th>" +
       "<th>Room</th><th>Class</th><th>Match</th></tr>" +
-      sigs.map(s => `<tr><td>${fmtF(s.center_mhz)}</td><td>${s.peak_dbm}</td>` +
+      sigs.map(s => `<tr><td><a href="#" class="freqlink" data-center="${s.center_mhz}" ` +
+        `data-label="${esc(s.matched_label || s.classification || "signal")}">${fmtF(s.center_mhz)}</a></td>` +
+        `<td>${s.peak_dbm}</td>` +
         `<td>${((s.persistence || 0) * 100).toFixed(0)}%</td><td>${s.phase}</td><td>${s.module}</td>` +
         `<td>${esc(s.room)}</td><td><span class="pill ${s.classification}">${s.classification}</span></td>` +
         `<td>${esc(s.matched_label)}</td></tr>`).join("");
@@ -1418,7 +1486,9 @@ async function loadWiki() {
         const sight = c.sightings ?
           `${c.sightings}× / ${c.sessions_seen} session${c.sessions_seen > 1 ? "s" : ""}` : "—";
         return `<tr onclick="wikiOpen(${c.id})" style="cursor:pointer">` +
-          `<td>${fmtF(c.center_mhz)}</td><td>${esc(c.label)}</td><td>${esc(c.category)}</td>` +
+          `<td><a href="#" class="freqlink" title="tune &amp; listen" ` +
+          `data-center="${c.center_mhz}" data-label="${esc(c.label || c.category || "signal")}">▶</a> ` +
+          `${fmtF(c.center_mhz)}</td><td>${esc(c.label)}</td><td>${esc(c.category)}</td>` +
           `<td>${sight}</td>` +
           `<td><span class="pill ${cls}">${esc(c.status).toUpperCase()}</span></td>` +
           `<td>${new Date(c.captured_utc * 1000).toLocaleDateString()}</td></tr>`;
