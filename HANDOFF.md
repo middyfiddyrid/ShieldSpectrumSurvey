@@ -4,28 +4,101 @@ Continuation brief for a fresh Fable/Claude Code session. Read this first, then 
 
 ---
 
-# ▶ BACKLOG — operator vision, 2026-06-25 voice dump: GATED SEGMENT-TRIAGE WORKFLOW (NOT built yet)
+# ⚡⚡ NEXT-SESSION HANDOFF — 2026-06-25 (late) — signal-hunt shipped; BIG triage/monitor vision to build (READ FIRST)
 
-Matt's bigger picture for the bug sweep — the point of demod is to triage the
-ILLEGITIMATE (non-baseline) signals, not the legit ones. Two sweep modes:
-1. **AUTOPILOT** — the current behavior: auto-log every detection + prioritize by
-   anomaly score, hands-off.
-2. **MANUAL (gated triage)** — segment by segment: as the sweep enters a segment,
-   mark every detected signal; the operator must make a DECISION on each one
-   (cleared / suspect / flag / needs-client-input, with notes) and the sweep does
-   NOT advance to the next segment until every signal in the current one is
-   triaged. Per signal the operator can: query our DB/Signal-Wiki (identify),
-   and MONITOR it — "real demod": actually determine WHAT it is (modulation class
-   + sigidwiki match + protocol decode like POCSAG), not just play audio.
-"A monitor is different than a spectrum analyzer" — he wants a true receiver view
-(lock one signal, demod/decode/ID it live), distinct from the power-vs-freq analyzer.
-NOTE we already have the ID pieces (identify.py modulation class + sigidwiki, POCSAG
-decode, steerable click-to-tune demod commit ffa1275) — the build fuses them into a
-per-signal ANALYZE + the gated segment walk. Confirm structure with Matt before building.
+Context ran out mid-build. This is the continuation prompt. The core idea: **demod/triage
+exists to work the ILLEGITIMATE / unknown signals, NOT the legit baseline ones.**
+
+## Branch / state
+- ALL of today's work is on branch **`pocsag-decoder`** (off main). NOT merged, NOT pushed.
+  Bench-test, then merge the whole branch to main when Matt's happy.
+- **101 unit tests green** (`python -m unittest discover -s tests`). Run from the repo root.
+- Matt launches from the desktop; the app reads the working tree + `config.yaml` directly.
+
+## SHIPPED & COMMITTED today (newest first)
+- `ffa1275` **steerable demod** — `demodulate(offset_hz)` digital down-conversion; POST
+  `/api/listen/offset` (live, no re-tune); click the live analyzer/waterfall → demod THAT signal;
+  yellow cursor marks it. [Matt: "works except it doesn't work" — see OPEN Q1.]
+- `60856d7` **adjustable segment size** — `segment_width_mhz` on `/api/plan` + `/api/sweep/start`
+  via a `_WidthCfg` shim; "Seg MHz" input on the scan card.
+- `eea245c` **manual scan → first non-baseline signal + ◂/▸/AUTO + LIVE** — GET
+  `/api/scan/unknowns` (UNVERIFIED/caution interior signals, de-duped); `/api/state.live`; SIGNAL
+  HUNT card in Results; `huntStep()`/AUTO timer; `#insp-live-badge`.
+- earlier today: listen **waterfall rework** (DPR-sharp canvas + offscreen scroll buffer + stable
+  EMA color), **POCSAG** decoder, **SSB/CW**, **Web Audio** listen, **listen-on-all-signals**,
+  **libiio bundled** in `native/libiio/`. (0.15 s latency cut exists in code but config.yaml is
+  back to 0.5 s — Matt's choice, leave it.)
+
+## VERIFIED vs NOT
+- Verified headless: every endpoint/DSP shape + 101 tests.
+- **NEEDS BENCH (Matt, real Pluto + browser):** waterfall smoothness/sharpness, audio holding,
+  JUMP-TO-FIRST-UNKNOWN + ◂/▸/AUTO, the steerable click-demod, POCSAG on a real pager.
+
+## THE BIG BUILD — operator vision (2026-06-25 voice dumps)
+
+### A. Two bug-sweep modes
+- **AUTOPILOT** — current behavior: auto-log every detection + prioritize by anomaly score, hands-off.
+- **MANUAL (gated triage)** — segment by segment: as the sweep enters a segment, mark every signal
+  in it; the operator must DECIDE on each (cleared / suspect / flag / ask-client + notes, sometimes
+  a client conversation), and the sweep does **NOT advance to the next segment until every signal
+  is triaged**. A forced, complete per-signal review of the not-already-explained signals.
+
+### B. Click a signal (from the live incoming list) → opens a LIVE MONITOR panel
+- Monitor options: **RECORD, FLAG-for-later, NOTES, decision.**
+- **"Real demod" = a per-signal ANALYZE that says WHAT IT IS**, not just audio: FUSE
+  `identify.py` (modulation class FSK/PSK/AM/FM + occupied BW + FSK shift + symbol rate + SNR, AND
+  the sigidwiki match w/ TSCM note) + protocol decode (POCSAG; add more) + live demod audio + the
+  steerable cursor. "A monitor is different than a spectrum analyzer" → lock ONE signal and
+  receive/decode/ID it live, distinct from the power-vs-freq analyzer.
+- **KEY: the ID capability ALREADY EXISTS** (`identify.py` + `/api/identify` SIGNAL ID card +
+  POCSAG) — it just isn't fused into the demod button (which today only plays audio = the
+  "bullshit demod"). The build is to FUSE + surface it in the monitor/triage panel.
+
+### C. NEW-TO-ENVIRONMENT (novelty) detection
+- A recurring address has many prior sweeps. If a signal is **NEW** (absent from this address's
+  sweep history) → flag it and show **what's DIFFERENT** (new freq / new since date / changed
+  power·BW vs prior sightings). Build on the **Signal Wiki** (`survey/sigcapture.py` — already
+  cross-session: per-emitter sighting counts, timeline, "hiding in a known band" variance flag).
+
+## BUILD APPROACH (next session)
+1. **Design pass (Workflow)** mapping: `survey/sweep/runner.py` (the segment loop — how a sweep
+   walks segments + whether it can PAUSE/RELEASE the radio per segment), `correlation.classify_signal`,
+   `sigcapture.py` (wiki cross-session history = novelty source), `identify.py` + `/api/identify`,
+   the POCSAG `/api/inspect` path, and the listen/monitor stack (`inspectByFreq` + steerable demod +
+   `/api/listen_pcm` + `/api/scan/unknowns`).
+2. **Gated MANUAL loop** needs: a per-signal decision state (new `signals` column e.g.
+   `triage_status` pending/cleared/suspect/flagged/ask-client + `triage_notes`), a segment gate, and
+   AUTOPILOT left unchanged. **RESOLVE FIRST — device contention:** the sweep runs on a worker
+   thread holding `device_lock`; you can't monitor (needs the radio) while a live sweep holds it.
+   Likely answer: triage the **last sweep's stored detections post-hoc** (radio free), OR have the
+   sweep **pause + release** the radio between segments. Confirm with Matt (OPEN Q2).
+3. **Per-signal ANALYZE / monitor panel:** one action = identify + decode + tune the steerable demod
+   + show novelty + decision/notes/record/flag UI. Reuse **RECORD (Phase 4, still UNBUILT — design
+   in the workflow output `w7715t2vn`: `runner.start_recording` worker mirroring `start_directional`,
+   a `recordings` DB table, `/api/record/start` + `/api/recordings` + `/recordings/<f>`, gitignored
+   `recordings/`).
+4. **Novelty:** query the wiki/signals history for this session's address; tag hunt/triage rows
+   "NEW since <date>" / "seen N prior sweeps" + the delta.
+
+## OPEN QUESTIONS for Matt
+1. Steerable demod "works except it doesn't work" — real BUG (clicking doesn't isolate, audio still
+   muddy → sharpen the channel filter; today it's a crude boxcar that aliases far signals), or just
+   "pointless until fused with ANALYZE/monitor"? Clarify.
+2. Gated manual: pause-the-live-sweep-per-segment (radio contention) vs triage-the-last-sweep
+   post-hoc? (Recommend post-hoc, or pause+release.)
+3. RECORD defaults: audio vs IQ, retention (`recordings/` is client-sensitive PII — must purge per
+   engagement).
+
+## STANDING GOTCHAS
+- `config.yaml` is gitignored + holds live secrets (OpenCellID key, ULS path, `pluto:` section) and
+  gets **clobbered by branch switch/merge** — back it up first. (memory: spectrum-survey-config-hazard)
+- Audio works at 0.5 s blocks. libiio is bundled in `native/libiio/`. AD9364 extension is OFF
+  (radio reports 325–3800 MHz — no FM/5.8 GHz until re-flashed).
+- Keep the audio path + `device_lock` + POCSAG intact in any listen/sweep change.
 
 ---
 
-# ⚡ LATEST SESSION HANDOFF — 2026-06-25 — main merge + POCSAG decoder (READ THIS FIRST)
+# SESSION HANDOFF — 2026-06-25 — main merge + POCSAG decoder (earlier today)
 
 Two things this session: (1) the whole `pluto-sdr-source` line was merged into **`main`**
 (`--no-ff`, commit `eb1a176`); (2) **demod #3 — a POCSAG paging decoder — was built** on a new
