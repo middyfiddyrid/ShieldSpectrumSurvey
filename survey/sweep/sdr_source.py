@@ -52,7 +52,14 @@ def _ensure_libiio_on_path(libiio_dir: str = ""):
     else %LOCALAPPDATA%\\libiio\\bin) before importing adi. No-op off Windows."""
     if os.name != "nt":
         return
-    candidates = [libiio_dir] if libiio_dir else []
+    # Prefer DLLs bundled INSIDE the app (native/libiio at the repo root): a GUI/
+    # desktop launch can run on a machine where %LOCALAPPDATA%\libiio\bin isn't
+    # present/visible, but the app's own folder always is.
+    here = os.path.dirname(os.path.abspath(__file__))
+    bundled = os.path.normpath(os.path.join(here, "..", "..", "native", "libiio"))
+    candidates = [bundled]
+    if libiio_dir:
+        candidates.append(libiio_dir)
     local = os.environ.get("LOCALAPPDATA")
     if local:
         candidates.append(os.path.join(local, "libiio", "bin"))
@@ -475,16 +482,17 @@ class PlutoSource(AD936xSource):
         except (TypeError, OSError) as e:
             # native libiio.dll couldn't be located/loaded (the classic
             # "LoadLibrary() argument 1 must be str, not None" when find_library
-            # returns None). Report exactly what we tried so it's actionable.
+            # returns None). Report the bundled dir so it's actionable.
             import ctypes.util
-            la = os.environ.get("LOCALAPPDATA", "")
-            guess = os.path.join(la, "libiio", "bin") if la else "(no LOCALAPPDATA)"
+            here = os.path.dirname(os.path.abspath(__file__))
+            bundled = os.path.normpath(os.path.join(here, "..", "..", "native", "libiio"))
             raise DeviceError(
-                f"native libiio runtime not loadable ({e}). Looked for libiio.dll "
-                f"in {guess} (exists={os.path.isdir(guess) if la else False}); "
-                f"find_library('iio')={ctypes.util.find_library('iio')!r}. Fix: make "
-                f"sure %LOCALAPPDATA%\\libiio\\bin (containing libiio.dll) is on PATH, "
-                f"or launch the app from a shell that prepends it.") from e
+                f"native libiio runtime not loadable ({e}). App-bundled dir {bundled}: "
+                f"exists={os.path.isdir(bundled)}, has libiio.dll="
+                f"{os.path.isfile(os.path.join(bundled, 'libiio.dll'))}; "
+                f"find_library('iio')={ctypes.util.find_library('iio')!r}. The app ships "
+                f"libiio in native/libiio — if exists=False, that folder didn't reach this "
+                f"machine; if exists=True it should load on restart.") from e
         # A fast reconnect can race the previous libiio context's release (the
         # radio reports busy for a beat), so retry a few times before giving up.
         last = None
