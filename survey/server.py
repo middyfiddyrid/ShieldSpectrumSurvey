@@ -34,6 +34,24 @@ def _dedupe_emitters(rows, tol_mhz=0.25):
     return kept
 
 
+class _WidthCfg:
+    """Wraps a Config so cfg.get('sweep','segment_width_mhz') returns a per-scan
+    override (one scalar applied to subghz/mid/high), leaving every other key
+    untouched. Lets a segment-size override flow through the planner (incl. the
+    _ProxyCfg it builds) without threading a kwarg through every plan function."""
+    def __init__(self, real, width_mhz):
+        self._real = real
+        self._w = {"subghz": width_mhz, "mid": width_mhz, "high": width_mhz}
+
+    def get(self, *keys, default=None):
+        if keys[:2] == ("sweep", "segment_width_mhz"):
+            return self._w
+        return self._real.get(*keys, default=default)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
 class AppState:
     def __init__(self, db, cfg):
         self.db = db
@@ -840,22 +858,31 @@ def create_app(db, cfg, demo=False) -> Flask:
 
     # ---------- planning & sweeping ----------
 
-    def _plans(profile, custom_minutes, scan_mode="full"):
+    def _plans(profile, custom_minutes, scan_mode="full", seg_width=None):
         # auto-(re)connects and lazily reads any module range the connect-time
         # identity pass failed to capture; raises DeviceError if truly absent
         modules = st.controller.module_ranges()
         # a "bug" scan restricts coverage to the known surveillance bands; with
         # the same time budget that means far deeper dwell per band
         targets = bug_band_ranges() if scan_mode == "bug" else None
-        return plan_full_sweep(modules, cfg, profile, custom_minutes, targets=targets)
+        pcfg = cfg
+        if seg_width:                          # per-scan segment-width override
+            try:
+                w = float(seg_width)
+                if w >= 2.0:                   # planner floors at 2.0 anyway
+                    pcfg = _WidthCfg(cfg, w)
+            except (TypeError, ValueError):
+                pass
+        return plan_full_sweep(modules, pcfg, profile, custom_minutes, targets=targets)
 
     @app.get("/api/plan")
     def plan_preview():
         profile = request.args.get("profile", "standard")
         minutes = float(request.args.get("custom_minutes", 45))
         scan_mode = request.args.get("scan_mode", "full")
+        seg = request.args.get("segment_width_mhz")
         try:
-            plans = _plans(profile, minutes, scan_mode)
+            plans = _plans(profile, minutes, scan_mode, seg)
         except Exception as e:  # noqa: BLE001 - device absent/dead included
             return err(e)
         return jsonify({side: p.to_dict() for side, p in plans.items()})
@@ -872,8 +899,9 @@ def create_app(db, cfg, demo=False) -> Flask:
         profile = body.get("profile", "standard")
         minutes = float(body.get("custom_minutes") or 45)
         scan_mode = body.get("scan_mode", "full")        # full | bug
+        seg = body.get("segment_width_mhz")               # optional segment-width override
         try:
-            plans = _plans(profile, minutes, scan_mode)
+            plans = _plans(profile, minutes, scan_mode, seg)
             plan = plans.get(module)
             if plan is None or not plan.segments:
                 return err(f"no plan for module {module}")

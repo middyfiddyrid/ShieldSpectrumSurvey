@@ -1245,12 +1245,18 @@ window.addEventListener("resize", () => {
 });
 
 /* ---------- ETA previews ---------- */
+function segWidth() {                       // global scan segment-width override (MHz) or null
+  const el = $("scan-seg-width");
+  const v = el && parseFloat(el.value);
+  return (v && v >= 2) ? v : null;
+}
 async function updateEta(profileSel, minutesInput, etaEl, scanMode) {
   const profile = profileSel.value;
   minutesInput.style.display = profile === "custom" ? "" : "none";
   try {
+    const sw = segWidth();
     const plans = await api(`/api/plan?profile=${profile}&custom_minutes=${minutesInput.value || 45}` +
-      `&scan_mode=${scanMode || "full"}`);
+      `&scan_mode=${scanMode || "full"}` + (sw ? `&segment_width_mhz=${sw}` : ""));
     const totalMin = Object.values(plans).reduce((a, p) => a + p.estimated_minutes, 0);
     const segs = Object.values(plans).reduce((a, p) => a + p.segment_count, 0);
     const rbw = Object.values(plans).flatMap(p => p.segments.map(s =>
@@ -1259,13 +1265,17 @@ async function updateEta(profileSel, minutesInput, etaEl, scanMode) {
       `RBW ${Math.min(...rbw).toFixed(0)}–${Math.max(...rbw).toFixed(0)} kHz/bin`;
   } catch (e) { etaEl.textContent = e.message; }
 }
-[["ambient-profile", "ambient-minutes", "ambient-eta", "full"],
+const ETA_CARDS = [["ambient-profile", "ambient-minutes", "ambient-eta", "full"],
  ["profile-L", "minutes-L", "eta-L", "full"], ["profile-R", "minutes-R", "eta-R", "full"],
- ["bug-profile", "bug-minutes", "bug-eta", "bug"]]
-  .forEach(([p, m, e, mode]) => {
-    $(p).onchange = () => updateEta($(p), $(m), $(e), mode);
-    $(m).oninput = () => updateEta($(p), $(m), $(e), mode);
-  });
+ ["bug-profile", "bug-minutes", "bug-eta", "bug"]];
+ETA_CARDS.forEach(([p, m, e, mode]) => {
+  if (!$(p)) return;
+  $(p).onchange = () => updateEta($(p), $(m), $(e), mode);
+  $(m).oninput = () => updateEta($(p), $(m), $(e), mode);
+});
+// the segment-width override is global -> refresh every card's ETA when it changes
+if ($("scan-seg-width")) $("scan-seg-width").oninput = () =>
+  ETA_CARDS.forEach(([p, m, e, mode]) => { if ($(p)) updateEta($(p), $(m), $(e), mode); });
 
 /* ---------- antenna prompt + sweep sequences ---------- */
 function prompt2(msg, sub) {
@@ -1280,8 +1290,11 @@ function prompt2(msg, sub) {
 
 async function startPhase(phase, module, room, profile, minutes, scanMode) {
   App.overlayHidden = false;
-  await api("/api/sweep/start", { phase, module, room, profile,
-    custom_minutes: minutes, scan_mode: scanMode || "full" });
+  const body = { phase, module, room, profile,
+    custom_minutes: minutes, scan_mode: scanMode || "full" };
+  const sw = segWidth();
+  if (sw) body.segment_width_mhz = sw;       // optional per-scan segment width
+  await api("/api/sweep/start", body);
 }
 
 /* sequence = remaining steps after the current sweep finishes */

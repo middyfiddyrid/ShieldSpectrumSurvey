@@ -355,6 +355,8 @@ body.demo #card-casefiles { display:none !important; }
         <option value="custom">Custom…</option>
       </select>
       <input class="small" id="bug-minutes" value="45" title="custom minutes" style="display:none">
+      <label title="scan segment width (MHz) — applies to every sweep. Smaller = finer resolution but more segments & longer scan. Blank = auto.">Seg MHz</label>
+      <input class="small" id="scan-seg-width" type="number" min="2" step="1" placeholder="auto" style="width:62px">
       <span class="note" id="bug-eta"></span>
     </div>
     <div class="row">
