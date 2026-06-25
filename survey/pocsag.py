@@ -37,6 +37,8 @@ CODEWORD_BITS = 32
 BATCH_CODEWORDS = 16        # payload codewords after the FSC (8 frames x 2)
 FRAME_COUNT = 8
 SYNC_MAX_ERRS = 2           # Hamming tolerance for an FSC / FSC_INV lock
+MAX_LOCK_TRIES = 24         # candidate FSC locks to try per baud (real captures may
+                            #   start mid-batch / behind a false lock — don't trust locks[0])
 DEVIATION_HZ = 4500.0       # typical POCSAG peak deviation (~9 kHz tone separation)
 ALPHA_BITS = 7
 # numeric nibble -> glyph, applied AFTER reversing each 4-bit group (vendor-variable spares)
@@ -325,15 +327,28 @@ def decode_pocsag(iq, fs: float, bauds=BAUDS, correct: bool = True) -> dict:
         locks = find_sync(bits, SYNC_MAX_ERRS)
         if not locks:
             continue
-        sync_index, inverted = locks[0]
-        messages, stats = decode_codewords(bits, sync_index, inverted, correct=correct)
-        score = (len(messages), stats["codewords_ok"] + stats["codewords_corrected"],
-                 len(locks))
-        if best_score is None or score > best_score:
-            best_score = score
-            best = {"baud": baud, "inverted": inverted, "sync_count": len(locks),
-                    "preamble": _has_preamble(bits, sync_index), "messages": messages,
-                    "stats": stats, "note": ""}
+        # Don't commit to locks[0]: a leading noise burst can produce an early
+        # near-FSC match, and a real capture may begin mid-batch or with its first
+        # FSC faded beyond tolerance, so the true batch origin can be a later lock.
+        # Try candidate locks (bounded) and keep whichever decodes best.
+        for sync_index, inverted in locks[:MAX_LOCK_TRIES]:
+            messages, stats = decode_codewords(bits, sync_index, inverted, correct=correct)
+            # Rank CLEAN (uncorrected, ne==0) codewords first. ~half of random 32-bit
+            # words are within 2 bits of a valid codeword, so a garbage batch behind a
+            # false FSC lock is almost all 2-bit "corrections" -> low codewords_ok, and
+            # can't outrank a real batch (whose IDLE fill + address are ne==0).
+            score = (stats["codewords_ok"], len(messages),
+                     stats["codewords_ok"] + stats["codewords_corrected"])
+            if best_score is None or score > best_score:
+                best_score = score
+                best = {"baud": baud, "inverted": inverted, "sync_count": len(locks),
+                        "preamble": _has_preamble(bits, sync_index), "messages": messages,
+                        "stats": stats, "note": ""}
+    # Confidence gate: a real transmission yields several perfectly-clean codewords;
+    # a batch reconstructed ENTIRELY from 2-bit corrections is garbage behind a false
+    # lock -> reject it rather than surface hallucinated pages (honesty over recall).
+    if best is not None and best["stats"]["codewords_ok"] < 2:
+        best = None
     return best if best is not None else _empty_result("no POCSAG sync found")
 
 
@@ -417,16 +432,22 @@ def encode_pocsag(messages, baud: int, fs: float, deviation: float = DEVIATION_H
     for _ in range(16):                          # postamble: guards the last codeword
         bits.append(pb)                          #   against the discriminator's 1-sample
         pb ^= 1                                  #   loss + integer symbol-count floor
-    bit_arr = np.array(bits, dtype=np.uint8)
+    return _bits_to_iq(np.array(bits, dtype=np.uint8), baud, fs,
+                       deviation=deviation, invert=invert, noise=noise, seed=seed)
+
+
+def _bits_to_iq(bit_arr, baud: int, fs: float, deviation: float = DEVIATION_HZ,
+                invert: bool = False, noise: float = 0.0, seed: int = 0):
+    """NRZ bits -> 2-FSK complex IQ at fs. bit 0 = +deviation, bit 1 = -deviation
+    (so the decoder's 'sample<0 -> 1' slice round-trips with invert=False)."""
+    bit_arr = np.asarray(bit_arr, dtype=np.uint8).copy()
     if invert:
         bit_arr ^= 1
-
     sps = fs / float(baud)
     nsamp = int(round(bit_arr.size * sps))
     sym = bit_arr[np.clip((np.arange(nsamp) / sps).astype(int), 0, bit_arr.size - 1)]
     freq = np.where(sym < 1, deviation, -deviation).astype(np.float64)
-    phase = 2 * np.pi * np.cumsum(freq) / fs
-    iq = np.exp(1j * phase).astype(np.complex64)
+    iq = np.exp(1j * 2 * np.pi * np.cumsum(freq) / fs).astype(np.complex64)
     if noise > 0.0:
         rng = np.random.default_rng(seed)
         iq = iq + (noise * (rng.standard_normal(iq.size) +

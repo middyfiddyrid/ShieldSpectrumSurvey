@@ -13,8 +13,8 @@ import unittest
 import numpy as np
 
 from survey import pocsag
-from survey.pocsag import (FSC, FSC_INV, IDLE, BCH_POLY, bch_check, encode_codeword,
-                           encode_pocsag, decode_pocsag)
+from survey.pocsag import (FSC, FSC_INV, IDLE, BCH_POLY, DEVIATION_HZ, bch_check,
+                           encode_codeword, encode_pocsag, decode_pocsag, _bits_to_iq)
 
 FS = 38400.0          # synth rate: dec=1, integer sps (75/32/16)
 PRE = 64              # short preamble keeps the synth arrays small
@@ -157,6 +157,23 @@ class TestDecode(unittest.TestCase):
         self.assertEqual(got[111111]["alpha"], "FIRST")
         self.assertEqual(got[222222]["numeric"], "456")
 
+    def test_leading_false_lock(self):
+        # A decoy FSC + a garbage batch BEFORE the real transmission must not block
+        # decode: the true batch origin is a LATER lock, not locks[0]. (regression
+        # for the lock-iteration fix)
+        rng = np.random.default_rng(7)
+        decoy = [1, 0] * 32                                # short preamble
+        for k in range(31, -1, -1):
+            decoy.append((FSC >> k) & 1)                   # an exact, real FSC
+        decoy += list(rng.integers(0, 2, 16 * 32))         # 16 garbage codewords
+        decoy_iq = _bits_to_iq(np.array(decoy, dtype=np.uint8), 1200, FS, DEVIATION_HZ)
+        real = encode_pocsag([{"ric": 424242, "mode": "alpha", "text": "AFTER DECOY"}],
+                             1200, FS, preamble_bits=PRE)
+        iq = np.concatenate([decoy_iq, real])
+        r = decode_pocsag(iq, FS)
+        self.assertTrue(r["sync_count"] >= 2)              # decoy + real FSCs both seen
+        self.assertEqual(_only(r)["alpha"], "AFTER DECOY")
+
     def test_tone_only_page(self):
         iq = encode_pocsag([{"ric": 777777, "mode": "tone", "text": ""}],
                            1200, FS, preamble_bits=PRE)
@@ -194,6 +211,37 @@ class TestDecode(unittest.TestCase):
                            512, FS, preamble_bits=PRE, noise=0.05, seed=3)
         m = _only(decode_pocsag(iq, FS))
         self.assertEqual(m["alpha"], "ERRORS OK")
+
+
+class TestGoldenVectors(unittest.TestCase):
+    """External anchors NOT produced by encode_pocsag — these pin spec conformance
+    (the round-trip tests only prove encoder<->decoder self-consistency)."""
+
+    def test_fsc_and_idle_are_valid_codewords(self):
+        # The real standard FSC/IDLE are themselves valid BCH(31,21)+parity
+        # codewords, which independently pins BCH_POLY=0x769 and the parity rule.
+        for word in (FSC, IDLE):
+            ok, corrected, ne = bch_check(word)
+            self.assertTrue(ok); self.assertEqual(ne, 0); self.assertEqual(corrected, word)
+
+    def test_numeric_glyph_from_raw_bits(self):
+        # digit 5 = 0b0101 sent LSB-first -> [1,0,1,0]; digit 1 = 0b0001 -> [1,0,0,0]
+        self.assertEqual(pocsag.numeric_decode([1, 0, 1, 0]), "5")
+        self.assertEqual(pocsag.numeric_decode([1, 0, 0, 0]), "1")
+        self.assertEqual(pocsag.numeric_decode([0, 0, 1, 1]), "")   # 0xC space -> trimmed
+
+    def test_alpha_char_from_raw_bits(self):
+        # 'A' = 0x41 = 1000001, LSB-first -> [1,0,0,0,0,0,1]
+        self.assertEqual(pocsag.alpha_decode([1, 0, 0, 0, 0, 0, 1]), "A")
+        # 'z' = 0x7A = 1111010, LSB-first -> [0,1,0,1,1,1,1]
+        self.assertEqual(pocsag.alpha_decode([0, 1, 0, 1, 1, 1, 1]), "z")
+
+    def test_codeword_field_layout(self):
+        # hand-built address codeword (no encoder for the field extraction)
+        cw = encode_codeword(0, (0x1ABCD << 2) | 0b10)   # addr18=0x1ABCD, function=2
+        self.assertEqual((cw >> 31) & 1, 0)              # address flag
+        self.assertEqual((cw >> 13) & 0x3FFFF, 0x1ABCD)  # 18 address bits
+        self.assertEqual((cw >> 11) & 0x3, 0b10)         # 2 function bits
 
 
 class TestGate(unittest.TestCase):

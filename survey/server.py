@@ -611,8 +611,10 @@ def create_app(db, cfg, demo=False) -> Flask:
                             f"{lo_mhz:.0f}-{hi_mhz:.0f} MHz range — apply the AD9364 extension to reach it"})
         try:
             fs = float(cfg.get("pluto", "listen_sample_rate", default=2_400_000))
-            # POCSAG decode needs a full batch (~1 s at 512 baud) -> longer capture
-            secs = (float(cfg.get("pluto", "pocsag_seconds", default=2.0))
+            # POCSAG needs preamble+batch (~2.2 s at 512 baud) plus alignment slack
+            # -> a longer one-shot capture (default 3 s; baud-agnostic, the decoder
+            # tries all bauds on the same buffer)
+            secs = (float(cfg.get("pluto", "pocsag_seconds", default=3.0))
                     if mode == "pocsag"
                     else float(cfg.get("pluto", "listen_seconds", default=0.5)))
             n = int(fs * secs)
