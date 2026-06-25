@@ -76,7 +76,9 @@ DEFAULTS = {
         # continuous audio stream: lower rate so USB2 sustains REAL-TIME (smooth);
         # 600 kHz still covers WFM (~200 kHz) and NFM channels.
         "stream_sample_rate": 2_400_000,
-        "listen_block_seconds": 0.5,       # bigger blocks amortize the per-buffer refill gap
+        "listen_block_seconds": 0.15,      # spectrum latency lever: smaller -> more
+                                           # live (faster scroll); bigger -> smoother
+                                           # audio if the USB capture underruns
         # live analyzer + scrolling waterfall (the poll-tuned /api/listen_spectrum
         # path). Each audio block emits listen_wf_rows_per_block contiguous STFT
         # rows so the waterfall scrolls smoothly; the client owns the scroll

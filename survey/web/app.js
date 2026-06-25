@@ -1033,7 +1033,7 @@ function startSpectrumPoll() {
     $("insp-msg").textContent = "● live";
     if (s.analyzer) drawAnalyzer($("insp-analyzer"), s.analyzer);
     if (s.waterfall) drawWaterfall($("insp-waterfall"), s.waterfall);
-  }, 150);
+  }, 100);
 }
 
 function stopSpectrumPoll() {
