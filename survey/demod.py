@@ -67,13 +67,19 @@ def _lowpass(x: np.ndarray, fs: float, cutoff: float) -> np.ndarray:
     return np.convolve(x, kernel, mode="same")
 
 
-def demodulate(iq, fs: float, mode: str = "nfm") -> tuple[np.ndarray, int]:
+def demodulate(iq, fs: float, mode: str = "nfm", offset_hz: float = 0.0) -> tuple[np.ndarray, int]:
     """IQ -> (int16 PCM mono, sample_rate).
-    mode: 'wfm' | 'nfm' | 'am' | 'usb' | 'lsb' | 'cw'."""
+    mode: 'wfm' | 'nfm' | 'am' | 'usb' | 'lsb' | 'cw'.
+    offset_hz: a movable demod tuner WITHIN the captured band — shifts the signal
+    at (center + offset_hz) down to baseband so the per-mode channel filter below
+    isolates THAT one signal, not the LO-spike-corrupted band center. 0 = center."""
     iq = np.asarray(iq, dtype=np.complex64)
     if iq.size < 16:
         raise ValueError("capture too short to demodulate")
     mode = (mode or "nfm").lower()
+    if offset_hz:
+        t = np.arange(iq.size, dtype=np.float64) / fs
+        iq = (iq * np.exp(-1j * 2 * np.pi * offset_hz * t)).astype(np.complex64)
 
     if mode == "am":
         audio = np.abs(iq).astype(np.float64)

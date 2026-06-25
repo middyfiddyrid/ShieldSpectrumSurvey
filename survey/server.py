@@ -744,12 +744,14 @@ def create_app(db, cfg, demo=False) -> Flask:
         with st.controller.device_lock:       # wait for the previous user of the radio to release
             st.controller.listen_stop.clear()
             st.controller.listening = True
+            st.controller.listen_offset_hz = 0.0   # new tune -> demod band center until clicked
             st.controller.listen_spectrum = None
             stop = st.controller.listen_stop
             try:
                 for iq in dev.stream_iq(center_mhz * 1e6, fs, n_block, stop):
                     try:
-                        pcm, arate = demodulate(iq, fs, mode)
+                        off = float(getattr(st.controller, "listen_offset_hz", 0.0) or 0.0)
+                        pcm, arate = demodulate(iq, fs, mode, off)
                     except Exception:  # noqa: BLE001
                         continue
                     yield pcm, arate
@@ -855,6 +857,22 @@ def create_app(db, cfg, demo=False) -> Flask:
         """Latest live analyzer + waterfall produced by the active audio stream
         (polled by the inspect panel for moving visuals)."""
         return jsonify(st.controller.listen_spectrum or {"center_mhz": None})
+
+    @app.post("/api/listen/offset")
+    def listen_offset():
+        """Move the demod tuner WITHIN the live band, with no re-tune: the running
+        audio stream demodulates (center + offset_hz) on its next block. Lets the
+        operator click a signal in the live spectrum and hear THAT one. Clamped to
+        the captured bandwidth so it can't land outside the visible band."""
+        body = request.get_json(silent=True) or {}
+        try:
+            off = float(body.get("offset_hz", 0.0))
+        except (TypeError, ValueError):
+            return err("offset_hz must be a number")
+        fs = float(cfg.get("pluto", "stream_sample_rate", default=2_400_000))
+        lim = fs * 0.48                        # stay inside the captured band edges
+        st.controller.listen_offset_hz = max(-lim, min(lim, off))
+        return jsonify({"offset_hz": st.controller.listen_offset_hz})
 
     # ---------- planning & sweeping ----------
 

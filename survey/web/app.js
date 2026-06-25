@@ -40,6 +40,7 @@ const App = {
   seq: null,          // active multi-step sweep sequence
   overlayHidden: false,
   hunt: [], huntIdx: 0, autoTimer: null,   // signal-hunt list + ◂/▸/AUTO stepping
+  demodMhz: null, bandLo: null, bandHi: null,   // movable demod tuner within the band
 };
 
 /* ---------- navigation ---------- */
@@ -913,6 +914,7 @@ function clearInspectCanvases() {
 function inspectByFreq(center, label, mode) {
   const tuneId = (App.tuneId = (App.tuneId || 0) + 1);
   App.inspCenter = center; App.inspLabel = label;   // for mode <select> re-tune
+  App.demodMhz = center;                             // demod tuner starts at band center (offset 0)
   $("inspect-panel").style.display = "";
   $("insp-title").textContent = `${fmtF(center)} · ${label || ""}`;   // fmtF already carries the unit
   $("inspect-panel").scrollIntoView({ behavior: "smooth", block: "center" });
@@ -1124,6 +1126,7 @@ function drawAnalyzer(cv, a) {
   ctx.clearRect(0, 0, W, H);
   const p = a.power_dbm, fr = a.freqs_mhz, n = p.length;
   if (!n) return;
+  App.bandLo = fr[0]; App.bandHi = fr[n - 1];        // for click-to-tune mapping
   let lo = Math.min(...p), hi = Math.max(...p);
   if (hi - lo < 10) hi = lo + 10;
   ctx.strokeStyle = "#00c8ff"; ctx.lineWidth = 1; ctx.beginPath();
@@ -1133,11 +1136,36 @@ function drawAnalyzer(cv, a) {
     i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
   }
   ctx.stroke();
+  drawDemodMarker(ctx, W, H, fr[0], fr[n - 1]);
   ctx.fillStyle = "#6b7b90"; ctx.font = "10px monospace";
   ctx.fillText(fr[0].toFixed(3) + " MHz", 3, H - 3);
   ctx.fillText(fr[n - 1].toFixed(3), W - 56, H - 3);
   ctx.fillText(hi.toFixed(0) + " dBm", 3, 11);
 }
+
+// Vertical cursor at the current demod tuner (App.demodMhz) within [f0,f1].
+function drawDemodMarker(ctx, W, H, f0, f1) {
+  if (App.demodMhz == null || f1 === f0) return;
+  const mx = W * (App.demodMhz - f0) / (f1 - f0);
+  if (mx < 0 || mx > W) return;
+  ctx.strokeStyle = "#ffd24a"; ctx.lineWidth = 1; ctx.beginPath();
+  ctx.moveTo(Math.round(mx) + 0.5, 0); ctx.lineTo(Math.round(mx) + 0.5, H); ctx.stroke();
+}
+
+// Click the live spectrum/waterfall to tune the demodulator to THAT signal — a
+// digital shift within the captured band, no re-tune (POST /api/listen/offset).
+function tuneDemodFromClick(e, cv) {
+  if (App.inspCenter == null || App.bandLo == null) return;
+  const w = cv.clientWidth || cv.getBoundingClientRect().width;
+  if (!w) return;
+  const frac = Math.max(0, Math.min(1, e.offsetX / w));
+  const freq = App.bandLo + frac * (App.bandHi - App.bandLo);
+  App.demodMhz = freq;
+  api("/api/listen/offset", { offset_hz: (freq - App.inspCenter) * 1e6 }).catch(() => {});
+  $("insp-msg").textContent = "● tuned " + fmtF(freq);
+}
+if ($("insp-analyzer")) $("insp-analyzer").addEventListener("click", (e) => tuneDemodFromClick(e, $("insp-analyzer")));
+if ($("insp-waterfall")) $("insp-waterfall").addEventListener("click", (e) => tuneDemodFromClick(e, $("insp-waterfall")));
 
 // 256-entry RGB heat LUT (same curve as the old heat()), for fast per-texel paint.
 const HEAT = (() => {
@@ -1205,6 +1233,8 @@ function drawWaterfall(cv, wf) {
   }
   ctx.clearRect(0, 0, W, H);
   ctx.drawImage(w.off, 0, 0, cols, WF_ROWS, 0, 0, W, H);
+  if (wf.freqs_mhz && wf.freqs_mhz.length > 1)
+    drawDemodMarker(ctx, W, H, wf.freqs_mhz[0], wf.freqs_mhz[wf.freqs_mhz.length - 1]);
 }
 
 // Next/Prev only step the baseline list (hidden in any other context).
