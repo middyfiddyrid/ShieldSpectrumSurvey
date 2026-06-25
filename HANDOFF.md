@@ -4,6 +4,27 @@ Continuation brief for a fresh Fable/Claude Code session. Read this first, then 
 
 ---
 
+# ▶ BACKLOG — operator vision, 2026-06-25 voice dump: GATED SEGMENT-TRIAGE WORKFLOW (NOT built yet)
+
+Matt's bigger picture for the bug sweep — the point of demod is to triage the
+ILLEGITIMATE (non-baseline) signals, not the legit ones. Two sweep modes:
+1. **AUTOPILOT** — the current behavior: auto-log every detection + prioritize by
+   anomaly score, hands-off.
+2. **MANUAL (gated triage)** — segment by segment: as the sweep enters a segment,
+   mark every detected signal; the operator must make a DECISION on each one
+   (cleared / suspect / flag / needs-client-input, with notes) and the sweep does
+   NOT advance to the next segment until every signal in the current one is
+   triaged. Per signal the operator can: query our DB/Signal-Wiki (identify),
+   and MONITOR it — "real demod": actually determine WHAT it is (modulation class
+   + sigidwiki match + protocol decode like POCSAG), not just play audio.
+"A monitor is different than a spectrum analyzer" — he wants a true receiver view
+(lock one signal, demod/decode/ID it live), distinct from the power-vs-freq analyzer.
+NOTE we already have the ID pieces (identify.py modulation class + sigidwiki, POCSAG
+decode, steerable click-to-tune demod commit ffa1275) — the build fuses them into a
+per-signal ANALYZE + the gated segment walk. Confirm structure with Matt before building.
+
+---
+
 # ⚡ LATEST SESSION HANDOFF — 2026-06-25 — main merge + POCSAG decoder (READ THIS FIRST)
 
 Two things this session: (1) the whole `pluto-sdr-source` line was merged into **`main`**
