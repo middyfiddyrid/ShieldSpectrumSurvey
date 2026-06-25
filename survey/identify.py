@@ -287,3 +287,25 @@ def spectrogram(iq, fs: float, n_time: int = 120, nperseg: int = 256) -> dict:
             "db": np.round(grid, 1).tolist(),
             "vmin": float(np.percentile(grid, 5)),
             "vmax": float(np.percentile(grid, 99))}
+
+
+def waterfall_stft(iq, fs: float, nperseg: int = 512, rows: int = 8) -> dict:
+    """Fast contiguous waterfall for the live listen view: `rows` STFT slices that
+    SPAN the whole capture (continuous time axis, not isolated snapshots), via a
+    single batched FFT over a sliding window. Each audio block yields a smooth
+    multi-row scroll. Returns db as an ndarray (rows x nperseg). Falls back to the
+    spectrogram() loop on numpy < 1.20."""
+    iq = np.asarray(iq, dtype=np.complex64)
+    nperseg = min(nperseg, iq.size)
+    fr = np.fft.fftshift(np.fft.fftfreq(nperseg, d=1.0 / fs))
+    try:
+        swv = np.lib.stride_tricks.sliding_window_view
+        hop = max(1, (iq.size - nperseg) // max(rows - 1, 1))
+        frames = swv(iq, nperseg)[::hop][:rows]
+        win = np.hanning(nperseg).astype(np.float64)
+        sp = np.fft.fftshift(np.fft.fft(frames * win, axis=1), axes=1)
+        db = 10.0 * np.log10(np.abs(sp) ** 2 + 1e-20)
+        return {"freqs_hz": fr.tolist(), "db": np.round(db, 1)}
+    except (AttributeError, ValueError):       # numpy < 1.20 or degenerate size
+        spec = spectrogram(iq, fs, n_time=rows, nperseg=nperseg)
+        return {"freqs_hz": spec["freqs_hz"], "db": np.asarray(spec["db"])}

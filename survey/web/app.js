@@ -866,9 +866,26 @@ function inRangeClient(center) {
   return { ok: true };
 }
 
+// Size a canvas backing store to its displayed CSS pixels x devicePixelRatio so
+// text + waterfall are pin-sharp (the store was a fixed 660px stretched by CSS).
+// Resizes ONLY when dims change — assigning cv.width CLEARS the canvas, which
+// would wipe the visible trace every frame. Returns {ctx, W, H} in CSS pixels.
+function fitCanvas(cv) {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  const r = cv.getBoundingClientRect();
+  const cssW = Math.max(1, Math.round(r.width)), cssH = Math.max(1, Math.round(r.height));
+  const needW = Math.round(cssW * dpr), needH = Math.round(cssH * dpr);
+  if (cv.width !== needW || cv.height !== needH) { cv.width = needW; cv.height = needH; }
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);    // all draw math stays in CSS px
+  return { ctx, W: cssW, H: cssH };
+}
+
 function clearInspectCanvases() {
+  App.wf = null; App.wfSeq = -1;             // reset the client waterfall history
   for (const id of ["insp-analyzer", "insp-waterfall"]) {
-    const c = $(id); c.getContext("2d").clearRect(0, 0, c.width, c.height);
+    const { ctx, W, H } = fitCanvas($(id));
+    ctx.clearRect(0, 0, W, H);
   }
 }
 
@@ -928,8 +945,8 @@ function inspectPocsag(center, label, tuneId) {
   $("insp-decode").style.display = "none";
   api("/api/inspect", { center_mhz: center, label, mode: "pocsag" }).then((j) => {
     if (App.tuneId !== tuneId) return;          // a newer tune superseded this one
-    if (j.analyzer) drawAnalyzer($("insp-analyzer").getContext("2d"), $("insp-analyzer"), j.analyzer);
-    if (j.waterfall) drawWaterfall($("insp-waterfall").getContext("2d"), $("insp-waterfall"), j.waterfall);
+    if (j.analyzer) drawAnalyzer($("insp-analyzer"), j.analyzer);
+    if (j.waterfall) drawWaterfall($("insp-waterfall"), j.waterfall);
     renderDecode(j);
   }).catch((e) => {
     if (App.tuneId === tuneId) $("insp-msg").textContent = "decode failed: " + (e && e.message || e);
@@ -1003,30 +1020,37 @@ function listenAt(center, label, mode) {
 
 function startSpectrumPoll() {
   stopSpectrumPoll();
+  let busy = false;
   App.specPoll = setInterval(async () => {
+    if (busy) return;                        // one in-flight request at a time
+    busy = true;
     let s;
-    try { s = await api("/api/listen_spectrum"); } catch (e) { return; }
+    try { s = await api("/api/listen_spectrum"); }
+    catch (e) { busy = false; return; }
+    busy = false;
     if (!s || s.center_mhz == null) return;
     if (s.mode) $("insp-mode").value = s.mode;
     $("insp-msg").textContent = "● live";
-    if (s.analyzer) drawAnalyzer($("insp-analyzer").getContext("2d"), $("insp-analyzer"), s.analyzer);
-    if (s.waterfall) drawWaterfall($("insp-waterfall").getContext("2d"), $("insp-waterfall"), s.waterfall);
-  }, 400);
+    if (s.analyzer) drawAnalyzer($("insp-analyzer"), s.analyzer);
+    if (s.waterfall) drawWaterfall($("insp-waterfall"), s.waterfall);
+  }, 150);
 }
 
 function stopSpectrumPoll() {
   if (App.specPoll) { clearInterval(App.specPoll); App.specPoll = null; }
 }
 
-function drawAnalyzer(ctx, cv, a) {
-  const p = a.power_dbm, fr = a.freqs_mhz, n = p.length, W = cv.width, H = cv.height;
+function drawAnalyzer(cv, a) {
+  const { ctx, W, H } = fitCanvas(cv);
+  ctx.clearRect(0, 0, W, H);
+  const p = a.power_dbm, fr = a.freqs_mhz, n = p.length;
   if (!n) return;
   let lo = Math.min(...p), hi = Math.max(...p);
   if (hi - lo < 10) hi = lo + 10;
-  ctx.strokeStyle = "#00c8ff"; ctx.lineWidth = 1.2; ctx.beginPath();
+  ctx.strokeStyle = "#00c8ff"; ctx.lineWidth = 1; ctx.beginPath();
   for (let i = 0; i < n; i++) {
     const x = W * i / (n - 1);
-    const y = H - ((p[i] - lo) / (hi - lo)) * (H - 14) - 7;
+    const y = Math.round(H - ((p[i] - lo) / (hi - lo)) * (H - 14) - 7) + 0.5;   // crisp 1px
     i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
   }
   ctx.stroke();
@@ -1036,25 +1060,72 @@ function drawAnalyzer(ctx, cv, a) {
   ctx.fillText(hi.toFixed(0) + " dBm", 3, 11);
 }
 
-function heat(t) {
-  t = Math.max(0, Math.min(1, t));
-  const r = Math.round(255 * Math.min(1, Math.max(0, 1.6 * t - 0.5)));
-  const g = Math.round(255 * Math.min(1, Math.max(0, t < 0.5 ? 1.8 * t : 2.1 - 2.0 * t)));
-  const b = Math.round(255 * Math.min(1, Math.max(0, 1.1 - 1.8 * t)));
-  return `rgb(${r},${g},${b})`;
+// 256-entry RGB heat LUT (same curve as the old heat()), for fast per-texel paint.
+const HEAT = (() => {
+  const a = new Uint8ClampedArray(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const t = i / 255;
+    a[i * 3]     = 255 * Math.min(1, Math.max(0, 1.6 * t - 0.5));
+    a[i * 3 + 1] = 255 * Math.min(1, Math.max(0, t < 0.5 ? 1.8 * t : 2.1 - 2.0 * t));
+    a[i * 3 + 2] = 255 * Math.min(1, Math.max(0, 1.1 - 1.8 * t));
+  }
+  return a;
+})();
+
+const WF_ROWS = 240;   // client waterfall history depth (matches listen_wf_history_rows)
+
+function wfEnsure(cols) {
+  if (App.wf && App.wf.cols === cols) return App.wf;
+  const off = document.createElement("canvas");
+  off.width = cols; off.height = WF_ROWS;
+  const octx = off.getContext("2d");
+  octx.fillStyle = "#04070c"; octx.fillRect(0, 0, cols, WF_ROWS);
+  App.wf = { cols, off, octx, line: octx.createImageData(cols, 1) };
+  return App.wf;
 }
 
-function drawWaterfall(ctx, cv, wf) {
-  const g = wf.db, rows = g.length, cols = rows ? g[0].length : 0;
-  if (!rows || !cols) return;
-  const vmin = wf.vmin, vmax = Math.max(wf.vmax, vmin + 1);
-  const cw = cv.width / cols, ch = cv.height / rows;
-  for (let r = 0; r < rows; r++) {
+// Scrolling waterfall: keep an offscreen texture (one texel per freq-bin x time
+// row); each frame shift it up by the number of NEW rows, paint only the new rows
+// from the heat LUT, then blit it scaled+smoothed onto the visible canvas. Polls
+// faster than the server publishes, so a `seq` de-dupe skips re-scrolling a frame
+// we already drew. A payload with no seq (POCSAG's one-shot /api/inspect) is a
+// full paint that fills the panel. Re-tune resets the texture (clearInspectCanvases).
+function drawWaterfall(cv, wf) {
+  const { ctx, W, H } = fitCanvas(cv);
+  const rows = wf.new_rows || wf.db;
+  const nNew = rows ? rows.length : 0, cols = nNew ? rows[0].length : 0;
+  if (!nNew || !cols) return;
+  const vmin = wf.vmin, span = Math.max(wf.vmax - vmin, 1);
+  const paintRow = (data, base, row) => {
     for (let c = 0; c < cols; c++) {
-      ctx.fillStyle = heat((g[r][c] - vmin) / (vmax - vmin));
-      ctx.fillRect(c * cw, r * ch, cw + 1, ch + 1);
+      let idx = ((row[c] - vmin) / span * 255) | 0;
+      idx = idx < 0 ? 0 : idx > 255 ? 255 : idx;
+      data[base + c * 4] = HEAT[idx * 3]; data[base + c * 4 + 1] = HEAT[idx * 3 + 1];
+      data[base + c * 4 + 2] = HEAT[idx * 3 + 2]; data[base + c * 4 + 3] = 255;
     }
+  };
+  ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "high";
+  if (wf.seq == null) {                          // POCSAG one-shot: paint all rows
+    const img = ctx.createImageData(cols, nNew);
+    for (let r = 0; r < nNew; r++) paintRow(img.data, r * cols * 4, rows[r]);
+    const tmp = document.createElement("canvas"); tmp.width = cols; tmp.height = nNew;
+    tmp.getContext("2d").putImageData(img, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    ctx.drawImage(tmp, 0, 0, cols, nNew, 0, 0, W, H);
+    return;
   }
+  const w = wfEnsure(cols);
+  if (wf.seq !== App.wfSeq) {                     // fresh frame -> scroll in new rows
+    const take = Math.min(nNew, WF_ROWS);
+    w.octx.drawImage(w.off, 0, take, cols, WF_ROWS - take, 0, 0, cols, WF_ROWS - take);
+    for (let r = 0; r < take; r++) {
+      paintRow(w.line.data, 0, rows[nNew - take + r]);
+      w.octx.putImageData(w.line, 0, WF_ROWS - take + r);
+    }
+    App.wfSeq = wf.seq;
+  }
+  ctx.clearRect(0, 0, W, H);
+  ctx.drawImage(w.off, 0, 0, cols, WF_ROWS, 0, 0, W, H);
 }
 
 // Next/Prev only step the baseline list (hidden in any other context).
@@ -1074,6 +1145,16 @@ $("insp-close").onclick = () => {
   $("inspect-panel").style.display = "none";
   const a = $("insp-audio"); a.pause(); a.removeAttribute("src");
 };
+
+// On resize, drop the waterfall texture so the next poll rebuilds it at the new
+// width (fitCanvas already re-sizes the visible canvas each frame).
+window.addEventListener("resize", () => {
+  clearTimeout(App._wfRz);
+  App._wfRz = setTimeout(() => {
+    const p = $("inspect-panel");
+    if (p && p.style.display !== "none") { App.wf = null; App.wfSeq = -1; }
+  }, 150);
+});
 
 /* ---------- ETA previews ---------- */
 async function updateEta(profileSel, minutesInput, etaEl, scanMode) {

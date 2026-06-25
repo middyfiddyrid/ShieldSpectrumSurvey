@@ -687,13 +687,22 @@ def create_app(db, cfg, demo=False) -> Flask:
         preempts any running stream, acquires device_lock, clears/sets listen_stop
         and the `listening` flag, and tears all of that down in finally — so the
         framing wrappers stay trivial and can't deadlock the device."""
-        import collections
         import time as _time
         import numpy as _np
         from .demod import demodulate
-        from .identify import spectrogram
+        from .identify import waterfall_stft
         from .sweep.sdr_source import welch_psd
-        wf_rows = collections.deque(maxlen=96)
+        # live-spectrum tunables (read once; the client owns the scroll history)
+        an_nperseg = int(cfg.get("pluto", "listen_analyzer_nperseg", default=2048))
+        an_bins = int(cfg.get("pluto", "listen_analyzer_bins", default=512))
+        an_ema = float(cfg.get("pluto", "listen_analyzer_ema", default=0.4))
+        wf_nperseg = int(cfg.get("pluto", "listen_wf_nperseg", default=512))
+        wf_rows = int(cfg.get("pluto", "listen_wf_rows_per_block", default=8))
+        fl_ema = float(cfg.get("pluto", "listen_wf_floor_ema", default=0.1))
+        span_lo = float(cfg.get("pluto", "listen_wf_span_lo_db", default=-5.0))
+        span_hi = float(cfg.get("pluto", "listen_wf_span_hi_db", default=40.0))
+        psd_ema = nf_ema = None
+        wf_seq = 0
         st.controller.listen_stop.set()       # preempt whatever stream is running now
         with st.controller.device_lock:       # wait for the previous user of the radio to release
             st.controller.listen_stop.clear()
@@ -707,27 +716,43 @@ def create_app(db, cfg, demo=False) -> Flask:
                     except Exception:  # noqa: BLE001
                         continue
                     yield pcm, arate
-                    # live analyzer + scrolling waterfall from a subset of this
-                    # block (cheap) — published for the UI to poll & redraw.
+                    # live analyzer + scrolling waterfall from the WHOLE block.
+                    # The client owns the scroll history: we ship the new rows +
+                    # a monotonic seq. db == new_rows here so the JSON stays a
+                    # superset of the one-shot /api/inspect (POCSAG) contract.
                     try:
-                        sub = iq[:262144]
-                        bb, psd = welch_psd(sub, fs, nperseg=1024)
-                        step = max(1, bb.size // 400)
-                        af = [round((center_mhz * 1e6 + f) / 1e6, 5) for f in bb[::step]]
-                        ap = [round(float(p) + cal, 1) for p in psd[::step]]
-                        spec = spectrogram(sub, fs, n_time=6, nperseg=200)
-                        for row in spec["db"]:
-                            wf_rows.append(row)
-                        flat = _np.asarray(list(wf_rows))
+                        # ANALYZER: Welch over the full block, decimated to an_bins
+                        # by power-domain mean (a plain stride-skip aliases), then
+                        # smoothed across blocks to kill single-FFT jitter.
+                        bb, psd = welch_psd(iq, fs, nperseg=an_nperseg)
+                        grp = max(1, bb.size // an_bins)
+                        keep = (bb.size // grp) * grp
+                        lin = (10.0 ** (psd[:keep] / 10.0)).reshape(-1, grp).mean(axis=1)
+                        f_dec = bb[:keep].reshape(-1, grp).mean(axis=1)
+                        psd_dec = 10.0 * _np.log10(lin + 1e-20)
+                        if psd_ema is None or psd_ema.shape != psd_dec.shape:
+                            psd_ema = psd_dec
+                        else:
+                            psd_ema = (1.0 - an_ema) * psd_ema + an_ema * psd_dec
+                        af = [round((center_mhz * 1e6 + f) / 1e6, 5) for f in f_dec]
+                        ap = [round(float(p) + cal, 1) for p in psd_ema]
+                        # WATERFALL: contiguous STFT rows spanning the block + a
+                        # stable color floor (EMA of a robust percentile).
+                        wf = waterfall_stft(iq, fs, nperseg=wf_nperseg, rows=wf_rows)
+                        db = _np.asarray(wf["db"])
+                        nf = float(_np.percentile(db, 30))
+                        nf_ema = nf if nf_ema is None else (1.0 - fl_ema) * nf_ema + fl_ema * nf
+                        wf_seq += 1
+                        rows_list = db.round(1).tolist()
                         st.controller.listen_spectrum = {
-                            "center_mhz": center_mhz, "mode": mode, "ts": _time.time(),
+                            "center_mhz": center_mhz, "mode": mode,
+                            "ts": _time.time(), "seq": wf_seq,
                             "analyzer": {"freqs_mhz": af, "power_dbm": ap},
                             "waterfall": {
                                 "freqs_mhz": [round((center_mhz * 1e6 + f) / 1e6, 4)
-                                              for f in spec["freqs_hz"]],
-                                "db": list(wf_rows),
-                                "vmin": float(_np.percentile(flat, 5)),
-                                "vmax": float(_np.percentile(flat, 99))}}
+                                              for f in wf["freqs_hz"]],
+                                "db": rows_list, "new_rows": rows_list, "seq": wf_seq,
+                                "vmin": nf_ema + span_lo, "vmax": nf_ema + span_hi}}
                     except Exception:  # noqa: BLE001
                         pass
             except Exception:  # noqa: BLE001 - client disconnect / device error

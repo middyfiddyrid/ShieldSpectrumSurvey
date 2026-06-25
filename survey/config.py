@@ -77,6 +77,19 @@ DEFAULTS = {
         # 600 kHz still covers WFM (~200 kHz) and NFM channels.
         "stream_sample_rate": 2_400_000,
         "listen_block_seconds": 0.5,       # bigger blocks amortize the per-buffer refill gap
+        # live analyzer + scrolling waterfall (the poll-tuned /api/listen_spectrum
+        # path). Each audio block emits listen_wf_rows_per_block contiguous STFT
+        # rows so the waterfall scrolls smoothly; the client owns the scroll
+        # history (listen_wf_history_rows must match the client ROWS constant).
+        "listen_wf_nperseg": 512,          # waterfall FFT size -> 512 freq bins
+        "listen_wf_rows_per_block": 8,     # contiguous waterfall rows per block
+        "listen_wf_history_rows": 240,     # visible history depth (client ROWS)
+        "listen_analyzer_nperseg": 2048,   # Welch FFT for the analyzer trace
+        "listen_analyzer_bins": 512,       # analyzer points (power-domain decimate)
+        "listen_analyzer_ema": 0.4,        # analyzer smoothing across blocks
+        "listen_wf_floor_ema": 0.1,        # noise-floor EMA for a stable color map
+        "listen_wf_span_lo_db": -5.0,      # color span: [floor+lo, floor+hi]
+        "listen_wf_span_hi_db": 40.0,
         # ~approximate~ dBFS -> dBm calibration offset. NOT lab-grade; lean on
         # baseline-delta detection. Tune per-unit in calibration mode.
         "cal_offset_db": -30.0,
