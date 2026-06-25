@@ -322,6 +322,12 @@ function render(st) {
   $("ft-bat").textContent = dev && dev.battery ? dev.battery : "—";
   $("ft-sim").innerHTML = dev && dev.simulated ? '<span class="sim">⚠ SIMULATED DEVICE</span>' : "";
   $("ft-msg").textContent = st.sweep.message || "idle";
+  // sync the device-source picker to the active/last-used source on first load
+  // (don't fight the operator if they've changed it this session)
+  if ($("device-source") && !App._srcSynced && st.source) {
+    $("device-source").value = st.source;
+    App._srcSynced = true;
+  }
 
   // nav dots
   dot("session", st.session ? "done" : "");
@@ -564,9 +570,10 @@ $("btn-create").onclick = async () => {
 };
 
 $("btn-connect").onclick = async () => {
-  $("device-msg").textContent = "connecting…";
+  const src = $("device-source") ? $("device-source").value : null;
+  $("device-msg").textContent = `connecting to ${src === "pluto" ? "Pluto" : "RF Explorer"}…`;
   try {
-    const d = await api("/api/device/connect", {});
+    const d = await api("/api/device/connect", src ? { source: src } : {});
     $("device-msg").textContent = "connected";
     $("device-detail").innerHTML =
       `<div>Model</div><div>${esc(d.model)} (driver: ${esc(d.driver)})</div>` +
@@ -657,14 +664,17 @@ function renderBaselineTable() {
   const src = $("baseline-source-filter").value;
   const rows = (App.baseline ? App.baseline.rows : []).filter(r =>
     (!src || r.source === src) &&
-    (!f || JSON.stringify(r).toLowerCase().includes(f)));
+    (!f || JSON.stringify(r).toLowerCase().includes(f)))
+    .sort((a, b) => a.freq_low_mhz - b.freq_low_mhz)
+    .slice(0, 1500);
+  App.blView = rows;                 // ordered list the inspect panel steps through
   $("tbl-baseline").innerHTML =
     "<tr><th>Frequency</th><th>Service</th><th>Callsign/Label</th><th>Licensee</th>" +
     "<th>Dist mi</th><th>Brg</th><th>Source</th><th>Confidence</th><th></th></tr>" +
-    rows.slice(0, 1500).map(r => {
+    rows.map((r, i) => {
       const f1 = r.freq_low_mhz === r.freq_high_mhz ? fmtF(r.freq_low_mhz) :
         fmtF(r.freq_low_mhz) + " – " + fmtF(r.freq_high_mhz);
-      return `<tr><td>${f1}</td><td>${esc(r.service)}</td>` +
+      return `<tr><td><a href="#" class="freqlink" data-i="${i}">${f1}</a></td><td>${esc(r.service)}</td>` +
         `<td>${esc(r.callsign || r.label)}</td><td>${esc(r.licensee)}</td>` +
         `<td>${r.distance_mi != null ? r.distance_mi.toFixed(1) : ""}</td>` +
         `<td>${r.bearing_deg != null ? r.bearing_deg.toFixed(0) + "°" : ""}</td>` +
@@ -674,6 +684,347 @@ function renderBaselineTable() {
 }
 $("baseline-filter").oninput = renderBaselineTable;
 $("baseline-source-filter").onchange = renderBaselineTable;
+
+/* ---------- Web Audio chunked playback (smooth live listen) ----------
+   The <audio src="/api/listen"> path stutters: the werkzeug dev server delivers
+   the WAV stream at ~0.8x real-time and the media element has no jitter buffer,
+   so any underrun stalls or resets currentTime=0. Instead we fetch the raw-PCM
+   stream (/api/listen_pcm), parse int16 frames as they arrive, and schedule small
+   AudioBuffers back-to-back against the AudioContext clock. A small lead-in
+   (PCM_PLAY_LEAD_S) absorbs delivery jitter so brief gaps don't become audible
+   gaps; if delivery falls behind and the schedule cursor goes stale, we re-anchor
+   to "now + lead" rather than playing a burst of backlog. */
+const Listen = {
+  ctx: null, gain: null, reader: null, abort: null,
+  nextAt: 0,          // AudioContext time the next buffer should start
+  rate: 0,            // PCM sample rate from the stream header
+  leftover: null,     // trailing odd byte carried between chunks (int16 alignment)
+  active: false,
+};
+const PCM_PLAY_LEAD_S = 0.25;    // schedule this far ahead of the clock (jitter buffer)
+const PCM_MAGIC = "SHLDPCM1";
+
+function listenStop() {
+  Listen.active = false;
+  if (Listen.abort) { try { Listen.abort.abort(); } catch (e) {} Listen.abort = null; }
+  Listen.reader = null;
+  if (Listen.gain && Listen.ctx) {
+    try { Listen.gain.gain.cancelScheduledValues(Listen.ctx.currentTime); } catch (e) {}
+  }
+  Listen.nextAt = 0; Listen.leftover = null; Listen.rate = 0;
+}
+
+// must be called from a user gesture (the click that opens inspect) so the
+// browser autoplay policy lets the AudioContext start/resume.
+async function listenStart(center, modeOverride, onState) {
+  listenStop();
+  const Ctor = window.AudioContext || window.webkitAudioContext;
+  if (!Ctor) { onState("Web Audio not supported — using <audio> fallback", false); return false; }
+  if (!Listen.ctx) {
+    Listen.ctx = new Ctor();
+    Listen.gain = Listen.ctx.createGain();
+    Listen.gain.connect(Listen.ctx.destination);
+  }
+  try { await Listen.ctx.resume(); } catch (e) {}
+  Listen.active = true;
+  Listen.abort = new AbortController();
+  const url = `/api/listen_pcm?center_mhz=${encodeURIComponent(center)}` +
+              (modeOverride ? `&mode=${encodeURIComponent(modeOverride)}` : "");
+  let r;
+  try {
+    r = await fetch(url, { signal: Listen.abort.signal, cache: "no-store" });
+  } catch (e) {
+    if (Listen.active) onState("stream failed: " + e.message, false);
+    return false;
+  }
+  if (!r.ok) {
+    let msg = r.statusText;
+    try { msg = (await r.json()).error || msg; } catch (e) {}
+    onState(msg, false);
+    return false;
+  }
+  if (!r.body || !r.body.getReader) {
+    onState("streaming unsupported — using <audio> fallback", false);
+    return false;
+  }
+  Listen.reader = r.body.getReader();
+  pumpPcm(onState).catch(() => {});
+  return true;
+}
+
+async function pumpPcm(onState) {
+  let headerDone = false, headerBuf = "";
+  const ctx = Listen.ctx;
+  while (Listen.active && Listen.reader) {
+    let chunk;
+    try { chunk = await Listen.reader.read(); }
+    catch (e) { break; }                       // aborted / disconnected
+    if (chunk.done) break;
+    let bytes = chunk.value;                    // Uint8Array
+    if (!headerDone) {
+      // header is PCM_MAGIC + one JSON line terminated by '\n'
+      let nl = -1;
+      for (let i = 0; i < bytes.length; i++) { if (bytes[i] === 10) { nl = i; break; } }
+      headerBuf += new TextDecoder().decode(nl >= 0 ? bytes.subarray(0, nl) : bytes);
+      if (nl < 0) continue;                     // header spans chunks (rare)
+      const meta = parseListenHeader(headerBuf);
+      if (!meta) { onState("bad stream header", false); break; }
+      Listen.rate = meta.rate;
+      if (meta.mode) onState("● live", true, meta.mode);
+      else onState("● live", true);
+      headerDone = true;
+      bytes = bytes.subarray(nl + 1);           // remainder is PCM
+      if (!bytes.length) continue;
+    }
+    schedulePcmBytes(bytes);
+  }
+  if (Listen.active) onState("stream ended", false);
+}
+
+function parseListenHeader(s) {
+  if (s.slice(0, PCM_MAGIC.length) !== PCM_MAGIC) return null;
+  try { return JSON.parse(s.slice(PCM_MAGIC.length)); } catch (e) { return null; }
+}
+
+function schedulePcmBytes(bytes) {
+  const ctx = Listen.ctx;
+  if (!ctx || !Listen.rate) return;
+  // re-attach any trailing odd byte from the previous chunk (int16 alignment)
+  if (Listen.leftover) {
+    const merged = new Uint8Array(Listen.leftover.length + bytes.length);
+    merged.set(Listen.leftover, 0); merged.set(bytes, Listen.leftover.length);
+    bytes = merged; Listen.leftover = null;
+  }
+  const usable = bytes.length - (bytes.length % 2);
+  if (usable < bytes.length) Listen.leftover = bytes.subarray(usable);
+  if (usable < 2) return;
+  // copy into an aligned buffer so Int16Array can view it (subarray may be odd-offset)
+  const aligned = bytes.buffer.byteLength === bytes.length && (bytes.byteOffset % 2 === 0)
+    ? bytes.subarray(0, usable)
+    : bytes.slice(0, usable);
+  const i16 = new Int16Array(aligned.buffer, aligned.byteOffset, usable / 2);
+  const n = i16.length;
+  if (!n) return;
+  const f32 = new Float32Array(n);
+  for (let i = 0; i < n; i++) f32[i] = i16[i] / 32768;
+  const buf = ctx.createBuffer(1, n, Listen.rate);
+  buf.getChannelData(0).set(f32);
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.connect(Listen.gain);
+  // schedule back-to-back; if we've fallen behind the clock, re-anchor with lead
+  const now = ctx.currentTime;
+  if (Listen.nextAt < now + 0.005) Listen.nextAt = now + PCM_PLAY_LEAD_S;
+  src.start(Listen.nextAt);
+  Listen.nextAt += buf.duration;
+}
+
+/* ---------- tune & inspect (analyzer + waterfall + audio) ---------- */
+function blCenter(r) {
+  return r.freq_low_mhz === r.freq_high_mhz ? r.freq_low_mhz
+    : (r.freq_low_mhz + r.freq_high_mhz) / 2;
+}
+
+$("tbl-baseline").addEventListener("click", (e) => {
+  const a = e.target.closest(".freqlink");
+  if (!a) return;
+  e.preventDefault();
+  openInspect(parseInt(a.dataset.i, 10));
+});
+
+// .freqlink affordances on the non-baseline lists carry the center freq + label
+// in data-* and tune via the freq-based entry point (no baseline stepping).
+// One shared delegated handler covers Results (anomalies), detected Signals, and
+// the Signal Wiki. The wiki row has a bubble-phase inline onclick that opens the
+// detail editor; that <tr> sits BELOW this table in the tree, so it would fire
+// first on bubble and stopPropagation here would be too late. We register in the
+// CAPTURE phase instead — a freqlink click is caught at the table on the way down
+// and stopPropagation pre-empts the row onclick (listen WITHOUT opening it). A
+// non-freqlink click returns without stopping, so normal row clicks still work.
+function freqLinkDelegate(e) {
+  const a = e.target.closest(".freqlink");
+  if (!a || a.dataset.center == null) return;
+  e.preventDefault();
+  e.stopPropagation();
+  listenAt(parseFloat(a.dataset.center), a.dataset.label || "", a.dataset.mode || undefined);
+}
+["tbl-anomalies", "tbl-signals", "tbl-wiki"].forEach(id => {
+  const el = $(id);
+  if (el) el.addEventListener("click", freqLinkDelegate, true);  // capture: beat the row onclick
+});
+
+function inRangeClient(center) {
+  const dev = App.state && App.state.device;
+  if (!dev || !dev.modules || !dev.modules.length)
+    return { ok: false, msg: "connect a device first (Session tab)." };
+  if (dev.driver !== "pluto")
+    return { ok: false, msg: "tune / view / listen needs the Pluto (SDR) — the RF Explorer is amplitude-only." };
+  const lo = Math.min(...dev.modules.map(m => m.min_mhz));
+  const hi = Math.max(...dev.modules.map(m => m.max_mhz));
+  if (center < lo || center > hi)
+    return { ok: false, msg: `${fmtF(center)} is outside the radio's ${fmtF(lo)}–${fmtF(hi)} range.` };
+  return { ok: true };
+}
+
+function clearInspectCanvases() {
+  for (const id of ["insp-analyzer", "insp-waterfall"]) {
+    const c = $(id); c.getContext("2d").clearRect(0, 0, c.width, c.height);
+  }
+}
+
+// CORE entry point: tune the Pluto to `center`, stream audio, and LIVE-poll the
+// analyzer + waterfall (both fed by the same stream, so they move). Not tied to
+// App.blView — any list can call this with a center + display label. `mode` is
+// an optional demod override (WFM/NFM/AM/USB/LSB/CW); omit to let the backend
+// pick_mode / the <select> decide. The `tuneId` guards against a stale async
+// fallback stomping a newer tune (multiple lists can drive the same panel).
+function inspectByFreq(center, label, mode) {
+  const tuneId = (App.tuneId = (App.tuneId || 0) + 1);
+  App.inspCenter = center; App.inspLabel = label;   // for mode <select> re-tune
+  $("inspect-panel").style.display = "";
+  $("insp-title").textContent = `${fmtF(center)} · ${label || ""}`;   // fmtF already carries the unit
+  $("inspect-panel").scrollIntoView({ behavior: "smooth", block: "center" });
+  stopSpectrumPoll();
+  listenStop();
+  const au = $("insp-audio"); au.pause(); au.removeAttribute("src");
+  clearInspectCanvases();
+  const rc = inRangeClient(center);
+  if (!rc.ok) {
+    $("insp-note").textContent = rc.msg +
+      (App.inspContext === "baseline" ? "  (Next steps through the rest.)" : "");
+    $("insp-msg").textContent = "";
+    const ac = $("insp-analyzer").getContext("2d");
+    ac.fillStyle = "#e0a030"; ac.font = "13px monospace";
+    ac.fillText(rc.msg, 12, 26);
+    return;
+  }
+  $("insp-note").textContent = "";
+  $("insp-msg").textContent = "tuning & streaming…";
+  // Prefer smooth Web Audio chunked playback (/api/listen_pcm); fall back to the
+  // plain <audio> element (/api/listen) only if Web Audio / fetch-streaming is
+  // unavailable or the stream fails to start.
+  const onState = (msg, live, m) => {
+    $("insp-msg").textContent = msg;
+    if (m) $("insp-mode").value = m;
+  };
+  listenStart(center, mode, onState).then((ok) => {
+    if (!ok && App.tuneId === tuneId) {     // guard: don't stomp a newer tune
+      au.src = `/api/listen?center_mhz=${encodeURIComponent(center)}` +
+               (mode ? `&mode=${encodeURIComponent(mode)}` : "");
+      au.play().catch(() => {});
+    }
+  });
+  startSpectrumPoll();
+}
+
+// Baseline-table entry point: steps App.blView[idx] and preserves Next/Prev.
+// Computes center + label from the baseline row, then delegates to the core.
+function openInspect(idx, modeOverride) {
+  const list = App.blView || [];
+  if (!list.length) return;
+  idx = Math.max(0, Math.min(idx, list.length - 1));
+  App.inspIdx = idx;
+  App.inspContext = "baseline";          // Next/Prev step the baseline list
+  const r = list[idx];
+  const center = blCenter(r);
+  const label = `${r.callsign || r.label || r.service || ""} (${idx + 1}/${list.length})`;
+  setInspNav(true);
+  inspectByFreq(center, label, modeOverride);
+}
+
+// Show or hide the Next/Prev controls. They only make sense while stepping the
+// baseline list; entering from any other list disables them so they can't jump
+// the operator into an unrelated baseline row.
+function setInspNav(enabled) {
+  for (const id of ["insp-next", "insp-prev"]) {
+    const b = $(id);
+    if (b) { b.disabled = !enabled; b.style.display = enabled ? "" : "none"; }
+  }
+}
+
+// Entry point for the NON-baseline lists (Results / detected signals / Wiki).
+// Disables Next/Prev (no list to step) and tunes the given center+label.
+function listenAt(center, label, mode) {
+  if (center == null || isNaN(center)) return;
+  App.inspContext = "freq";
+  App.inspIdx = null;
+  setInspNav(false);
+  inspectByFreq(center, label, mode);
+}
+
+function startSpectrumPoll() {
+  stopSpectrumPoll();
+  App.specPoll = setInterval(async () => {
+    let s;
+    try { s = await api("/api/listen_spectrum"); } catch (e) { return; }
+    if (!s || s.center_mhz == null) return;
+    if (s.mode) $("insp-mode").value = s.mode;
+    $("insp-msg").textContent = "● live";
+    if (s.analyzer) drawAnalyzer($("insp-analyzer").getContext("2d"), $("insp-analyzer"), s.analyzer);
+    if (s.waterfall) drawWaterfall($("insp-waterfall").getContext("2d"), $("insp-waterfall"), s.waterfall);
+  }, 400);
+}
+
+function stopSpectrumPoll() {
+  if (App.specPoll) { clearInterval(App.specPoll); App.specPoll = null; }
+}
+
+function drawAnalyzer(ctx, cv, a) {
+  const p = a.power_dbm, fr = a.freqs_mhz, n = p.length, W = cv.width, H = cv.height;
+  if (!n) return;
+  let lo = Math.min(...p), hi = Math.max(...p);
+  if (hi - lo < 10) hi = lo + 10;
+  ctx.strokeStyle = "#00c8ff"; ctx.lineWidth = 1.2; ctx.beginPath();
+  for (let i = 0; i < n; i++) {
+    const x = W * i / (n - 1);
+    const y = H - ((p[i] - lo) / (hi - lo)) * (H - 14) - 7;
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  }
+  ctx.stroke();
+  ctx.fillStyle = "#6b7b90"; ctx.font = "10px monospace";
+  ctx.fillText(fr[0].toFixed(3) + " MHz", 3, H - 3);
+  ctx.fillText(fr[n - 1].toFixed(3), W - 56, H - 3);
+  ctx.fillText(hi.toFixed(0) + " dBm", 3, 11);
+}
+
+function heat(t) {
+  t = Math.max(0, Math.min(1, t));
+  const r = Math.round(255 * Math.min(1, Math.max(0, 1.6 * t - 0.5)));
+  const g = Math.round(255 * Math.min(1, Math.max(0, t < 0.5 ? 1.8 * t : 2.1 - 2.0 * t)));
+  const b = Math.round(255 * Math.min(1, Math.max(0, 1.1 - 1.8 * t)));
+  return `rgb(${r},${g},${b})`;
+}
+
+function drawWaterfall(ctx, cv, wf) {
+  const g = wf.db, rows = g.length, cols = rows ? g[0].length : 0;
+  if (!rows || !cols) return;
+  const vmin = wf.vmin, vmax = Math.max(wf.vmax, vmin + 1);
+  const cw = cv.width / cols, ch = cv.height / rows;
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      ctx.fillStyle = heat((g[r][c] - vmin) / (vmax - vmin));
+      ctx.fillRect(c * cw, r * ch, cw + 1, ch + 1);
+    }
+  }
+}
+
+// Next/Prev only step the baseline list (hidden in any other context).
+$("insp-next").onclick = () => { if (App.inspContext === "baseline") openInspect((App.inspIdx ?? 0) + 1); };
+$("insp-prev").onclick = () => { if (App.inspContext === "baseline") openInspect((App.inspIdx ?? 0) - 1); };
+// Mode <select> re-tune works from any list: re-tune the SAME center with the
+// chosen demod. In baseline context re-run openInspect (keeps the m/n title);
+// otherwise re-tune the current center via the core entry point.
+$("insp-mode").onchange = () => {
+  const mode = $("insp-mode").value;
+  if (App.inspContext === "baseline") openInspect(App.inspIdx ?? 0, mode);
+  else if (App.inspCenter != null) inspectByFreq(App.inspCenter, App.inspLabel, mode);
+};
+$("insp-close").onclick = () => {
+  stopSpectrumPoll();
+  listenStop();
+  $("inspect-panel").style.display = "none";
+  const a = $("insp-audio"); a.pause(); a.removeAttribute("src");
+};
 
 /* ---------- ETA previews ---------- */
 async function updateEta(profileSel, minutesInput, etaEl, scanMode) {
@@ -740,6 +1091,52 @@ function modulesAvailable() {
   return dev ? dev.modules.map(m => m.side) : [];
 }
 
+// true when the CONNECTED radio is the single-RX Pluto (drives antenna-prompt
+// wording). Keyed off the device driver so it's correct regardless of how the
+// source was picked; falls back to the selected source before connect.
+function isPlutoDevice() {
+  const dev = App.state && App.state.device;
+  if (dev && dev.driver) return dev.driver === "pluto";
+  return App.state && App.state.source === "pluto";
+}
+
+/* ---------- sigidwiki signal identification ---------- */
+function renderIdentify(r) {
+  let html = "";
+  const f = r.features;
+  if (f) {
+    html += `<p class="note">Measured from IQ: SNR ${f.snr_db} dB, ~${f.occupied_bw_khz} kHz, `
+      + `${f.continuity}, class <b>${esc(f.modulation_class)}</b>`
+      + (f.fsk_states >= 2 ? `, ${f.fsk_states}-state FSK shift ${f.fsk_shift_khz} kHz` : "")
+      + `, spectral flatness ${f.spectral_flatness}.</p>`;
+  }
+  if (!r.candidates || !r.candidates.length) {
+    $("id-results").innerHTML = html + "<p class='note'>No candidate matches.</p>";
+    return;
+  }
+  html += "<table><tr><th>Candidate</th><th>Score</th><th>Mode</th><th>Why it matched</th><th></th></tr>";
+  for (const c of r.candidates) {
+    html += `<tr><td>${esc(c.name)}</td><td>${c.score}</td><td>${esc(c.mode)}</td>`
+      + `<td class="note">${c.reasons.map(esc).join("; ")}`
+      + (c.tscm ? `<br><b>TSCM:</b> ${esc(c.tscm)}` : "") + "</td>"
+      + `<td><a href="${esc(c.url)}" target="_blank" rel="noopener">sigidwiki ↗</a></td></tr>`;
+  }
+  $("id-results").innerHTML = html + "</table>";
+}
+
+$("btn-identify").onclick = async () => {
+  const c = parseFloat($("id-center").value);
+  if (!c) return alert("Enter a center frequency in MHz (e.g. 433.92).");
+  const bw = parseFloat($("id-bw").value);
+  $("id-msg").textContent = isPlutoDevice() ? "capturing IQ & analyzing…" : "matching…";
+  $("id-results").innerHTML = "";
+  try {
+    const r = await api("/api/identify", { center_mhz: c, bw_khz: isNaN(bw) ? null : bw });
+    $("id-msg").textContent = r.note || (r.features ? "identified from live IQ" : "");
+    renderIdentify(r);
+  } catch (e) { $("id-msg").textContent = "FAILED: " + e.message; }
+};
+
 function moduleRange(side) {
   const dev = App.state && App.state.device;
   const m = dev && dev.modules.find(x => x.side === side);
@@ -750,15 +1147,24 @@ $("btn-ambient").onclick = async () => {
   const mods = modulesAvailable();
   if (!mods.length) return alert("Connect the device first (Session tab).");
   const profile = $("ambient-profile").value, minutes = $("ambient-minutes").value;
+  const pluto = isPlutoDevice();
   const steps = [];
-  if (mods.includes("left")) steps.push({
-    phase: "ambient", module: "left", room: "exterior",
-    msg: "ATTACH THE NON-DIRECTIONAL (OMNI) ANTENNA TO THE LEFT SMA PORT",
-    sub: `This port sweeps ${moduleRange("left")} — ambient reference, run OUTSIDE / vehicle at the curb` });
-  if (mods.includes("right")) steps.push({
-    phase: "ambient", module: "right", room: "exterior",
-    msg: "MOVE THE OMNI ANTENNA TO THE RIGHT SMA PORT",
-    sub: `This port sweeps ${moduleRange("right")} — ambient reference continues` });
+  if (pluto) {
+    // single wideband RX — one step, no SMA-port dance
+    steps.push({
+      phase: "ambient", module: "right", room: "exterior",
+      msg: "ATTACH THE OMNI ANTENNA TO THE PLUTO RX SMA",
+      sub: `Pluto sweeps ${moduleRange("right")} — ambient reference, run OUTSIDE / vehicle at the curb` });
+  } else {
+    if (mods.includes("left")) steps.push({
+      phase: "ambient", module: "left", room: "exterior",
+      msg: "ATTACH THE NON-DIRECTIONAL (OMNI) ANTENNA TO THE LEFT SMA PORT",
+      sub: `This port sweeps ${moduleRange("left")} — ambient reference, run OUTSIDE / vehicle at the curb` });
+    if (mods.includes("right")) steps.push({
+      phase: "ambient", module: "right", room: "exterior",
+      msg: "MOVE THE OMNI ANTENNA TO THE RIGHT SMA PORT",
+      sub: `This port sweeps ${moduleRange("right")} — ambient reference continues` });
+  }
   if (!steps.length) return alert("No modules reported by device.");
   App.seq = { steps, profile, minutes };
   advanceSeq();
@@ -920,7 +1326,9 @@ async function loadResults() {
       "<th>In/Out Δ</th><th>Strongest room</th><th>Class</th><th>Why not verified</th><th></th></tr>" +
       anomalies.map(s =>
         `<tr><td class="${s.anomaly_score >= 60 ? "score-hi" : "score-md"}">${(s.anomaly_score || 0).toFixed(0)}</td>` +
-        `<td>${fmtF(s.center_mhz)}</td><td>${s.peak_dbm}</td><td>${s.bw_khz}</td>` +
+        `<td><a href="#" class="freqlink" data-center="${s.center_mhz}" ` +
+        `data-label="${esc(s.matched_label || s.match_reason || "anomaly")}">${fmtF(s.center_mhz)}</a></td>` +
+        `<td>${s.peak_dbm}</td><td>${s.bw_khz}</td>` +
         `<td>${((s.persistence || 0) * 100).toFixed(0)}%</td>` +
         `<td>${s.interior_delta_db != null ? "+" + s.interior_delta_db + " dB" : "—"}</td>` +
         `<td>${esc(s.strongest_room || "")}${s.localization_score ? ` (+${s.localization_score} dB)` : ""}</td>` +
@@ -994,7 +1402,9 @@ async function loadSignals() {
     $("tbl-signals").innerHTML =
       "<tr><th>Frequency</th><th>Peak</th><th>Persist</th><th>Phase</th><th>Module</th>" +
       "<th>Room</th><th>Class</th><th>Match</th></tr>" +
-      sigs.map(s => `<tr><td>${fmtF(s.center_mhz)}</td><td>${s.peak_dbm}</td>` +
+      sigs.map(s => `<tr><td><a href="#" class="freqlink" data-center="${s.center_mhz}" ` +
+        `data-label="${esc(s.matched_label || s.classification || "signal")}">${fmtF(s.center_mhz)}</a></td>` +
+        `<td>${s.peak_dbm}</td>` +
         `<td>${((s.persistence || 0) * 100).toFixed(0)}%</td><td>${s.phase}</td><td>${s.module}</td>` +
         `<td>${esc(s.room)}</td><td><span class="pill ${s.classification}">${s.classification}</span></td>` +
         `<td>${esc(s.matched_label)}</td></tr>`).join("");
@@ -1076,7 +1486,9 @@ async function loadWiki() {
         const sight = c.sightings ?
           `${c.sightings}× / ${c.sessions_seen} session${c.sessions_seen > 1 ? "s" : ""}` : "—";
         return `<tr onclick="wikiOpen(${c.id})" style="cursor:pointer">` +
-          `<td>${fmtF(c.center_mhz)}</td><td>${esc(c.label)}</td><td>${esc(c.category)}</td>` +
+          `<td><a href="#" class="freqlink" title="tune &amp; listen" ` +
+          `data-center="${c.center_mhz}" data-label="${esc(c.label || c.category || "signal")}">▶</a> ` +
+          `${fmtF(c.center_mhz)}</td><td>${esc(c.label)}</td><td>${esc(c.category)}</td>` +
           `<td>${sight}</td>` +
           `<td><span class="pill ${cls}">${esc(c.status).toUpperCase()}</span></td>` +
           `<td>${new Date(c.captured_utc * 1000).toLocaleDateString()}</td></tr>`;

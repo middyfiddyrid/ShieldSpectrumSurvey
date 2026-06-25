@@ -6,3 +6,8 @@ capture_images/
 case_files/
 __pycache__/
 *.pyc
+# live config holds API keys / credentials — keep it LOCAL, never commit secrets.
+# Schema lives in survey/config.py DEFAULTS; the app runs on defaults if absent.
+config.yaml
+# deploy/staging copy of marketing/dcs_explainer.html (near-duplicate, drifts) — keep source only
+marketing/netlify_build/

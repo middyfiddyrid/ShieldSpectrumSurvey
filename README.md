@@ -112,3 +112,17 @@ transient persistence), and the sweep planner (coverage, risk-weighted dwell, ti
 
 Sweep findings are sensitive. `data/sweeps.db`, `cache/`, and `reports/` stay on this
 machine; the PDF in `reports/` is the only artifact intended for the client.
+
+## Demod / Listen Layer (in design)
+
+Current hardware (RF Explorer) + app is spectrum + fingerprint only. To identify
+what a signal *carries* (voice bug vs data vs broadcast), we need a demod path.
+
+See:
+- DEMOD_LISTEN_DESIGN.md — full stack recs, block schematic, software plan, tablet field layout.
+- FIELD_KIT_BOM.md — exact buy list (cheapest RTL-SDR V4 path + portable compute).
+
+**Immediate (no code change):** Buy RTL-SDR Blog V4 (~$40). Use SDR# side-by-side with the app.
+Tune directly from wiki/result frequencies (copy-paste). Record audio clips manually for now.
+
+Integration (planned): "Tune & Listen" buttons on Results and Wiki views, in-app audio recording linked to captures, auto mode suggestion from existing BW/duty features.

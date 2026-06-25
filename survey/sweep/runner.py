@@ -40,8 +40,14 @@ class SweepController:
         self.db = db
         self.cfg = cfg
         self.device = None
+        self.active_source = None        # which spectrum source is connected (rfexplorer|pluto)
         self._thread = None
         self.abort_event = threading.Event()
+        # serialise radio access across sweep / snapshot-capture / live audio stream
+        self.device_lock = threading.Lock()
+        self.listen_stop = threading.Event()   # set to stop the active audio stream
+        self.listening = False
+        self.listen_spectrum = None            # latest live analyzer+waterfall from the audio stream
         self.state = {"running": False, "phase": None, "module": None, "room": None,
                       "segment_index": 0, "segment_total": 0, "percent": 0.0,
                       "eta_seconds": 0, "signal_count": 0, "message": "idle",
@@ -51,7 +57,7 @@ class SweepController:
 
     # ---- device ----
 
-    def connect_device(self):
+    def connect_device(self, source=None):
         from .device import open_device
         old, self.device = self.device, None   # never leave a dead handle assigned
         if old is not None:
@@ -59,7 +65,10 @@ class SweepController:
                 old.close()
             except Exception:  # noqa: BLE001
                 pass
-        self.device = open_device(self.cfg)
+        self.device = open_device(self.cfg, source=source)
+        self.active_source = (source or os.environ.get("SWEEP_SOURCE")
+                              or self.cfg.get("device", "source",
+                                              default="rfexplorer")).strip().lower()
         return self.device.info
 
     def _ensure_device(self):
@@ -108,6 +117,8 @@ class SweepController:
                     plan, on_done=None):
         if self.busy():
             raise RuntimeError("a sweep is already running")
+        self.listen_stop.set()           # stop any live audio stream and let it release the radio
+        time.sleep(0.4)
         self._ensure_device()
         self.abort_event.clear()
         sweep_id = self.db.execute(
@@ -220,12 +231,23 @@ class SweepController:
                                   "low": seg.low_mhz, "high": seg.high_mhz,
                                   "ts": frame.ts})
 
+        # An SDR frame is ALREADY a fully-averaged stepped sweep (each PSD bin
+        # averages ~hundreds of FFTs internally), so the RF Explorer's many host
+        # AVERAGE passes are redundant — cap those. DO NOT cap the MAX-HOLD
+        # dwell: dwell is real time spent watching each band for intermittent /
+        # bursty / frequency-hopping emitters, which is the entire point of a
+        # TSCM sweep. Dwell stays governed by the operator's profile (Quick /
+        # Standard / Deep) and the per-band risk weighting (more on ISM bug bands).
+        avg_passes, dwell = seg.avg_passes, seg.maxhold_dwell_s
+        if getattr(dev, "is_swept_sdr", False):
+            avg_passes = min(avg_passes,
+                             int(self.cfg.get("pluto", "sweep_avg_passes", default=2)))
         # Pass 1 — AVERAGE
         dev.set_calculator("average")
-        dev.collect(seg.avg_passes, on_frame, abort=self.abort_event)
+        dev.collect(avg_passes, on_frame, abort=self.abort_event)
         # Pass 2 — MAX HOLD (device DSP transient capture)
         dev.set_calculator("maxhold")
-        dev.stream(seg.maxhold_dwell_s, on_frame, abort=self.abort_event)
+        dev.stream(dwell, on_frame, abort=self.abort_event)
         dev.set_calculator("normal")
 
         floor, signals = detect_signals(acc.freqs, acc.avg, acc.maxpeak, acc.hits,
@@ -265,6 +287,8 @@ class SweepController:
         targets: signal rows (need center_mhz, bw_khz; room/module/etc. optional)."""
         if self.busy():
             raise RuntimeError("a sweep is already running")
+        self.listen_stop.set()           # stop any live audio stream and let it release the radio
+        time.sleep(0.4)
         self._ensure_device()
         self.abort_event.clear()
         os.makedirs(images_dir, exist_ok=True)
@@ -406,6 +430,8 @@ class SweepController:
                           room: str):
         if self.busy():
             raise RuntimeError("a sweep is already running")
+        self.listen_stop.set()           # stop any live audio stream and let it release the radio
+        time.sleep(0.4)
         self._ensure_device()
         self.abort_event.clear()
         span_mhz = max(2.0, (bw_khz / 1000.0) * 4)

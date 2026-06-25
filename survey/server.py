@@ -6,7 +6,8 @@ import os
 import threading
 import time
 
-from flask import Flask, jsonify, request, send_file, send_from_directory
+from flask import (Flask, Response, jsonify, request, send_file,
+                   send_from_directory, stream_with_context)
 
 from .baseline.base import DiskCache
 from .baseline.manager import build_baseline
@@ -443,6 +444,9 @@ def create_app(db, cfg, demo=False) -> Flask:
                               "ORDER BY id", (session["id"],))
         return jsonify({
             "session": session,
+            "source": (st.controller.active_source
+                       or os.environ.get("SWEEP_SOURCE")
+                       or cfg.get("device", "source", default="rfexplorer")),
             "device": st.controller.device_info(),
             "sweep": st.controller.state,
             "sweeps": sweeps,
@@ -498,13 +502,278 @@ def create_app(db, cfg, demo=False) -> Flask:
 
     @app.post("/api/device/connect")
     def device_connect():
+        body = request.get_json(silent=True) or {}
+        source = (body.get("source") or "").strip().lower() or None
         try:
-            info = st.controller.connect_device()
+            info = st.controller.connect_device(source=source)
         except Exception as e:  # noqa: BLE001
             return err(e, 502)
+        # remember the operator's pick so the next launch defaults to it
+        if source:
+            try:
+                cfg.set_and_save(("device", "source"), source)
+            except Exception:  # noqa: BLE001
+                log.exception("could not persist device.source")
         if st.session_id:
             db.set_device_info(st.session_id, info.to_dict())
         return jsonify(info.to_dict())
+
+    @app.post("/api/identify")
+    def identify_signal():
+        """sigidwiki-style ID of an emitter. With a connected Pluto, captures IQ
+        at the frequency and matches by modulation features; otherwise matches by
+        frequency/bandwidth only. Accepts {center_mhz,bw_khz} or {signal_id} /
+        {capture_id}."""
+        from .identify import identify, iq_features, load_reference, spectrogram
+        body = request.get_json(silent=True) or {}
+        center_mhz = body.get("center_mhz")
+        bw_khz = body.get("bw_khz")
+        for table, key in (("captures", "capture_id"), ("signals", "signal_id")):
+            if center_mhz is None and body.get(key):
+                row = db.query_one(f"SELECT center_mhz,bw_khz FROM {table} WHERE id=?",
+                                   (body[key],))
+                if row:
+                    center_mhz, bw_khz = row["center_mhz"], row["bw_khz"]
+        if center_mhz is None:
+            return err("need center_mhz (or a signal_id / capture_id)")
+        center_mhz = float(center_mhz)
+
+        ref = load_reference()    # ships with the package (survey/sigidwiki_ref.json)
+        feats, spec, note = None, None, ""
+        dev = st.controller.device
+        is_sdr = dev is not None and hasattr(dev, "capture_iq") and \
+            getattr(dev, "is_swept_sdr", False)
+        if is_sdr and st.controller.busy():
+            note = "a sweep is running — stop it first to capture IQ; matched on frequency only"
+        elif is_sdr:
+            try:
+                sr = int(cfg.get("pluto", "sample_rate", default=20_000_000))
+                n = int(cfg.get("pluto", "identify_samples", default=131072))
+                reps = max(1, int(cfg.get("pluto", "identify_captures", default=8)))
+                # bursty emitters (Wi-Fi/BLE) only show in some snapshots — take
+                # the highest-SNR of several captures so we catch a burst, while a
+                # genuinely empty channel still reads as noise across all of them.
+                best_iq = None
+                for _ in range(reps):
+                    iq = dev.capture_iq(center_mhz * 1e6, sr, n)
+                    fe = iq_features(iq, sr)
+                    if feats is None or fe["snr_db"] > feats["snr_db"]:
+                        feats, best_iq = fe, iq
+                spec = spectrogram(best_iq, sr)
+                if not feats.get("signal_present"):
+                    note = (f"no clear signal above the noise floor at {center_mhz:.3f} MHz "
+                            f"(best SNR {feats['snr_db']} dB over {reps} captures) — likely an "
+                            f"empty channel; the candidates are what COULD occupy this band, "
+                            f"not a detected emitter")
+            except Exception as e:  # noqa: BLE001
+                log.exception("identify IQ capture failed")
+                note = f"IQ capture failed ({e}); matched on frequency only"
+        else:
+            note = ("connect the Pluto (SDR) for modulation-based identification — "
+                    "matched on frequency/bandwidth only")
+        candidates = identify(center_mhz * 1e6, feats, ref)
+        return jsonify({"center_mhz": center_mhz, "bw_khz": bw_khz,
+                        "source": st.controller.active_source, "features": feats,
+                        "note": note, "candidates": candidates, "spectrogram": spec})
+
+    @app.post("/api/inspect")
+    def inspect_signal():
+        """Tune the Pluto to a frequency and return an analyzer trace + waterfall
+        + demodulated audio (WAV) so the operator can SEE and HEAR it. Degrades
+        cleanly when the radio isn't connected, is busy, or can't reach the freq."""
+        import base64
+        from .demod import demodulate, pick_mode, wav_bytes
+        from .identify import spectrogram
+        from .sweep.sdr_source import welch_psd
+        body = request.get_json(silent=True) or {}
+        if body.get("center_mhz") is None:
+            return err("need center_mhz")
+        center_mhz = float(body["center_mhz"])
+        label = body.get("label", "")
+        mode = (body.get("mode") or pick_mode(center_mhz, label)).lower()
+
+        dev = st.controller.device
+        is_sdr = dev is not None and hasattr(dev, "capture_iq") and \
+            getattr(dev, "is_swept_sdr", False)
+        base = {"center_mhz": center_mhz, "label": label, "mode": mode, "in_range": False}
+        if not is_sdr:
+            return jsonify({**base, "note": "connect the Pluto (SDR) to tune, view and listen"})
+        if st.controller.busy():
+            return jsonify({**base, "note": "a sweep is running — stop it to tune & listen"})
+        mods = dev.info.modules
+        lo_mhz = min(m.min_mhz for m in mods)
+        hi_mhz = max(m.max_mhz for m in mods)
+        if not (lo_mhz <= center_mhz <= hi_mhz):
+            return jsonify({**base, "note": f"{center_mhz:.3f} MHz is outside the radio's "
+                            f"{lo_mhz:.0f}-{hi_mhz:.0f} MHz range — apply the AD9364 extension to reach it"})
+        try:
+            fs = float(cfg.get("pluto", "listen_sample_rate", default=2_400_000))
+            n = int(fs * float(cfg.get("pluto", "listen_seconds", default=0.5)))
+            st.controller.listen_stop.set()        # preempt any live audio stream
+            with st.controller.device_lock:        # serialise radio access
+                iq = dev.capture_iq(center_mhz * 1e6, fs, n)
+        except Exception as e:  # noqa: BLE001
+            log.exception("inspect capture failed")
+            return jsonify({**base, "note": f"capture failed: {e}"})
+
+        cal = float(cfg.get("pluto", "cal_offset_db", default=-30.0))
+        bb, psd_db = welch_psd(iq, fs, nperseg=2048)
+        step = max(1, bb.size // 480)
+        analyzer = {"freqs_mhz": [round((center_mhz * 1e6 + f) / 1e6, 5) for f in bb[::step]],
+                    "power_dbm": [round(float(p) + cal, 1) for p in psd_db[::step]]}
+        wf = spectrogram(iq, fs, n_time=90, nperseg=200)
+        waterfall = {"freqs_mhz": [round((center_mhz * 1e6 + f) / 1e6, 4) for f in wf["freqs_hz"]],
+                     "db": wf["db"], "vmin": wf["vmin"], "vmax": wf["vmax"]}
+        audio = None
+        try:
+            pcm, arate = demodulate(iq, fs, mode)
+            audio = "data:audio/wav;base64," + base64.b64encode(wav_bytes(pcm, arate)).decode()
+        except Exception:  # noqa: BLE001
+            log.exception("demod failed")
+        return jsonify({**base, "in_range": True, "analyzer": analyzer,
+                        "waterfall": waterfall, "audio": audio, "note": ""})
+
+    def _validate_listen_request():
+        """Shared guard for the audio-stream endpoints. Returns
+        (center_mhz, mode, dev, fs, n_block, cal) on success, or an (error
+        response, status) tuple the caller returns directly. Keeps the two stream
+        endpoints (WAV + raw PCM) identical in their device/range/busy checks."""
+        from .demod import pick_mode
+        if request.args.get("center_mhz") is None:
+            return err("need center_mhz")
+        center_mhz = float(request.args["center_mhz"])
+        mode = (request.args.get("mode") or pick_mode(center_mhz)).lower()
+        dev = st.controller.device
+        if not (dev is not None and hasattr(dev, "stream_iq")
+                and getattr(dev, "is_swept_sdr", False)):
+            return err("connect the Pluto (SDR) to listen", 409)
+        if st.controller.busy():
+            return err("a sweep is running — stop it to listen", 409)
+        mods = dev.info.modules
+        lo_mhz, hi_mhz = min(m.min_mhz for m in mods), max(m.max_mhz for m in mods)
+        if not (lo_mhz <= center_mhz <= hi_mhz):
+            return err(f"{center_mhz:.3f} MHz is outside the radio's range", 416)
+        fs = float(cfg.get("pluto", "stream_sample_rate", default=2_400_000))
+        n_block = int(fs * float(cfg.get("pluto", "listen_block_seconds", default=0.5)))
+        cal = float(cfg.get("pluto", "cal_offset_db", default=-30.0))
+        return center_mhz, mode, dev, fs, n_block, cal
+
+    def _audio_blocks(center_mhz, mode, dev, fs, n_block, cal):
+        """Core live-audio generator shared by /api/listen and /api/listen_pcm.
+
+        Tunes the radio ONCE (via dev.stream_iq), demodulates each live IQ block,
+        and yields (pcm_int16_ndarray, arate). As a side effect it publishes the
+        live analyzer + scrolling waterfall to st.controller.listen_spectrum for
+        the inspect panel to poll. Owns the full device-serialisation contract:
+        preempts any running stream, acquires device_lock, clears/sets listen_stop
+        and the `listening` flag, and tears all of that down in finally — so the
+        framing wrappers stay trivial and can't deadlock the device."""
+        import collections
+        import time as _time
+        import numpy as _np
+        from .demod import demodulate
+        from .identify import spectrogram
+        from .sweep.sdr_source import welch_psd
+        wf_rows = collections.deque(maxlen=96)
+        st.controller.listen_stop.set()       # preempt whatever stream is running now
+        with st.controller.device_lock:       # wait for the previous user of the radio to release
+            st.controller.listen_stop.clear()
+            st.controller.listening = True
+            st.controller.listen_spectrum = None
+            stop = st.controller.listen_stop
+            try:
+                for iq in dev.stream_iq(center_mhz * 1e6, fs, n_block, stop):
+                    try:
+                        pcm, arate = demodulate(iq, fs, mode)
+                    except Exception:  # noqa: BLE001
+                        continue
+                    yield pcm, arate
+                    # live analyzer + scrolling waterfall from a subset of this
+                    # block (cheap) — published for the UI to poll & redraw.
+                    try:
+                        sub = iq[:262144]
+                        bb, psd = welch_psd(sub, fs, nperseg=1024)
+                        step = max(1, bb.size // 400)
+                        af = [round((center_mhz * 1e6 + f) / 1e6, 5) for f in bb[::step]]
+                        ap = [round(float(p) + cal, 1) for p in psd[::step]]
+                        spec = spectrogram(sub, fs, n_time=6, nperseg=200)
+                        for row in spec["db"]:
+                            wf_rows.append(row)
+                        flat = _np.asarray(list(wf_rows))
+                        st.controller.listen_spectrum = {
+                            "center_mhz": center_mhz, "mode": mode, "ts": _time.time(),
+                            "analyzer": {"freqs_mhz": af, "power_dbm": ap},
+                            "waterfall": {
+                                "freqs_mhz": [round((center_mhz * 1e6 + f) / 1e6, 4)
+                                              for f in spec["freqs_hz"]],
+                                "db": list(wf_rows),
+                                "vmin": float(_np.percentile(flat, 5)),
+                                "vmax": float(_np.percentile(flat, 99))}}
+                    except Exception:  # noqa: BLE001
+                        pass
+            except Exception:  # noqa: BLE001 - client disconnect / device error
+                pass
+            finally:
+                st.controller.listening = False
+                st.controller.listen_spectrum = None
+
+    @app.get("/api/listen")
+    def listen_stream():
+        """Open-ended demodulated-audio stream as a continuous WAV (legacy/
+        fallback path). Tune the Pluto and keep demodulating live IQ until the
+        client disconnects (or a sweep/inspect preempts it). One stream at a time,
+        serialised on the radio. A plain <audio> element can play it, but delivery
+        pacing on the dev server can cause stutter — prefer /api/listen_pcm with
+        the Web Audio client for smooth playback."""
+        from .demod import wav_stream_header
+        v = _validate_listen_request()
+        if not isinstance(v, tuple) or len(v) != 6:
+            return v                          # (error_response, status)
+        center_mhz, mode, dev, fs, n_block, cal = v
+
+        def gen():
+            first = True
+            for pcm, arate in _audio_blocks(center_mhz, mode, dev, fs, n_block, cal):
+                if first:
+                    yield wav_stream_header(arate)
+                    first = False
+                yield pcm.tobytes()
+        return Response(stream_with_context(gen()), mimetype="audio/wav",
+                        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+    @app.get("/api/listen_pcm")
+    def listen_pcm_stream():
+        """Open-ended RAW little-endian int16 PCM stream for the Web Audio client.
+
+        Emits a one-line self-describing header (sample rate + format) then a
+        continuous run of mono '<i2' samples — NO WAV container and no data-size
+        lie, so the browser never treats it as a finite seekable file. The client
+        (app.js) reads the body as a stream, parses PCM frames, and schedules them
+        against the AudioContext clock, which decouples audible playback from the
+        dev server's delivery pacing (the cause of the <audio> stutter). Shares all
+        device/range/busy/serialisation logic with /api/listen."""
+        from .demod import pcm_stream_header
+        v = _validate_listen_request()
+        if not isinstance(v, tuple) or len(v) != 6:
+            return v                          # (error_response, status)
+        center_mhz, mode, dev, fs, n_block, cal = v
+
+        def gen():
+            first = True
+            for pcm, arate in _audio_blocks(center_mhz, mode, dev, fs, n_block, cal):
+                if first:
+                    yield pcm_stream_header(arate, mode)
+                    first = False
+                yield pcm.tobytes()
+        return Response(stream_with_context(gen()),
+                        mimetype="application/octet-stream",
+                        headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
+
+    @app.get("/api/listen_spectrum")
+    def listen_spectrum_frame():
+        """Latest live analyzer + waterfall produced by the active audio stream
+        (polled by the inspect panel for moving visuals)."""
+        return jsonify(st.controller.listen_spectrum or {"center_mhz": None})
 
     # ---------- planning & sweeping ----------
 

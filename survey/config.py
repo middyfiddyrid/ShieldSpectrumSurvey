@@ -43,7 +43,51 @@ DEFAULTS = {
     },
     "cellmapper": {"import_path": "data/cellmapper_towers.json"},
     "integrations": {"discord_webhook": ""},
-    "device": {"simulate": False, "port": "", "baud": 500000},
+    # spectrum source family: "rfexplorer" (default, unchanged) or "pluto".
+    # env SWEEP_SOURCE overrides this.
+    "device": {"simulate": False, "port": "", "baud": 500000, "source": "rfexplorer"},
+    # ADALM-Pluto / AD936x SDR source. Only used when device.source == "pluto".
+    "pluto": {
+        "uri": "ip:192.168.2.1",          # env PLUTO_URI overrides; or "usb:"
+        "libiio_dir": "",                  # Windows: dir with libiio.dll; "" => %LOCALAPPDATA%\\libiio\\bin
+        "sample_rate": 20_000_000,         # instantaneous bandwidth per tune (<= ~20 MSPS sustained on USB2)
+        "keep_fraction": 0.8,              # central fraction of each segment kept (analog filter edge rolloff)
+        "overlap": 0.5,                    # inter-segment overlap; >=0.5 also covers each tune-center's DC notch
+        "fft_size": 1024,                  # Welch segment length
+        "capture_samples": 32768,          # IQ samples per tune (tuned: ~32 FFT averages, fast USB transfer)
+        "settle_seconds": 0.01,            # post-retune settle before discarding the stale buffer (tuned)
+        "dc_notch_bins": 2,                # +/- bins for the notch_dc() helper (read_sweep uses dc_guard_hz)
+        "dc_guard_hz": 250_000,            # central guard band discarded at each tune center (LO leakage); refilled by overlap
+        "sweep_bins": 2048,                # resampled grid points per read_sweep frame (caps host-side cost)
+        "gain_mode": "manual",             # "manual" (repeatable baseline) or "slow_attack" (first-look survey)
+        "gain_db": 64.0,                   # fixed RX gain when gain_mode == manual
+        # SDR frames are already fully averaged, so the RF Explorer's many host
+        # AVERAGE passes are redundant — cap them here. (MAX-HOLD dwell is NOT
+        # capped: it's real watch-time for intermittent/bursty emitters and is
+        # governed by the sweep profile + per-band risk weighting.)
+        "sweep_avg_passes": 2,
+        # sigidwiki identify: take the best-SNR of N short IQ captures so bursty
+        # emitters (Wi-Fi/BLE) get caught; an empty channel reads noise across all.
+        "identify_samples": 131072,
+        "identify_captures": 8,
+        # "tune & listen" inspect panel: IQ capture for analyzer + waterfall + audio
+        "listen_sample_rate": 2_400_000,   # wide one-shot IQ for the analyzer/waterfall snapshot
+        "listen_seconds": 0.5,
+        # continuous audio stream: lower rate so USB2 sustains REAL-TIME (smooth);
+        # 600 kHz still covers WFM (~200 kHz) and NFM channels.
+        "stream_sample_rate": 2_400_000,
+        "listen_block_seconds": 0.5,       # bigger blocks amortize the per-buffer refill gap
+        # ~approximate~ dBFS -> dBm calibration offset. NOT lab-grade; lean on
+        # baseline-delta detection. Tune per-unit in calibration mode.
+        "cal_offset_db": -30.0,
+        # tunable limits. Stock AD9363A ~ 325 MHz-3.8 GHz. After the AD9364
+        # frequency extension, set these to 70e6 / 6000e6.
+        "freq_min_hz": 325_000_000,
+        "freq_max_hz": 3_800_000_000,
+        # set true to HARD-FAIL at connect if the radio can't reach freq_min/max
+        # (i.e. you expect the frequency extension to be applied)
+        "require_extended": False,
+    },
     "cache": {"dir": "cache", "max_age_hours": 720},
     "calibration": {},
 }

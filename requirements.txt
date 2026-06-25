@@ -8,3 +8,8 @@ reportlab>=4.0
 RFExplorer>=1.0
 # Bluetooth LE inventory scanning (optional — inventory degrades gracefully without it)
 bleak>=0.21
+# ADALM-Pluto / AD936x SDR source (optional — only needed when device.source=pluto).
+# On Windows the native libiio runtime + ADI USB drivers must also be installed;
+# see SDR_SETUP.md. numpy is required by the SDR PSD/stitch math.
+pyadi-iio==0.0.21
+numpy>=1.20
