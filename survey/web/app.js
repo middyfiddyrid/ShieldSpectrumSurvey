@@ -39,6 +39,7 @@ const App = {
   state: null, baseline: null, anomalies: [], dirQueue: [], dirIndex: 0,
   seq: null,          // active multi-step sweep sequence
   overlayHidden: false,
+  hunt: [], huntIdx: 0, autoTimer: null,   // signal-hunt list + ◂/▸/AUTO stepping
 };
 
 /* ---------- navigation ---------- */
@@ -322,6 +323,19 @@ function render(st) {
   $("ft-bat").textContent = dev && dev.battery ? dev.battery : "—";
   $("ft-sim").innerHTML = dev && dev.simulated ? '<span class="sim">⚠ SIMULATED DEVICE</span>' : "";
   $("ft-msg").textContent = st.sweep.message || "idle";
+  // LIVE indicator — driven by the REAL radio listen state (st.live.listening),
+  // not UI intent, so a silently-dropped stream correctly reads IDLE.
+  const lb = $("insp-live-badge");
+  if (lb) {
+    const lv = st.live || {};
+    if (lv.listening) {
+      lb.textContent = "● LIVE" + (lv.center_mhz != null ? " @ " + fmtF(lv.center_mhz) : "") +
+        (lv.mode ? " " + String(lv.mode).toUpperCase() : "") + (App.autoTimer ? " · AUTO" : "");
+      lb.style.color = "#ff5252";
+    } else {
+      lb.textContent = "○ IDLE"; lb.style.color = "#6b7b90";
+    }
+  }
   // sync the device-source picker to the active/last-used source on first load
   // (don't fight the operator if they've changed it this session)
   if ($("device-source") && !App._srcSynced && st.source) {
@@ -846,9 +860,10 @@ function freqLinkDelegate(e) {
   if (!a || a.dataset.center == null) return;
   e.preventDefault();
   e.stopPropagation();
+  if (a.dataset.huntIdx != null) { huntStep(parseInt(a.dataset.huntIdx, 10)); return; }
   listenAt(parseFloat(a.dataset.center), a.dataset.label || "", a.dataset.mode || undefined);
 }
-["tbl-anomalies", "tbl-signals", "tbl-wiki"].forEach(id => {
+["tbl-anomalies", "tbl-signals", "tbl-wiki", "tbl-hunt"].forEach(id => {
   const el = $(id);
   if (el) el.addEventListener("click", freqLinkDelegate, true);  // capture: beat the row onclick
 });
@@ -988,6 +1003,7 @@ function renderDecode(j) {
 function openInspect(idx, modeOverride) {
   const list = App.blView || [];
   if (!list.length) return;
+  stopAuto();                        // a baseline pick takes manual control
   idx = Math.max(0, Math.min(idx, list.length - 1));
   App.inspIdx = idx;
   App.inspContext = "baseline";          // Next/Prev step the baseline list
@@ -1012,10 +1028,73 @@ function setInspNav(enabled) {
 // Disables Next/Prev (no list to step) and tunes the given center+label.
 function listenAt(center, label, mode) {
   if (center == null || isNaN(center)) return;
+  stopAuto();                       // a manual freq pick takes manual control
   App.inspContext = "freq";
   App.inspIdx = null;
   setInspNav(false);
   inspectByFreq(center, label, mode);
+}
+
+/* ---------- signal hunt: step the not-in-baseline (unknown) emitters ---------- */
+// Pull the de-duped UNVERIFIED/caution emitters for the open session and render
+// the hunt list. Read-only — needs a prior interior sweep to be populated.
+async function loadHunt() {
+  let list = [];
+  try { list = await api("/api/scan/unknowns"); } catch (e) {}
+  App.hunt = Array.isArray(list) ? list : [];
+  const tb = $("tbl-hunt");
+  if (tb) {
+    tb.innerHTML = App.hunt.length
+      ? "<tr><th>Score</th><th>Frequency</th><th>BW kHz</th><th>Class</th><th>Why unexplained</th></tr>" +
+        App.hunt.map((s, i) =>
+          `<tr><td>${(s.anomaly_score || 0).toFixed(0)}</td>` +
+          `<td><a href="#" class="freqlink" data-center="${s.center_mhz}" data-hunt-idx="${i}" ` +
+          `data-label="${esc(s.matched_label || s.match_reason || s.classification || "unknown")}">${fmtF(s.center_mhz)}</a></td>` +
+          `<td>${s.bw_khz}</td>` +
+          `<td><span class="pill ${s.classification}">${s.classification}</span>${s.caution ? " ⚠" : ""}</td>` +
+          `<td class="note" style="max-width:300px">${esc(s.match_reason || "")}</td></tr>`).join("")
+      : "<tr><td class='note'>No unexplained emitters above the baseline — run an interior sweep first.</td></tr>";
+  }
+  return App.hunt;
+}
+
+// Tune the live listen view to hunt entry `idx` (wraps). Sets the 'hunt' stepping
+// context so ◂/▸ walk the hunt list (not the baseline).
+function huntStep(idx) {
+  const list = App.hunt || [];
+  if (!list.length) return;
+  idx = ((idx % list.length) + list.length) % list.length;
+  App.huntIdx = idx;
+  App.inspContext = "hunt";
+  const s = list[idx];
+  setInspNav(true);
+  inspectByFreq(s.center_mhz, `${s.matched_label || s.classification || "unknown"} (${idx + 1}/${list.length})`);
+}
+
+async function jumpFirstUnknown() {
+  await loadHunt();
+  if (!App.hunt.length) {
+    alert("No unexplained emitters above the baseline yet — run an interior sweep first.");
+    return;
+  }
+  huntStep(0);
+}
+
+function stopAuto() {
+  if (App.autoTimer) { clearInterval(App.autoTimer); App.autoTimer = null; }
+  const b = $("insp-auto"); if (b) b.classList.remove("on");
+}
+
+// AUTO: auto-advance through the hunt list, dwelling N seconds (min 3 — each step
+// re-tunes the Pluto, so sub-3s thrashes the radio). Manual ◂/▸ still work alongside.
+function toggleAuto() {
+  if (App.autoTimer) { stopAuto(); return; }
+  if (!App.hunt || !App.hunt.length) { alert("Jump to the hunt list first."); return; }
+  const dwell = Math.max(3, parseFloat(($("insp-dwell") || {}).value) || 6);
+  App.inspContext = "hunt";
+  const b = $("insp-auto"); if (b) b.classList.add("on");
+  if (App.huntIdx == null) App.huntIdx = 0;
+  App.autoTimer = setInterval(() => huntStep((App.huntIdx ?? 0) + 1), dwell * 1000);
 }
 
 function startSpectrumPoll() {
@@ -1129,8 +1208,16 @@ function drawWaterfall(cv, wf) {
 }
 
 // Next/Prev only step the baseline list (hidden in any other context).
-$("insp-next").onclick = () => { if (App.inspContext === "baseline") openInspect((App.inspIdx ?? 0) + 1); };
-$("insp-prev").onclick = () => { if (App.inspContext === "baseline") openInspect((App.inspIdx ?? 0) - 1); };
+$("insp-next").onclick = () => {
+  if (App.inspContext === "baseline") openInspect((App.inspIdx ?? 0) + 1);
+  else if (App.inspContext === "hunt") huntStep((App.huntIdx ?? 0) + 1);
+};
+$("insp-prev").onclick = () => {
+  if (App.inspContext === "baseline") openInspect((App.inspIdx ?? 0) - 1);
+  else if (App.inspContext === "hunt") huntStep((App.huntIdx ?? 0) - 1);
+};
+if ($("insp-auto")) $("insp-auto").onclick = toggleAuto;
+if ($("btn-hunt")) $("btn-hunt").onclick = jumpFirstUnknown;
 // Mode <select> re-tune works from any list: re-tune the SAME center with the
 // chosen demod. In baseline context re-run openInspect (keeps the m/n title);
 // otherwise re-tune the current center via the core entry point.
@@ -1140,6 +1227,7 @@ $("insp-mode").onchange = () => {
   else if (App.inspCenter != null) inspectByFreq(App.inspCenter, App.inspLabel, mode);
 };
 $("insp-close").onclick = () => {
+  stopAuto();
   stopSpectrumPoll();
   listenStop();
   $("inspect-panel").style.display = "none";
@@ -1471,6 +1559,7 @@ async function loadResults() {
         `<td style="max-width:300px">${esc(s.match_reason)}</td>` +
         `<td><button class="btn" onclick="captureOne(${s.id})">CAPTURE</button></td></tr>`).join("");
   } catch (e) {}
+  loadHunt();
   loadSignals();
   loadReports();
   loadExpected();

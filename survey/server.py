@@ -23,6 +23,17 @@ log = logging.getLogger("survey.server")
 WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
 
 
+def _dedupe_emitters(rows, tol_mhz=0.25):
+    """One row per physical emitter: keep the first row (rows are pre-ordered by
+    score) within tol_mhz of an already-kept center; the same emitter seen across
+    several room sweeps collapses to its best instance."""
+    kept = []
+    for r in rows:
+        if not any(abs(r["center_mhz"] - k["center_mhz"]) <= tol_mhz for k in kept):
+            kept.append(r)
+    return kept
+
+
 class AppState:
     def __init__(self, db, cfg):
         self.db = db
@@ -442,6 +453,13 @@ def create_app(db, cfg, demo=False) -> Flask:
             sweeps = db.query("SELECT id,phase,module,room,profile,status,started_utc,"
                               "finished_utc,simulated FROM sweeps WHERE session_id=? "
                               "ORDER BY id", (session["id"],))
+        # real radio listen state (drives the LIVE indicator) — sourced from the
+        # controller flags _audio_blocks sets, so a silently-dropped stream reads idle
+        ls = getattr(st.controller, "listen_spectrum", None)
+        live = {"listening": bool(getattr(st.controller, "listening", False))}
+        if ls:
+            live.update({"center_mhz": ls.get("center_mhz"), "mode": ls.get("mode"),
+                         "ts": ls.get("ts")})
         return jsonify({
             "session": session,
             "source": (st.controller.active_source
@@ -453,6 +471,7 @@ def create_app(db, cfg, demo=False) -> Flask:
             "baseline": st.baseline_status,
             "calibration": st.calibration_status,
             "busy": st.controller.busy(),
+            "live": live,
             "demo": st.demo,
         })
 
@@ -900,13 +919,22 @@ def create_app(db, cfg, demo=False) -> Flask:
             "SELECT * FROM signals WHERE session_id=? AND phase='interior' AND "
             "(classification='UNVERIFIED' OR caution=1) ORDER BY anomaly_score DESC",
             (session["id"],))
-        # one row per physical signal: the same emitter detected in several room
-        # sweeps keeps only its highest-scoring instance (room grid shows the rest)
-        kept = []
-        for r in rows:
-            if not any(abs(r["center_mhz"] - k["center_mhz"]) <= 0.25 for k in kept):
-                kept.append(r)
-        return jsonify(kept)
+        return jsonify(_dedupe_emitters(rows))
+
+    @app.get("/api/scan/unknowns")
+    def scan_unknowns():
+        """Ordered, de-duped 'hunt list': the interior signals NOT explained by the
+        baseline (the SAME UNVERIFIED-or-caution predicate as /api/anomalies). The
+        client tunes the live listen view to the first one and steps through the
+        rest. Read-only — no radio, no DB write; run a sweep first to populate it."""
+        session = st.session()
+        if not session:
+            return err("no session")
+        rows = db.query(
+            "SELECT * FROM signals WHERE session_id=? AND phase='interior' AND "
+            "(classification='UNVERIFIED' OR caution=1) ORDER BY anomaly_score DESC",
+            (session["id"],))
+        return jsonify(_dedupe_emitters(rows))
 
     @app.get("/api/expected")
     def expected():

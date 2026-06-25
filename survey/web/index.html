@@ -288,12 +288,15 @@ body.demo #card-casefiles { display:none !important; }
   <div class="card" id="inspect-panel" style="display:none">
     <div class="row">
       <b id="insp-title">—</b>
+      <span id="insp-live-badge" class="pill" style="margin-left:4px;color:#6b7b90">○ IDLE</span>
       <label class="note" for="insp-mode">Mode</label>
       <select id="insp-mode">
         <option value="nfm">NFM</option><option value="wfm">WFM</option><option value="am">AM</option><option value="usb">USB</option><option value="lsb">LSB</option><option value="cw">CW</option><option value="pocsag">POCSAG (decode)</option>
       </select>
-      <button class="btn" id="insp-prev">◂ Prev</button>
-      <button class="btn" id="insp-next">Next ▾</button>
+      <button class="btn" id="insp-prev" title="previous signal">◂</button>
+      <button class="btn" id="insp-next" title="next signal">▸</button>
+      <button class="btn" id="insp-auto" title="auto-advance through the hunt list">AUTO ▸▸</button>
+      <label class="note">dwell <input id="insp-dwell" type="number" value="6" min="3" step="1" style="width:44px"></label>
       <button class="btn" id="insp-close">Close ✕</button>
       <span id="insp-msg" class="note"></span>
     </div>
@@ -446,6 +449,14 @@ body.demo #card-casefiles { display:none !important; }
 <!-- ============ RESULTS ============ -->
 <section class="view" id="view-results">
   <h2>RESULTS <span class="tag">anomalies ranked by score</span></h2>
+  <div class="card">
+    <h3>SIGNAL HUNT <span class="tag">tune &amp; step the emitters NOT explained by the baseline</span></h3>
+    <div class="row">
+      <button class="btn primary" id="btn-hunt">▸ JUMP TO FIRST UNKNOWN</button>
+      <span class="note">Then ◂ / ▸ or AUTO in the tune panel steps through them. Needs an interior sweep first.</span>
+    </div>
+    <div class="scroll" style="max-height:240px"><table id="tbl-hunt"></table></div>
+  </div>
   <div class="card">
     <h3>REPORT OPTIONS <span class="tag" style="font-size:11px">extra sections to include when you GENERATE REPORT</span></h3>
     <div class="row">
