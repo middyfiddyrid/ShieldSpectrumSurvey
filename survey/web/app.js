@@ -899,6 +899,8 @@ function inspectByFreq(center, label, mode) {
     return;
   }
   $("insp-note").textContent = "";
+  if (mode === "pocsag") { inspectPocsag(center, label, tuneId); return; }
+  $("insp-decode").style.display = "none";
   $("insp-msg").textContent = "tuning & streaming…";
   // Prefer smooth Web Audio chunked playback (/api/listen_pcm); fall back to the
   // plain <audio> element (/api/listen) only if Web Audio / fetch-streaming is
@@ -915,6 +917,53 @@ function inspectByFreq(center, label, mode) {
     }
   });
   startSpectrumPoll();
+}
+
+// POCSAG is a paging DATA mode, not audio: one-shot capture (~2 s) + decode via
+// /api/inspect, then render the analyzer/waterfall once and list decoded pages.
+// No audio stream, no live poll. Decoded text is third-party content -> rendered
+// with textContent (never innerHTML) and kept to this internal inspect view.
+function inspectPocsag(center, label, tuneId) {
+  $("insp-msg").textContent = "capturing ~2 s & decoding POCSAG…";
+  $("insp-decode").style.display = "none";
+  api("/api/inspect", { center_mhz: center, label, mode: "pocsag" }).then((j) => {
+    if (App.tuneId !== tuneId) return;          // a newer tune superseded this one
+    if (j.analyzer) drawAnalyzer($("insp-analyzer").getContext("2d"), $("insp-analyzer"), j.analyzer);
+    if (j.waterfall) drawWaterfall($("insp-waterfall").getContext("2d"), $("insp-waterfall"), j.waterfall);
+    renderDecode(j);
+  }).catch((e) => {
+    if (App.tuneId === tuneId) $("insp-msg").textContent = "decode failed: " + (e && e.message || e);
+  });
+}
+
+function renderDecode(j) {
+  const el = $("insp-decode");
+  const d = j && j.decode;
+  if (!d) {
+    el.style.display = "none";
+    $("insp-msg").textContent = (j && j.note) || "decode unavailable";
+    return;
+  }
+  const s = d.stats || {};
+  const okc = (s.codewords_ok || 0) + (s.codewords_corrected || 0);
+  const tot = okc + (s.codewords_bad || 0);
+  const msgs = d.messages || [];
+  const lines = [`POCSAG · ${d.baud ? d.baud + " baud" : "no sync"}` +
+                 (d.inverted ? " · inverted polarity" : "") +
+                 ` · ${d.sync_count || 0} sync · ${okc}/${tot} codewords ok`];
+  if (!msgs.length) {
+    lines.push(d.baud ? "(synced, but no addressed pages)" : "(no POCSAG pages decoded)");
+  } else {
+    for (const m of msgs) {
+      const body = m.type === "tone" ? "(tone-only page)" : m.text;
+      const flags = (m.bits_corrected ? `  [${m.bits_corrected} bit(s) corrected]` : "") +
+                    (m.uncorrectable ? `  [${m.uncorrectable} bad codeword(s)]` : "");
+      lines.push(`RIC ${m.ric}  fn${m.function}  ${(m.type || "").toUpperCase()}: ${body}${flags}`);
+    }
+  }
+  el.textContent = lines.join("\n");
+  el.style.display = "";
+  $("insp-msg").textContent = msgs.length ? `● ${msgs.length} page(s) decoded` : "● decoded";
 }
 
 // Baseline-table entry point: steps App.blView[idx] and preserves Next/Prev.
@@ -1109,6 +1158,11 @@ function renderIdentify(r) {
       + `${f.continuity}, class <b>${esc(f.modulation_class)}</b>`
       + (f.fsk_states >= 2 ? `, ${f.fsk_states}-state FSK shift ${f.fsk_shift_khz} kHz` : "")
       + `, spectral flatness ${f.spectral_flatness}.</p>`;
+  }
+  if (r.pocsag_likely) {
+    html += `<p class="note" style="color:var(--cyan)">Looks like a <b>POCSAG pager</b> `
+      + `(2-FSK at a paging baud). Tune it in the inspect panel and choose `
+      + `<b>POCSAG (decode)</b> mode to read the messages.</p>`;
   }
   if (!r.candidates || !r.candidates.length) {
     $("id-results").innerHTML = html + "<p class='note'>No candidate matches.</p>";

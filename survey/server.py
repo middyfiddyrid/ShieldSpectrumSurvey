@@ -572,9 +572,12 @@ def create_app(db, cfg, demo=False) -> Flask:
             note = ("connect the Pluto (SDR) for modulation-based identification — "
                     "matched on frequency/bandwidth only")
         candidates = identify(center_mhz * 1e6, feats, ref)
+        from .pocsag import looks_like_pocsag
+        pocsag_likely = bool(feats and looks_like_pocsag(feats))
         return jsonify({"center_mhz": center_mhz, "bw_khz": bw_khz,
                         "source": st.controller.active_source, "features": feats,
-                        "note": note, "candidates": candidates, "spectrogram": spec})
+                        "note": note, "candidates": candidates, "spectrogram": spec,
+                        "pocsag_likely": pocsag_likely})
 
     @app.post("/api/inspect")
     def inspect_signal():
@@ -608,7 +611,11 @@ def create_app(db, cfg, demo=False) -> Flask:
                             f"{lo_mhz:.0f}-{hi_mhz:.0f} MHz range — apply the AD9364 extension to reach it"})
         try:
             fs = float(cfg.get("pluto", "listen_sample_rate", default=2_400_000))
-            n = int(fs * float(cfg.get("pluto", "listen_seconds", default=0.5)))
+            # POCSAG decode needs a full batch (~1 s at 512 baud) -> longer capture
+            secs = (float(cfg.get("pluto", "pocsag_seconds", default=2.0))
+                    if mode == "pocsag"
+                    else float(cfg.get("pluto", "listen_seconds", default=0.5)))
+            n = int(fs * secs)
             st.controller.listen_stop.set()        # preempt any live audio stream
             with st.controller.device_lock:        # serialise radio access
                 iq = dev.capture_iq(center_mhz * 1e6, fs, n)
@@ -624,14 +631,24 @@ def create_app(db, cfg, demo=False) -> Flask:
         wf = spectrogram(iq, fs, n_time=90, nperseg=200)
         waterfall = {"freqs_mhz": [round((center_mhz * 1e6 + f) / 1e6, 4) for f in wf["freqs_hz"]],
                      "db": wf["db"], "vmin": wf["vmin"], "vmax": wf["vmax"]}
-        audio = None
-        try:
-            pcm, arate = demodulate(iq, fs, mode)
-            audio = "data:audio/wav;base64," + base64.b64encode(wav_bytes(pcm, arate)).decode()
-        except Exception:  # noqa: BLE001
-            log.exception("demod failed")
+        audio, decode = None, None
+        if mode == "pocsag":
+            # decode pages instead of producing (unlistenable) hash audio
+            try:
+                from . import pocsag
+                decode = pocsag.decode_pocsag(
+                    iq, fs, correct=bool(cfg.get("pluto", "pocsag_bch_correct", default=True)))
+                decode["protocol"] = "POCSAG"
+            except Exception:  # noqa: BLE001
+                log.exception("pocsag decode failed")
+        else:
+            try:
+                pcm, arate = demodulate(iq, fs, mode)
+                audio = "data:audio/wav;base64," + base64.b64encode(wav_bytes(pcm, arate)).decode()
+            except Exception:  # noqa: BLE001
+                log.exception("demod failed")
         return jsonify({**base, "in_range": True, "analyzer": analyzer,
-                        "waterfall": waterfall, "audio": audio, "note": ""})
+                        "waterfall": waterfall, "audio": audio, "decode": decode, "note": ""})
 
     def _validate_listen_request():
         """Shared guard for the audio-stream endpoints. Returns

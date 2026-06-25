@@ -39,6 +39,12 @@ def pick_mode(center_mhz: float, label: str = "") -> str:
     return "nfm"   # narrowband default; digital signals will sound like hash
 
 
+def _fm_discriminator(x: np.ndarray) -> np.ndarray:
+    """Instantaneous frequency of complex IQ via the phase of consecutive-sample
+    products. Shared by demodulate()'s FM path and the POCSAG decoder."""
+    return np.angle(x[1:] * np.conj(x[:-1])).astype(np.float64)
+
+
 def _decimate(x: np.ndarray, factor: int) -> np.ndarray:
     """Boxcar (moving-average) anti-alias + downsample. Works for real/complex."""
     factor = max(1, int(factor))
@@ -102,7 +108,7 @@ def demodulate(iq, fs: float, mode: str = "nfm") -> tuple[np.ndarray, int]:
         arate = fs / dec
         if x.size < 4:
             raise ValueError("capture too short for this mode")
-        audio = np.angle(x[1:] * np.conj(x[:-1])).astype(np.float64)  # FM discriminator
+        audio = _fm_discriminator(x)                   # FM discriminator
 
     dec2 = max(1, int(round(arate / AUDIO_RATE)))
     audio = _decimate(audio, dec2)

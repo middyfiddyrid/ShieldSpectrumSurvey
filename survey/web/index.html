@@ -290,7 +290,7 @@ body.demo #card-casefiles { display:none !important; }
       <b id="insp-title">—</b>
       <label class="note" for="insp-mode">Mode</label>
       <select id="insp-mode">
-        <option value="nfm">NFM</option><option value="wfm">WFM</option><option value="am">AM</option><option value="usb">USB</option><option value="lsb">LSB</option><option value="cw">CW</option>
+        <option value="nfm">NFM</option><option value="wfm">WFM</option><option value="am">AM</option><option value="usb">USB</option><option value="lsb">LSB</option><option value="cw">CW</option><option value="pocsag">POCSAG (decode)</option>
       </select>
       <button class="btn" id="insp-prev">◂ Prev</button>
       <button class="btn" id="insp-next">Next ▾</button>
@@ -303,6 +303,7 @@ body.demo #card-casefiles { display:none !important; }
     <div class="note" style="margin-top:6px">WATERFALL (time ↓ × frequency)</div>
     <canvas id="insp-waterfall" width="660" height="150" style="width:100%;background:#04070c;border:1px solid #26303d"></canvas>
     <div class="row" style="margin-top:6px"><audio id="insp-audio" controls style="width:100%"></audio></div>
+    <pre id="insp-decode" class="note" style="display:none;white-space:pre-wrap;margin-top:6px;background:#04070c;border:1px solid #26303d;padding:8px"></pre>
   </div>
 </section>
 
