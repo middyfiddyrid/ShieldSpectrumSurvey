@@ -4,7 +4,42 @@ Continuation brief for a fresh Fable/Claude Code session. Read this first, then 
 
 ---
 
-# ⚡ LATEST SESSION HANDOFF — 2026-06-24 (later) — demod backlog #1+#2 + Web Audio fix (READ THIS FIRST)
+# ⚡ LATEST SESSION HANDOFF — 2026-06-25 — main merge + POCSAG decoder (READ THIS FIRST)
+
+Two things this session: (1) the whole `pluto-sdr-source` line was merged into **`main`**
+(`--no-ff`, commit `eb1a176`); (2) **demod #3 — a POCSAG paging decoder — was built** on a new
+**`pocsag-decoder`** branch (off main). **101 tests green** (`python -m unittest discover -s tests`).
+
+### ⚠️ config.yaml got clobbered by the merge — ACTION NEEDED
+`config.yaml` was tracked on main but un-tracked+gitignored on the branch (commit `00e8625`).
+`git checkout main` + the merge silently overwrote then deleted the live working copy; the live values
+were never in git (correct, for secrets) so they're **unrecoverable**. I restored the last *committed*
+version (loads fine, gitignored, not re-tracked) but it predates the Pluto work. **Re-enter in
+config.yaml:** `api_keys.opencellid` (your key), `uls.extract_dir` (your FCC ULS extract path), and a
+`pluto:` section (your tuning / extended-range choice — app runs on `survey/config.py` defaults
+meanwhile). LESSON: that file is gitignored-but-holds-live-state — copy it aside before any branch
+switch/merge.
+
+### POCSAG decoder (branch `pocsag-decoder`, commits 6c61258 + d67c6fe — NOT merged to main)
+- **`survey/pocsag.py`** — numpy DSP front end (shared `demod._fm_discriminator`, fractional-timing
+  bit slice) + pure-Python BCH(31,21)+parity check/2-bit-correct, batch walk, numeric/alpha decode.
+  Tries all bauds (512/1200/2400); polarity auto-resolved by the FSC/FSC_INV lock. `encode_pocsag()`
+  lives alongside for self-testing. Honesty: every page carries `bits_corrected`/`uncorrectable`;
+  no-signal / garbage-behind-a-false-lock returns EMPTY (a confidence gate on clean codewords), never
+  hallucinated pages.
+- Integration: `/api/inspect` decodes when `mode=='pocsag'` (~3 s one-shot capture -> `decode` key);
+  inspect-panel **POCSAG (decode)** dropdown mode lists pages in `#insp-decode` (textContent, third-party
+  text stays internal); `/api/identify` + SIGNAL ID card show a "looks like a pager" hint.
+- **Adversarially verified** (3-lens workflow + adjudicator): FSC/IDLE/BCH-0x769/(32,22)dmin=6/RIC/
+  numeric/alpha all independently confirmed spec-correct; the review caught the locks[0] + garbage-batch
+  false-page bugs, now fixed. External golden-vector tests added (not encoder-generated).
+- **STILL HARDWARE-UNTESTED:** no Pluto + no real pager signal here. Bench-verify: tune a known pager
+  freq, pick POCSAG mode, confirm real pages decode. `pocsag-decoder` is NOT merged to main yet
+  (awaiting that check) — merge when satisfied.
+
+---
+
+# SESSION HANDOFF — 2026-06-24 (later) — demod backlog #1+#2 + Web Audio fix
 
 Four tasks off the prior handoff's PENDING list landed on `pluto-sdr-source` (now **18 commits
 ahead of main, still NOT merged**). **75 unit tests green** (`python -m unittest discover -s tests`).
