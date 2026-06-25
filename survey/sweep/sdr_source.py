@@ -56,14 +56,18 @@ def _ensure_libiio_on_path(libiio_dir: str = ""):
     local = os.environ.get("LOCALAPPDATA")
     if local:
         candidates.append(os.path.join(local, "libiio", "bin"))
+    candidates.append(r"C:\Program Files\PothosSDR\bin")   # common alt install
     for d in candidates:
         if d and os.path.isdir(d):
             try:
                 os.add_dll_directory(d)
             except (OSError, AttributeError):
                 pass
-            if d.lower() not in os.environ.get("PATH", "").lower():
-                os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+            # ALWAYS prepend the resolved dir, even if PATH seems to already have
+            # libiio: a GUI/shortcut launch can carry a stale or unexpanded entry
+            # that ctypes.util.find_library('iio') can't use, and putting the real
+            # absolute dir FIRST guarantees the loader finds libiio.dll.
+            os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
             return
 
 
@@ -468,6 +472,19 @@ class PlutoSource(AD936xSource):
             raise DeviceError(
                 "pyadi-iio not installed (pip install pyadi-iio) — and on "
                 "Windows the native libiio runtime must be on PATH") from e
+        except (TypeError, OSError) as e:
+            # native libiio.dll couldn't be located/loaded (the classic
+            # "LoadLibrary() argument 1 must be str, not None" when find_library
+            # returns None). Report exactly what we tried so it's actionable.
+            import ctypes.util
+            la = os.environ.get("LOCALAPPDATA", "")
+            guess = os.path.join(la, "libiio", "bin") if la else "(no LOCALAPPDATA)"
+            raise DeviceError(
+                f"native libiio runtime not loadable ({e}). Looked for libiio.dll "
+                f"in {guess} (exists={os.path.isdir(guess) if la else False}); "
+                f"find_library('iio')={ctypes.util.find_library('iio')!r}. Fix: make "
+                f"sure %LOCALAPPDATA%\\libiio\\bin (containing libiio.dll) is on PATH, "
+                f"or launch the app from a shell that prepends it.") from e
         # A fast reconnect can race the previous libiio context's release (the
         # radio reports busy for a beat), so retry a few times before giving up.
         last = None
