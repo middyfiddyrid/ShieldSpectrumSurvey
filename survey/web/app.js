@@ -1197,16 +1197,52 @@ async function analyzeSignal() {
   try { j = await api("/api/analyze/signal", { center_mhz: center, label: App.inspLabel || "", mode }); }
   catch (e) { out.innerHTML = `<span class='note'>analyze failed: ${esc(e.message || e)}</span>`; return; }
   renderAnalyze(j);
-  if (j.decode) renderDecode(j);
   if (j.audio) { const au = $("insp-audio"); au.src = j.audio; }
 }
 
+// One decoded message -> one human line, across every protocol the router runs.
+function decodeMsgLine(proto, m) {
+  const p = (proto || "").toUpperCase();
+  if (p === "POCSAG" || p === "FLEX") {
+    const id = m.ric != null ? `RIC ${m.ric}` : (m.capcode != null ? `capcode ${m.capcode}` : "");
+    const body = m.text || m.alpha || m.numeric || (m.type === "tone" ? "(tone-only)" : "");
+    const fl = m.bits_corrected ? `  [${m.bits_corrected} bit(s) corrected]` : "";
+    return `${id}${m.function != null ? " fn" + m.function : ""}  ${(m.type || "").toUpperCase()}: ${body}${fl}`;
+  }
+  if (p && p.startsWith("OOK")) {
+    return `${m.encoding || "?"} · ${m.n_bits || 0} bits · 0x${m.hex || ""} · ×${m.repeats || 1}` +
+           (m.device_guess ? `  — ${m.device_guess}` : "");
+  }
+  if (p === "DTMF") return `digits: ${m.digits || ""}`;
+  if (p === "CW/MORSE" || p === "CW") return `${m.text || ""}${m.wpm ? `  (${m.wpm} wpm)` : ""}`;
+  return JSON.stringify(m);
+}
+
+const READABLE_COLOR = {
+  decoded: "#39d98a", listen: "#39d98a", maybe_decode: "#ffd24a",
+  encrypted: "#e0a030", identify_only: "#e0a030", none: "#6b7b90", unknown: "#6b7b90",
+};
+
 function renderAnalyze(j) {
   const out = $("insp-analyze-out");
-  const f = j.features, nv = j.novelty, cands = j.candidates || [];
+  const f = j.features, nv = j.novelty, cands = j.candidates || [], d = j.decode;
   const rows = [];
   rows.push(`<div class="row"><b>◎ ANALYZE</b> ${j.in_range ? "" : "<span class='pill'>freq-only</span>"} ` +
             `${j.pocsag_likely ? "<span class='pill'>looks like POCSAG</span>" : ""}</div>`);
+  // plain-English field verdict — "what is it transmitting"
+  if (j.interpretation) {
+    const col = READABLE_COLOR[j.interpretation.readable] || "#8fa0b8";
+    rows.push(`<div style="color:${col};font-weight:bold;margin:2px 0">▶ ${esc(j.interpretation.summary)}</div>`);
+  }
+  // decoded content (any protocol the router matched)
+  if (d && d.messages && d.messages.length) {
+    rows.push(`<div class="note" style="margin-top:2px">DECODED — ${esc(d.protocol || "")}` +
+              `${d.note ? " · " + esc(d.note) : ""}:</div>`);
+    rows.push("<pre style='white-space:pre-wrap;background:#04070c;border:1px solid #26303d;padding:6px;margin:2px 0'>" +
+      d.messages.map(m => esc(decodeMsgLine(d.protocol, m))).join("\n") + "</pre>");
+  } else if (d && d.note) {
+    rows.push(`<div class="note">${esc(d.note)}</div>`);
+  }
   if (j.note) rows.push(`<div class="note">${esc(j.note)}</div>`);
   if (f) {
     rows.push(`<div class="note">${f.signal_present ? "● signal present" : "○ noise floor"} · ` +
@@ -1234,14 +1270,20 @@ function renderAnalyze(j) {
   out.style.display = "";
 }
 
-// RECORD demodulated audio of the inspected signal to a per-session WAV (toggle).
-async function toggleRecord() {
-  const btn = $("insp-record");
+// RECORD the inspected signal to a per-session file (toggle). kind='audio' -> WAV
+// you can play back; kind='iq' -> raw complex64 forensic evidence (encrypted/
+// unknown intruder you can't read but must capture + hand to authorities).
+async function toggleRecord(kind) {
+  kind = kind || "audio";
+  const aBtn = $("insp-record"), iBtn = $("insp-record-iq");
   if (App.recording) {
-    App.recording = false; btn.textContent = "● REC"; btn.classList.remove("on");
+    App.recording = false;
+    if (aBtn) { aBtn.textContent = "● REC"; aBtn.classList.remove("on"); }
+    if (iBtn) { iBtn.textContent = "⦿ IQ"; iBtn.classList.remove("on"); }
     try {
       const r = await api("/api/record/stop", {});
-      $("insp-msg").textContent = r.recording_id ? `■ saved (${r.duration_s || 0}s)` : (r.note || "stopped");
+      $("insp-msg").textContent = r.recording_id
+        ? `■ saved (${r.duration_s || 0}s · ${r.kind || ""})` : (r.note || "stopped");
     } catch (e) { $("insp-msg").textContent = "stop failed: " + (e.message || e); }
     loadRecordings();
     return;
@@ -1250,9 +1292,11 @@ async function toggleRecord() {
   if (center == null) { alert("Open a signal in the monitor first."); return; }
   const mode = ($("insp-mode") || {}).value || undefined;
   try {
-    await api("/api/record/start", { center_mhz: center, mode, label: App.inspLabel || "" });
-    App.recording = true; btn.textContent = "■ STOP REC"; btn.classList.add("on");
-    $("insp-msg").textContent = "● recording…";
+    await api("/api/record/start", { center_mhz: center, mode, kind, label: App.inspLabel || "" });
+    App.recording = true;
+    const b = (kind === "iq") ? iBtn : aBtn;
+    if (b) { b.textContent = "■ STOP"; b.classList.add("on"); }
+    $("insp-msg").textContent = (kind === "iq") ? "● recording IQ evidence…" : "● recording…";
   } catch (e) { alert("Record failed: " + (e.message || e)); }
 }
 
@@ -1263,13 +1307,19 @@ async function loadRecordings() {
   try { recs = await api("/api/recordings"); } catch (e) { el.innerHTML = ""; return; }
   if (!recs.length) { el.innerHTML = ""; return; }
   el.innerHTML = "<div class='note'>RECORDINGS (this session · client-sensitive, gitignored):</div>" +
-    recs.map(r => `<div class="row" style="gap:6px"><span class="note">${fmtF(r.center_mhz)} · ` +
-      `${esc(r.mode || "")} · ${r.duration_s || 0}s${r.notes === "archived" ? " · archived" : ""}</span>` +
-      `<audio controls preload="none" src="/api/recordings/${r.id}/audio" style="height:30px"></audio></div>`).join("");
+    recs.map(r => {
+      const meta = `${fmtF(r.center_mhz)} · ${esc(r.kind || "audio")}${r.kind !== "iq" ? "/" + esc(r.mode || "") : ""}` +
+        ` · ${r.duration_s || 0}s${r.notes === "archived" ? " · archived" : ""}`;
+      const player = (r.kind === "iq")
+        ? `<a class="note" href="/api/recordings/${r.id}/audio" download>download .cf32 evidence ↓</a>`
+        : `<audio controls preload="none" src="/api/recordings/${r.id}/audio" style="height:30px"></audio>`;
+      return `<div class="row" style="gap:6px"><span class="note">${meta}</span>${player}</div>`;
+    }).join("");
 }
 
 if ($("insp-analyze")) $("insp-analyze").onclick = analyzeSignal;
-if ($("insp-record")) $("insp-record").onclick = toggleRecord;
+if ($("insp-record")) $("insp-record").onclick = () => toggleRecord("audio");
+if ($("insp-record-iq")) $("insp-record-iq").onclick = () => toggleRecord("iq");
 
 /* ---------- MANUAL gated triage (post-hoc, no radio) ---------- */
 const TRIAGE_LABELS = { cleared: "Cleared", suspect: "Suspect", flagged: "Flag", ask_client: "Ask client" };

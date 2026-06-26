@@ -87,8 +87,9 @@ def create_app(db, cfg, demo=False) -> Flask:
     # at the server, not merely hidden in the UI: Persons of Interest, the
     # internal memo, the multi-AI threat analysis, and case-file upload/serve.
     # NOTE: this is "/api/analyze/threat_vectors" specifically, NOT a bare
-    # "/api/analyze" prefix — the RF-only fused signal ANALYZE (/api/analyze/signal)
-    # carries no client data and stays available in the demo.
+    # "/api/analyze" prefix — the fused signal ANALYZE (/api/analyze/signal) stays
+    # available in the demo for RF identification, but it strips DECODED content
+    # (pager text / DTMF / device bits = intercepted comms) in demo mode itself.
     # /api/record* also covers /api/recordings* (prefix) — raw audio of possibly
     # private comms must never be reachable in the public demo. Triage notes +
     # address-novelty history are operator-internal too.
@@ -717,13 +718,15 @@ def create_app(db, cfg, demo=False) -> Flask:
         (instantaneous) analyzer (welch_psd) + waterfall (spectrogram) + EITHER
         protocol decode (POCSAG) OR demod audio, PLUS the new-to-address novelty
         read. This is what replaces the audio-only 'bullshit demod': it says WHAT
-        the signal IS, not just plays it. RF-only, no client PII -> stays
-        available in the demo. Degrades cleanly (no radio / busy / out-of-range)
+        the signal IS, not just plays it. Available in the demo for RF
+        identification, but DECODED content is stripped in demo mode (it's
+        intercepted comms). Degrades cleanly (no radio / busy / out-of-range)
         exactly like /api/inspect."""
         import base64
         from .demod import demodulate, pick_mode, wav_bytes
         from .identify import identify, iq_features, load_reference, spectrogram
         from .pocsag import looks_like_pocsag
+        from .decode_router import route_decode, interpret, DATA_MODES, DECODE_MODES
         from .sweep.sdr_source import welch_psd
         body = request.get_json(silent=True) or {}
         center_mhz = body.get("center_mhz")
@@ -741,7 +744,7 @@ def create_app(db, cfg, demo=False) -> Flask:
         mode = (body.get("mode") or pick_mode(center_mhz, label)).lower()
 
         ref = load_reference()
-        feats = spec = analyzer = audio = decode = None
+        feats = spec = analyzer = audio = decode = interpretation = None
         in_range = False
         note = ""
         cal = float(cfg.get("pluto", "cal_offset_db", default=-30.0))
@@ -766,9 +769,12 @@ def create_app(db, cfg, demo=False) -> Flask:
             else:
                 try:
                     fs = float(cfg.get("pluto", "listen_sample_rate", default=2_400_000))
+                    # ANALYZE is a deliberate "interrogate this" action — capture a
+                    # bit longer than the live listen so the decoders have enough
+                    # symbols (paging frames, repeated device packets).
                     secs = (float(cfg.get("pluto", "pocsag_seconds", default=3.0))
-                            if mode == "pocsag"
-                            else float(cfg.get("pluto", "listen_seconds", default=0.5)))
+                            if mode in DATA_MODES
+                            else float(cfg.get("pluto", "analyze_seconds", default=2.0)))
                     n = int(fs * secs)
                     mstop.set()                            # preempt any live stream on this radio
                     with mlock:                            # serialise this radio's access
@@ -785,16 +791,17 @@ def create_app(db, cfg, demo=False) -> Flask:
                     analyzer = {"freqs_mhz": [round((center_mhz * 1e6 + f) / 1e6, 5)
                                               for f in bb[::step]],
                                 "power_dbm": [round(float(p) + cal, 1) for p in psd_db[::step]]}
-                    if mode == "pocsag":
-                        try:
-                            from . import pocsag
-                            decode = pocsag.decode_pocsag(
-                                iq, fs, correct=bool(cfg.get("pluto", "pocsag_bch_correct",
-                                                             default=True)))
-                            decode["protocol"] = "POCSAG"
-                        except Exception:  # noqa: BLE001
-                            log.exception("pocsag decode failed")
-                    else:
+                    # DECODE: auto-route across protocols (POCSAG/FLEX/OOK-FSK/DTMF/CW).
+                    # Each decoder's own honesty gate means a mismatch decodes to
+                    # nothing, never a hallucinated page. An explicit mode is tried first.
+                    prefer = mode if mode in DECODE_MODES else None
+                    routed = route_decode(iq, fs, feats, prefer=prefer)
+                    if routed.get("messages"):
+                        decode = routed
+                    interpretation = interpret(feats, routed.get("protocol"))
+                    # AUDIO: analog modes are listenable (hear the room); data modes
+                    # would just be hash, so skip audio for them.
+                    if mode not in DATA_MODES:
                         try:
                             pcm, arate = demodulate(iq, fs, mode,
                                                     float(body.get("offset_hz") or 0.0))
@@ -820,12 +827,20 @@ def create_app(db, cfg, demo=False) -> Flask:
                                           session["created_utc"], cur_bw_khz=bw_khz)
             except Exception:  # noqa: BLE001
                 log.exception("novelty lookup failed")
+        if st.demo:
+            # Decoded third-party content (pager text, DTMF digits, device bit
+            # patterns) is intercepted-comms data — NEVER expose it in the public
+            # demo. Keep the safe RF identification (features/candidates); drop the
+            # decoded payload and re-derive the verdict without a 'decoded' claim.
+            decode = None
+            interpretation = interpret(feats, None)
         return jsonify({
             "center_mhz": center_mhz, "label": label, "mode": mode,
             "bw_khz": bw_khz, "in_range": in_range, "note": note,
             "source": st.controller.active_source, "features": feats,
             "candidates": candidates, "analyzer": analyzer, "waterfall": spec,
-            "audio": audio, "decode": decode, "pocsag_likely": pocsag_likely,
+            "audio": audio, "decode": decode, "interpretation": interpretation,
+            "pocsag_likely": pocsag_likely,
             "signal_present": bool(feats and feats.get("signal_present")),
             "novelty": novelty})
 
@@ -1038,17 +1053,21 @@ def create_app(db, cfg, demo=False) -> Flask:
         center_mhz = float(center_mhz)
         mode = (body.get("mode") or pick_mode(center_mhz, body.get("label", ""))).lower()
         offset_hz = float(body.get("offset_hz") or 0.0)
+        kind = (body.get("kind") or "audio").lower()
+        if kind not in ("audio", "iq"):
+            kind = "audio"
         try:
             rec = st.controller.start_recording(
                 session["id"], center_mhz, _recordings_dir(),
-                mode=mode, offset_hz=offset_hz, signal_id=signal_id)
+                mode=mode, offset_hz=offset_hz, signal_id=signal_id, kind=kind)
         except RuntimeError as e:
             return err(e, 409)
         except Exception as e:  # noqa: BLE001
             log.exception("record start failed")
             return err(e, 502)
         return jsonify({"started": True, "center_mhz": center_mhz, "mode": mode,
-                        "file_path": rec["file_path"], "started_utc": rec["started_utc"]})
+                        "kind": kind, "file_path": rec["file_path"],
+                        "started_utc": rec["started_utc"]})
 
     @app.post("/api/record/stop")
     def record_stop():

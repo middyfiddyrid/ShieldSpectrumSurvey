@@ -566,13 +566,15 @@ class SweepController:
     # ---- monitor recording (WAV capture of one signal) ----
 
     def start_recording(self, session_id: int, center_mhz: float, recordings_dir: str,
-                        mode: str = "nfm", offset_hz: float = 0.0, signal_id=None):
-        """Record demodulated audio of ONE monitored signal to a WAV under
-        recordings/<session_id>/ (gitignored, client-sensitive). Worker mirrors
-        start_directional: a daemon thread holds device_lock and streams live IQ
-        through the demodulator, accumulating PCM until stop_recording() (or the
-        configured max length). Phase-1 single-radio: contends with the sweep
-        exactly like the live listen stream does today."""
+                        mode: str = "nfm", offset_hz: float = 0.0, signal_id=None,
+                        kind: str = "audio"):
+        """Record ONE monitored signal under recordings/<session_id>/ (gitignored,
+        client-sensitive). kind='audio' writes demodulated WAV (listen back);
+        kind='iq' writes the RAW complex64 IQ (.cf32) — forensic evidence of an
+        undecodable/encrypted intruder to hand to authorities (you can't read
+        encrypted content, but the raw capture + identification + location is the
+        evidence package). Worker mirrors start_directional: a daemon thread holds
+        the radio lock and streams live IQ until stop_recording() or max length."""
         dev, lock, stop_evt, src = self.monitor_target()
         concurrent = self.concurrent_enabled() and src == "pluto"
         if concurrent:
@@ -596,11 +598,14 @@ class SweepController:
         max_secs = float(self.cfg.get("recordings", "max_seconds", default=120.0))
         sess_dir = os.path.join(recordings_dir, str(session_id))
         os.makedirs(sess_dir, exist_ok=True)
-        fname = f"{int(time.time())}_{int(round(center_mhz * 1000))}khz_{mode}.wav"
+        is_iq = (kind == "iq")
+        ext = "cf32" if is_iq else "wav"
+        tag = "IQ" if is_iq else mode
+        fname = f"{int(time.time())}_{int(round(center_mhz * 1000))}khz_{tag}.{ext}"
         rel_path = os.path.join(str(session_id), fname)
         abs_path = os.path.join(recordings_dir, rel_path)
         self.record_stop.clear()
-        rec = {"active": True, "center_mhz": center_mhz, "mode": mode,
+        rec = {"active": True, "center_mhz": center_mhz, "mode": mode, "kind": kind,
                "started_utc": time.time(), "file_path": rel_path,
                "signal_id": signal_id, "offset_hz": offset_hz, "recording_id": None}
         self.recording = rec
@@ -608,22 +613,38 @@ class SweepController:
         def work():
             import numpy as _np
             from ..demod import demodulate, wav_bytes
-            chunks, arate = [], None
+            chunks, arate, iq_samples = [], None, 0
             try:
                 with lock:               # per-source in dual mode; legacy lock otherwise
                     for iq in dev.stream_iq(center_mhz * 1e6, fs, n_block, self.record_stop):
-                        try:
-                            pcm, arate = demodulate(iq, fs, mode, offset_hz)
-                        except Exception:  # noqa: BLE001
-                            continue
-                        chunks.append(pcm)
+                        if is_iq:
+                            chunks.append(_np.asarray(iq, dtype=_np.complex64))
+                            iq_samples += len(iq)
+                        else:
+                            try:
+                                pcm, arate = demodulate(iq, fs, mode, offset_hz)
+                            except Exception:  # noqa: BLE001
+                                continue
+                            chunks.append(pcm)
                         if (time.time() - rec["started_utc"]) >= max_secs:
                             break
             except Exception:  # noqa: BLE001
                 log.exception("recording worker failed")
             finally:
                 try:
-                    if chunks and arate:
+                    if is_iq and chunks:
+                        # raw complex64 evidence; metadata (freq/time/session) lives
+                        # in the recordings row for chain-of-custody.
+                        _np.concatenate(chunks).astype(_np.complex64).tofile(abs_path)
+                        dur = iq_samples / float(fs)
+                        rid = self.db.add_recording(
+                            session_id, round(center_mhz, 5), rel_path,
+                            signal_id=signal_id, offset_hz=offset_hz, mode="iq",
+                            duration_s=round(dur, 2), sample_rate=int(fs), kind="iq",
+                            notes="raw IQ evidence (complex64 @ fs)")
+                        rec["recording_id"] = rid
+                        rec["duration_s"] = round(dur, 2)
+                    elif chunks and arate:
                         pcm_all = _np.concatenate(chunks)
                         with open(abs_path, "wb") as f:
                             f.write(wav_bytes(pcm_all, arate))
@@ -636,7 +657,10 @@ class SweepController:
                         rec["recording_id"] = rid
                         rec["duration_s"] = round(dur, 2)
                 except Exception:  # noqa: BLE001
-                    log.exception("recording finalize failed")
+                    # never-delete policy: keep the written file, just flag it as an
+                    # orphan (filename embeds session/freq/time for later recovery).
+                    log.exception("recording finalize failed; file kept at %s with NO "
+                                  "DB row (orphaned evidence — recover manually)", abs_path)
                 rec["active"] = False
                 # In dual mode the sweep owns the global running flag — don't
                 # clobber it from the concurrent monitor thread.

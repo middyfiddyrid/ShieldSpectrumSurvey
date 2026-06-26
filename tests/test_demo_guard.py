@@ -4,6 +4,7 @@ while the PII paths (threat vectors, POI, internal memo, case files) stay 403.""
 import os
 import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
 
@@ -11,6 +12,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from survey.db import Database          # noqa: E402
 from survey.config import Config        # noqa: E402
 from survey.server import create_app    # noqa: E402
+from survey.tones import dtmf_encode    # noqa: E402
+
+
+class _DtmfStub:
+    """SDR stub whose capture always returns a decodable DTMF signal."""
+    is_swept_sdr = True
+
+    def __init__(self):
+        self.info = types.SimpleNamespace(
+            modules=[types.SimpleNamespace(min_mhz=70.0, max_mhz=6000.0, side="right")],
+            simulated=True)
+
+    def capture_iq(self, center_hz, fs, n):
+        return dtmf_encode("159D", float(fs))
 
 
 class TestDemoGuard(unittest.TestCase):
@@ -48,6 +63,29 @@ class TestDemoGuard(unittest.TestCase):
         self.assertEqual(self.c.get("/api/recordings").status_code, 403)
         self.assertEqual(
             self.c.post("/api/record/start", json={"center_mhz": 433.0}).status_code, 403)
+
+    def _analyze_decode(self, demo):
+        d = tempfile.mkdtemp()
+        db = Database(os.path.join(d, "t.db"))
+        cfg = Config(os.path.join(d, "config.yaml"))
+        cfg.data["pluto"]["listen_sample_rate"] = 48000
+        db.create_session("1 A St", 0, 0, "test", 25, 5, "op")
+        app = create_app(db, cfg, demo=demo)
+        st = app.config["APP_STATE"]
+        st.controller.device = _DtmfStub()
+        st.controller.active_source = "pluto"
+        return app.test_client().post(
+            "/api/analyze/signal", json={"center_mhz": 462.5, "mode": "dtmf"}).get_json()
+
+    def test_decoded_content_present_normally_but_stripped_in_demo(self):
+        # normal: the DTMF signal decodes -> decode payload present
+        normal = self._analyze_decode(demo=False)
+        self.assertIsNotNone(normal["decode"])
+        self.assertTrue(normal["decode"]["messages"])
+        # demo: same signal, but decoded (intercepted) content is stripped
+        demo = self._analyze_decode(demo=True)
+        self.assertIsNone(demo["decode"])
+        self.assertNotEqual(demo.get("interpretation", {}).get("readable"), "decoded")
 
 
 if __name__ == "__main__":

@@ -24,7 +24,19 @@ The full 2026-06-25 vision below is now **built, reviewed, and verified headless
 8. **UI** (`survey/web/{index.html,app.js}`) — MANUAL TRIAGE nav tab + gated review list with decision buttons/notes/completion-gate; the inspect panel is now the MONITOR with **◎ ANALYZE** + **● REC** + features/candidates/novelty/recordings; ▲ NEW novelty badges. **BUGFIX:** the inspect/monitor panel was authored inside the hidden `view-baseline` section, so every non-baseline list (hunt/results/wiki/triage) called it but it never showed — lifted to a global element at boot (`liftInspectPanel`).
 9. **(NOT DONE — intentional)** flip `pluto.concurrent_monitor` to true. See the bench checklist.
 
-## ADVERSARIAL REVIEW (8-agent workflow) — 2 confirmed, fixed + regression-tested
+## SIGNAL DECODERS — "interpret what it's transmitting, pager or not" (2026-06-26 cont.)
+New modules, each with a self-test encoder + round-trip tests + a noise→empty honesty gate (no hallucinated decodes — the POCSAG-review bug class):
+- **`survey/ook.py`** — generic OOK/ASK + 2-FSK device decoder (rtl_433-style): pulse/gap timing → PWM/PPM/Manchester/NRZ → bits + device guess. The long tail of cheap bugs/trackers/cameras/remotes. Gate = ≥2 byte-identical repeats. Real-protocol-faithful.
+- **`survey/tones.py`** — DTMF (Goertzel) + CW/Morse→text. Real-faithful.
+- **`survey/flex.py`** — FLEX paging. ⚠ **Correct framework but uses INTERNAL placeholder sync/A-word constants — round-trips its own encoder, NOT bit-compatible with off-air commercial FLEX yet.** Needs the real FLEX constants swapped + a live-capture validation pass before it reads a real pager. Until then its honesty gate keeps it silent (won't false-decode).
+- **`survey/decode_router.py`** — `route_decode()` auto-tries the decoder matching `iq_features` (POCSAG/FLEX/OOK/DTMF/CW; each gate prevents false positives), `interpret()` gives the plain-English field verdict ("analog voice — LISTEN, you'll hear the room" / "FSK telemetry — decode below" / "wideband digital — encrypted, capture+locate").
+- Wired into **`/api/analyze/signal`**: ONE capture → identify + auto-decode + interpretation + audio. The monitor's ◎ ANALYZE button shows it; mode picker gained FLEX/OOK/DTMF.
+- **Encrypted intruders: detect/identify/locate + capture, NOT decrypt** (no key = no plaintext; attempting interception is an ECPA problem). RECORD gained **kind='iq'** (⦿ IQ button) → raw complex64 `.cf32` evidence with chain-of-custody metadata in the recordings row, to hand to authorities. Minimize: keep only what's germane.
+- Decode reality on hardware: POCSAG/OOK/DTMF/CW trustworthy; FLEX pending calibration; analog = listen.
+
+## ADVERSARIAL REVIEW (two 8-agent passes) — 4 confirmed total, all fixed + regression-tested
+Decoder pass (2 confirmed): decoded content was reachable in the public demo via `/api/analyze/signal` → now stripped in demo mode (RF identification stays, decoded payload dropped); orphaned-IQ-file-on-finalize-failure → logged per never-delete policy.
+Triage/monitor pass (2 confirmed):
 - `/api/triage`, `/api/novelty`, `/api/record*` were not demo-gated → added to `DEMO_BLOCKED` (server.py). 2 new `test_demo_guard` cases.
 - `/api/inspect` wasn't ported to the dual-device split → ported to `monitor_target()`/`busy(msrc)` (OFF-path identical).
 - 3 findings refuted by the verify pass (no action).

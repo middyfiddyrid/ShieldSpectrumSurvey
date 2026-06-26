@@ -73,6 +73,7 @@ DEFAULTS = {
         # "tune & listen" inspect panel: IQ capture for analyzer + waterfall + audio
         "listen_sample_rate": 2_400_000,   # wide one-shot IQ for the analyzer/waterfall snapshot
         "listen_seconds": 0.5,
+        "analyze_seconds": 2.0,            # ANALYZE one-shot: longer so decoders get enough symbols
         # continuous audio stream: lower rate so USB2 sustains REAL-TIME (smooth);
         # 600 kHz still covers WFM (~200 kHz) and NFM channels.
         "stream_sample_rate": 2_400_000,

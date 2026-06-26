@@ -292,14 +292,15 @@ body.demo #card-casefiles { display:none !important; }
       <span id="insp-live-badge" class="pill" style="margin-left:4px;color:#6b7b90">○ IDLE</span>
       <label class="note" for="insp-mode">Mode</label>
       <select id="insp-mode">
-        <option value="nfm">NFM</option><option value="wfm">WFM</option><option value="am">AM</option><option value="usb">USB</option><option value="lsb">LSB</option><option value="cw">CW</option><option value="pocsag">POCSAG (decode)</option>
+        <option value="nfm">NFM</option><option value="wfm">WFM</option><option value="am">AM</option><option value="usb">USB</option><option value="lsb">LSB</option><option value="cw">CW</option><option value="pocsag">POCSAG (decode)</option><option value="flex">FLEX (decode)</option><option value="ook">OOK/FSK device (decode)</option><option value="dtmf">DTMF (decode)</option>
       </select>
       <button class="btn" id="insp-prev" title="previous signal">◂</button>
       <button class="btn" id="insp-next" title="next signal">▸</button>
       <button class="btn" id="insp-auto" title="auto-advance through the hunt list">AUTO ▸▸</button>
       <label class="note">dwell <input id="insp-dwell" type="number" value="6" min="3" step="1" style="width:44px"></label>
-      <button class="btn primary" id="insp-analyze" title="receive & identify — what IS this signal?">◎ ANALYZE</button>
+      <button class="btn primary" id="insp-analyze" title="receive & identify — what IS this signal & what's it transmitting?">◎ ANALYZE</button>
       <button class="btn" id="insp-record" title="record demodulated audio of this signal">● REC</button>
+      <button class="btn" id="insp-record-iq" title="capture RAW IQ as forensic evidence (encrypted / unknown intruder — for authorities)">⦿ IQ</button>
       <button class="btn" id="insp-close">Close ✕</button>
       <span id="insp-msg" class="note"></span>
     </div>
