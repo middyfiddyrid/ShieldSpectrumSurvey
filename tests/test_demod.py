@@ -118,5 +118,43 @@ class TestDemod(unittest.TestCase):
         self.assertEqual(pick_mode(7.03, "CW / Morse"), "cw")
 
 
+class TestChannelFilter(unittest.TestCase):
+    """The 'works except it doesn't work' fix: the steerable channel filter must
+    actually ISOLATE the tuned signal. Proven on the filter response directly —
+    the windowed-sinc FIR's stopband must be far below the old boxcar's leaky
+    sidelobes, which is what let adjacent signals bleed in."""
+
+    def test_fir_stopband_far_below_boxcar(self):
+        from survey.demod import _design_fir, _auto_taps
+        fs, cutoff = 240_000.0, 16_000.0
+        taps = _auto_taps(fs, cutoff)
+        fir = _design_fir(taps, cutoff, fs)
+        box = np.ones(taps) / taps                      # equal-length boxcar (the old way)
+        N = 8192
+        freqs = np.fft.rfftfreq(N, 1.0 / fs)
+
+        def resp(h):
+            H = np.abs(np.fft.rfft(h, N))
+            return H / H.max()
+
+        Hf, Hb = resp(fir), resp(box)
+        stop = freqs >= 2.0 * cutoff                    # clearly in the stopband
+        fir_worst = float(Hf[stop].max())
+        box_worst = float(Hb[stop].max())
+        self.assertLess(20 * np.log10(fir_worst), -40.0)        # FIR stopband well-suppressed
+        self.assertLess(fir_worst, box_worst * 0.2)             # >14 dB better than boxcar
+
+    def test_fir_passes_in_channel_tone(self):
+        from survey.demod import _design_fir, _fir_lowpass, _auto_taps
+        fs, cutoff, n = 240_000.0, 16_000.0, 48_000
+        t = np.arange(n) / fs
+        x = np.exp(1j * 2 * np.pi * 2_000.0 * t).astype(np.complex64)  # 2 kHz in-band
+        fir = _design_fir(_auto_taps(fs, cutoff), cutoff, fs)
+        y = _fir_lowpass(x, fir)
+        # in-channel energy is preserved (unity-gain passband)
+        mid = slice(n // 4, 3 * n // 4)                 # ignore convolution edges
+        self.assertGreater(np.mean(np.abs(y[mid])), 0.7)
+
+
 if __name__ == "__main__":
     unittest.main()

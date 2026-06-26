@@ -11,6 +11,7 @@ from flask import (Flask, Response, jsonify, request, send_file,
 
 from .baseline.base import DiskCache
 from .baseline.manager import build_baseline
+from .db import TRIAGE_DECISIONS
 from .correlation import compute_room_localization
 from .geocode import geocode
 from .report import export_csv, generate_report
@@ -85,8 +86,15 @@ def create_app(db, cfg, demo=False) -> Flask:
     # In the PUBLIC DEMO, every feature that touches real client PII is blocked
     # at the server, not merely hidden in the UI: Persons of Interest, the
     # internal memo, the multi-AI threat analysis, and case-file upload/serve.
-    DEMO_BLOCKED = ("/api/poi", "/api/report/internal_memo", "/api/analyze",
-                    "/api/case_files", "/case_files")
+    # NOTE: this is "/api/analyze/threat_vectors" specifically, NOT a bare
+    # "/api/analyze" prefix — the RF-only fused signal ANALYZE (/api/analyze/signal)
+    # carries no client data and stays available in the demo.
+    # /api/record* also covers /api/recordings* (prefix) — raw audio of possibly
+    # private comms must never be reachable in the public demo. Triage notes +
+    # address-novelty history are operator-internal too.
+    DEMO_BLOCKED = ("/api/poi", "/api/report/internal_memo",
+                    "/api/analyze/threat_vectors", "/api/case_files", "/case_files",
+                    "/api/triage", "/api/novelty", "/api/record")
 
     @app.before_request
     def _demo_guard():
@@ -484,6 +492,7 @@ def create_app(db, cfg, demo=False) -> Flask:
                        or os.environ.get("SWEEP_SOURCE")
                        or cfg.get("device", "source", default="rfexplorer")),
             "device": st.controller.device_info(),
+            "roles": st.controller.device_roles(),
             "sweep": st.controller.state,
             "sweeps": sweeps,
             "baseline": st.baseline_status,
@@ -541,8 +550,12 @@ def create_app(db, cfg, demo=False) -> Flask:
     def device_connect():
         body = request.get_json(silent=True) or {}
         source = (body.get("source") or "").strip().lower() or None
+        # keep_other (dual-device): connect this radio WITHOUT closing the other,
+        # so RFE-sweep + Pluto-monitor can coexist. Only honored when the
+        # pluto.concurrent_monitor flag is on; otherwise it's the legacy swap.
+        keep_other = bool(body.get("keep_other"))
         try:
-            info = st.controller.connect_device(source=source)
+            info = st.controller.connect_device(source=source, keep_other=keep_other)
         except Exception as e:  # noqa: BLE001
             return err(e, 502)
         # remember the operator's pick so the next launch defaults to it
@@ -554,6 +567,13 @@ def create_app(db, cfg, demo=False) -> Flask:
         if st.session_id:
             db.set_device_info(st.session_id, info.to_dict())
         return jsonify(info.to_dict())
+
+    @app.get("/api/device/roles")
+    def device_roles():
+        """Per-radio roles (sweeper / monitor / idle) + whether concurrent
+        dual-device monitoring is enabled — lets the UI show 'RFE sweeping +
+        Pluto monitoring' and choose LIVE vs post-hoc triage."""
+        return jsonify(st.controller.device_roles())
 
     @app.post("/api/identify")
     def identify_signal():
@@ -632,14 +652,14 @@ def create_app(db, cfg, demo=False) -> Flask:
         label = body.get("label", "")
         mode = (body.get("mode") or pick_mode(center_mhz, label)).lower()
 
-        dev = st.controller.device
+        dev, mlock, mstop, msrc = st.controller.monitor_target()
         is_sdr = dev is not None and hasattr(dev, "capture_iq") and \
             getattr(dev, "is_swept_sdr", False)
         base = {"center_mhz": center_mhz, "label": label, "mode": mode, "in_range": False}
         if not is_sdr:
             return jsonify({**base, "note": "connect the Pluto (SDR) to tune, view and listen"})
-        if st.controller.busy():
-            return jsonify({**base, "note": "a sweep is running — stop it to tune & listen"})
+        if st.controller.busy(msrc):
+            return jsonify({**base, "note": "the monitor radio is busy — stop it to tune & listen"})
         mods = dev.info.modules
         lo_mhz = min(m.min_mhz for m in mods)
         hi_mhz = max(m.max_mhz for m in mods)
@@ -655,8 +675,8 @@ def create_app(db, cfg, demo=False) -> Flask:
                     if mode == "pocsag"
                     else float(cfg.get("pluto", "listen_seconds", default=0.5)))
             n = int(fs * secs)
-            st.controller.listen_stop.set()        # preempt any live audio stream
-            with st.controller.device_lock:        # serialise radio access
+            mstop.set()                            # preempt any live audio stream on this radio
+            with mlock:                            # serialise this radio's access
                 iq = dev.capture_iq(center_mhz * 1e6, fs, n)
         except Exception as e:  # noqa: BLE001
             log.exception("inspect capture failed")
@@ -688,6 +708,126 @@ def create_app(db, cfg, demo=False) -> Flask:
                 log.exception("demod failed")
         return jsonify({**base, "in_range": True, "analyzer": analyzer,
                         "waterfall": waterfall, "audio": audio, "decode": decode, "note": ""})
+
+    @app.post("/api/analyze/signal")
+    def analyze_signal():
+        """FUSED per-signal ANALYZE — the monitor/receiver 'real demod' brain.
+        ONE IQ capture, then everything at once: modulation features
+        (identify.iq_features) + sigidwiki candidates (identify) + a live
+        (instantaneous) analyzer (welch_psd) + waterfall (spectrogram) + EITHER
+        protocol decode (POCSAG) OR demod audio, PLUS the new-to-address novelty
+        read. This is what replaces the audio-only 'bullshit demod': it says WHAT
+        the signal IS, not just plays it. RF-only, no client PII -> stays
+        available in the demo. Degrades cleanly (no radio / busy / out-of-range)
+        exactly like /api/inspect."""
+        import base64
+        from .demod import demodulate, pick_mode, wav_bytes
+        from .identify import identify, iq_features, load_reference, spectrogram
+        from .pocsag import looks_like_pocsag
+        from .sweep.sdr_source import welch_psd
+        body = request.get_json(silent=True) or {}
+        center_mhz = body.get("center_mhz")
+        bw_khz = body.get("bw_khz")
+        for table, key in (("captures", "capture_id"), ("signals", "signal_id")):
+            if center_mhz is None and body.get(key):
+                row = db.query_one(f"SELECT center_mhz,bw_khz FROM {table} WHERE id=?",
+                                   (body[key],))
+                if row:
+                    center_mhz, bw_khz = row["center_mhz"], row["bw_khz"]
+        if center_mhz is None:
+            return err("need center_mhz (or a signal_id / capture_id)")
+        center_mhz = float(center_mhz)
+        label = body.get("label", "")
+        mode = (body.get("mode") or pick_mode(center_mhz, label)).lower()
+
+        ref = load_reference()
+        feats = spec = analyzer = audio = decode = None
+        in_range = False
+        note = ""
+        cal = float(cfg.get("pluto", "cal_offset_db", default=-30.0))
+        # Monitor target: in dual-device mode this is the Pluto + its OWN lock, so
+        # ANALYZE runs while the RFE keeps sweeping. In single-device mode it's the
+        # active device + the legacy lock and busy(msrc) == busy() — unchanged.
+        dev, mlock, mstop, msrc = st.controller.monitor_target()
+        is_sdr = dev is not None and hasattr(dev, "capture_iq") and \
+            getattr(dev, "is_swept_sdr", False)
+        if not is_sdr:
+            note = ("connect the Pluto (SDR) to receive & analyze this signal live — "
+                    "candidates shown are frequency-only")
+        elif st.controller.busy(msrc):
+            note = ("the monitor radio is busy — candidates matched on frequency "
+                    "only (dual-device mode lets the Pluto monitor while the RFE sweeps)")
+        else:
+            mods = dev.info.modules
+            lo_mhz, hi_mhz = min(m.min_mhz for m in mods), max(m.max_mhz for m in mods)
+            if not (lo_mhz <= center_mhz <= hi_mhz):
+                note = (f"{center_mhz:.3f} MHz is outside the radio's "
+                        f"{lo_mhz:.0f}-{hi_mhz:.0f} MHz range — apply the AD9364 extension")
+            else:
+                try:
+                    fs = float(cfg.get("pluto", "listen_sample_rate", default=2_400_000))
+                    secs = (float(cfg.get("pluto", "pocsag_seconds", default=3.0))
+                            if mode == "pocsag"
+                            else float(cfg.get("pluto", "listen_seconds", default=0.5)))
+                    n = int(fs * secs)
+                    mstop.set()                            # preempt any live stream on this radio
+                    with mlock:                            # serialise this radio's access
+                        iq = dev.capture_iq(center_mhz * 1e6, fs, n)
+                    in_range = True
+                    # ---- ONE capture, analyzed every way (the fusion) ----
+                    feats = iq_features(iq, fs)
+                    wf = spectrogram(iq, fs, n_time=90, nperseg=200)
+                    spec = {"freqs_mhz": [round((center_mhz * 1e6 + f) / 1e6, 4)
+                                          for f in wf["freqs_hz"]],
+                            "db": wf["db"], "vmin": wf["vmin"], "vmax": wf["vmax"]}
+                    bb, psd_db = welch_psd(iq, fs, nperseg=2048)
+                    step = max(1, bb.size // 480)
+                    analyzer = {"freqs_mhz": [round((center_mhz * 1e6 + f) / 1e6, 5)
+                                              for f in bb[::step]],
+                                "power_dbm": [round(float(p) + cal, 1) for p in psd_db[::step]]}
+                    if mode == "pocsag":
+                        try:
+                            from . import pocsag
+                            decode = pocsag.decode_pocsag(
+                                iq, fs, correct=bool(cfg.get("pluto", "pocsag_bch_correct",
+                                                             default=True)))
+                            decode["protocol"] = "POCSAG"
+                        except Exception:  # noqa: BLE001
+                            log.exception("pocsag decode failed")
+                    else:
+                        try:
+                            pcm, arate = demodulate(iq, fs, mode,
+                                                    float(body.get("offset_hz") or 0.0))
+                            audio = ("data:audio/wav;base64,"
+                                     + base64.b64encode(wav_bytes(pcm, arate)).decode())
+                        except Exception:  # noqa: BLE001
+                            log.exception("analyze demod failed")
+                    if not feats.get("signal_present"):
+                        note = (f"no clear signal above the noise floor at {center_mhz:.3f} "
+                                f"MHz (SNR {feats['snr_db']} dB) — likely an empty channel")
+                except Exception as e:  # noqa: BLE001
+                    log.exception("analyze capture failed")
+                    note = f"capture failed: {e}"
+
+        candidates = identify(center_mhz * 1e6, feats, ref)
+        pocsag_likely = bool(feats and looks_like_pocsag(feats))
+        novelty = None
+        session = st.session()
+        if session:
+            try:
+                from .novelty import compute_novelty
+                novelty = compute_novelty(db, session["address"], center_mhz,
+                                          session["created_utc"], cur_bw_khz=bw_khz)
+            except Exception:  # noqa: BLE001
+                log.exception("novelty lookup failed")
+        return jsonify({
+            "center_mhz": center_mhz, "label": label, "mode": mode,
+            "bw_khz": bw_khz, "in_range": in_range, "note": note,
+            "source": st.controller.active_source, "features": feats,
+            "candidates": candidates, "analyzer": analyzer, "waterfall": spec,
+            "audio": audio, "decode": decode, "pocsag_likely": pocsag_likely,
+            "signal_present": bool(feats and feats.get("signal_present")),
+            "novelty": novelty})
 
     def _validate_listen_request():
         """Shared guard for the audio-stream endpoints. Returns
@@ -874,6 +1014,107 @@ def create_app(db, cfg, demo=False) -> Flask:
         st.controller.listen_offset_hz = max(-lim, min(lim, off))
         return jsonify({"offset_hz": st.controller.listen_offset_hz})
 
+    # ---------- monitor recordings (WAV; client-sensitive, gitignored) ----------
+
+    def _recordings_dir():
+        return cfg.abs_path(cfg.get("recordings", "dir", default="recordings"))
+
+    @app.post("/api/record/start")
+    def record_start():
+        from .demod import pick_mode
+        session = st.session()
+        if not session:
+            return err("no session")
+        body = request.get_json(silent=True) or {}
+        center_mhz = body.get("center_mhz")
+        signal_id = body.get("signal_id")
+        if center_mhz is None and signal_id:
+            row = db.query_one("SELECT center_mhz FROM signals WHERE id=? AND session_id=?",
+                               (signal_id, session["id"]))
+            if row:
+                center_mhz = row["center_mhz"]
+        if center_mhz is None:
+            return err("need center_mhz (or a signal_id)")
+        center_mhz = float(center_mhz)
+        mode = (body.get("mode") or pick_mode(center_mhz, body.get("label", ""))).lower()
+        offset_hz = float(body.get("offset_hz") or 0.0)
+        try:
+            rec = st.controller.start_recording(
+                session["id"], center_mhz, _recordings_dir(),
+                mode=mode, offset_hz=offset_hz, signal_id=signal_id)
+        except RuntimeError as e:
+            return err(e, 409)
+        except Exception as e:  # noqa: BLE001
+            log.exception("record start failed")
+            return err(e, 502)
+        return jsonify({"started": True, "center_mhz": center_mhz, "mode": mode,
+                        "file_path": rec["file_path"], "started_utc": rec["started_utc"]})
+
+    @app.post("/api/record/stop")
+    def record_stop():
+        rec = st.controller.stop_recording()
+        rid = rec.get("recording_id")
+        if not rid:
+            return jsonify({"recording_id": None, "note": "no audio captured"})
+        row = db.query_one("SELECT * FROM recordings WHERE id=?", (rid,))
+        return jsonify(row or {"recording_id": rid})
+
+    @app.get("/api/recordings")
+    def recordings_list():
+        session = st.session()
+        if not session:
+            return err("no session")
+        sid = request.args.get("signal_id")
+        return jsonify(db.list_recordings(session["id"], int(sid) if sid else None))
+
+    @app.get("/api/recordings/<int:rec_id>/audio")
+    def recording_audio(rec_id):
+        session = st.session()
+        if not session:
+            return err("no session")
+        row = db.query_one("SELECT * FROM recordings WHERE id=? AND session_id=?",
+                           (rec_id, session["id"]))
+        if not row:
+            return err("recording not found in this session", 404)
+        rec_dir = _recordings_dir()
+        path = os.path.join(rec_dir, row["file_path"])
+        # defence-in-depth: never serve outside the recordings dir
+        if not os.path.realpath(path).startswith(os.path.realpath(rec_dir)):
+            return err("invalid path", 400)
+        if not os.path.exists(path):
+            return err("recording file missing", 404)
+        return send_file(path, mimetype="audio/wav", as_attachment=False,
+                         download_name=os.path.basename(path))
+
+    @app.post("/api/recordings/purge")
+    def recordings_purge():
+        """Per-engagement purge: MOVE this session's recording WAVs into an
+        _archive/ subdir (Matt's never-delete rule) and re-point the rows. Clears
+        client-sensitive audio out of the active recordings area without losing it."""
+        import shutil
+        session = st.session()
+        if not session:
+            return err("no session")
+        body = request.get_json(silent=True) or {}
+        sid = int(body.get("session_id") or session["id"])
+        rec_dir = _recordings_dir()
+        archive = os.path.join(rec_dir, "_archive", str(sid))
+        os.makedirs(archive, exist_ok=True)
+        moved = 0
+        for r in db.list_recordings(sid):
+            src = os.path.join(rec_dir, r["file_path"])
+            if not os.path.exists(src):
+                continue
+            dst_rel = os.path.join("_archive", str(sid), os.path.basename(r["file_path"]))
+            try:
+                shutil.move(src, os.path.join(rec_dir, dst_rel))
+                db.execute("UPDATE recordings SET file_path=?, notes=? WHERE id=?",
+                           (dst_rel, "archived", r["id"]))
+                moved += 1
+            except Exception:  # noqa: BLE001
+                log.exception("purge move failed for recording %s", r["id"])
+        return jsonify({"moved": moved, "archive": archive})
+
     # ---------- planning & sweeping ----------
 
     def _plans(profile, custom_minutes, scan_mode="full", seg_width=None):
@@ -981,6 +1222,91 @@ def create_app(db, cfg, demo=False) -> Flask:
             "(classification='UNVERIFIED' OR caution=1) ORDER BY anomaly_score DESC",
             (session["id"],))
         return jsonify(_dedupe_emitters(rows))
+
+    # ---------- gated MANUAL triage (post-hoc; no radio) ----------
+
+    @app.get("/api/triage/last")
+    def triage_last():
+        """The gated MANUAL review list: the not-already-explained detections of
+        the most recent interior sweep (or ?sweep_id=N), each with its triage
+        decision + novelty. Read-only, no radio — works with only the RFE present
+        and never fights a live sweep. The operator must decide every signal; the
+        UI blocks completion until remaining_unexplained hits zero."""
+        session = st.session()
+        if not session:
+            return err("no session")
+        sweep_id = request.args.get("sweep_id")
+        if sweep_id:
+            sweep = db.query_one("SELECT * FROM sweeps WHERE id=? AND session_id=?",
+                                 (int(sweep_id), session["id"]))
+        else:
+            sweep = db.query_one(
+                "SELECT * FROM sweeps WHERE session_id=? AND phase='interior' "
+                "AND status IN ('done','aborted') ORDER BY started_utc DESC LIMIT 1",
+                (session["id"],))
+        if not sweep:
+            return jsonify({"sweep_id": None, "phase": None, "signals": [],
+                            "counts": {}, "remaining_unexplained": 0})
+        rows = db.query(
+            "SELECT id, center_mhz, bw_khz, peak_dbm, persistence, classification, "
+            "matched_label, match_reason, caution, anomaly_score, room, module, "
+            "is_novel_to_address, novelty_reason, triage_status, triage_notes "
+            "FROM signals WHERE sweep_id=? AND (classification!='VERIFIED' OR caution=1) "
+            "ORDER BY anomaly_score DESC, center_mhz", (sweep["id"],))
+        counts = {}
+        for r in rows:
+            stt = r["triage_status"] or "unreviewed"
+            counts[stt] = counts.get(stt, 0) + 1
+        remaining = sum(1 for r in rows
+                        if (r["triage_status"] or "unreviewed") == "unreviewed")
+        return jsonify({"sweep_id": sweep["id"], "phase": sweep["phase"],
+                        "signals": rows, "counts": counts,
+                        "remaining_unexplained": remaining})
+
+    @app.post("/api/signals/<int:signal_id>/triage")
+    def signal_triage(signal_id):
+        session = st.session()
+        if not session:
+            return err("no session")
+        body = request.get_json(force=True)
+        status = (body.get("status") or "").strip()
+        if status not in TRIAGE_DECISIONS:
+            return err(f"status must be one of {', '.join(TRIAGE_DECISIONS)}")
+        exists = db.query_one("SELECT id FROM signals WHERE id=? AND session_id=?",
+                              (signal_id, session["id"]))
+        if not exists:
+            return err("signal not found in this session", 404)
+        row = db.set_signal_triage(signal_id, session["id"], status,
+                                   body.get("notes", ""))
+        return jsonify(row)
+
+    @app.get("/api/novelty")
+    def novelty_lookup():
+        """New-to-environment lookup for a signal/frequency vs this address's
+        PRIOR sweep history (Signal Wiki). Read-only, no radio."""
+        from .novelty import compute_novelty
+        session = st.session()
+        if not session:
+            return err("no session")
+        cur_peak = cur_bw = None
+        signal_id = request.args.get("signal_id")
+        if signal_id:
+            sig = db.query_one("SELECT center_mhz, peak_dbm, bw_khz FROM signals "
+                               "WHERE id=? AND session_id=?",
+                               (int(signal_id), session["id"]))
+            if not sig:
+                return err("signal not found in this session", 404)
+            center, cur_peak, cur_bw = sig["center_mhz"], sig["peak_dbm"], sig["bw_khz"]
+        else:
+            center_arg = request.args.get("center_mhz")
+            if not center_arg:
+                return err("center_mhz or signal_id required")
+            center = float(center_arg)
+        tol = float(request.args.get("tol_mhz") or 0.25)
+        nov = compute_novelty(db, session["address"], center, session["created_utc"],
+                              tol_mhz=tol, cur_peak_dbm=cur_peak, cur_bw_khz=cur_bw)
+        nov["address"] = session["address"]
+        return jsonify(nov)
 
     @app.get("/api/expected")
     def expected():

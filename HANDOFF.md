@@ -4,7 +4,51 @@ Continuation brief for a fresh Fable/Claude Code session. Read this first, then 
 
 ---
 
-# ⚡⚡ NEXT-SESSION HANDOFF — 2026-06-25 (late) — signal-hunt shipped; BIG triage/monitor vision to build (READ FIRST)
+# ⚡⚡ NEXT-SESSION HANDOFF — 2026-06-26 — triage / monitor / novelty / dual-device BUILT (READ FIRST)
+
+The full 2026-06-25 vision below is now **built, reviewed, and verified headless + in the live UI.** This block supersedes it.
+
+## Branch / state
+- All on branch **`pocsag-decoder`** (off main). NOT merged, NOT pushed. Bench-test on the Pluto, then merge the whole branch to main when satisfied.
+- **140 unit tests green** (`python -m unittest discover -s tests`).
+- `data/sweeps.db` was backed up to **`data/sweeps.db.bak-pretriage`** before the (additive, idempotent) migration ran. `config.yaml` was NOT touched.
+
+## SHIPPED THIS SESSION (built in 9 steps, tests green at each)
+1. **DB migration** (`survey/db.py`) — `signals` gained `triage_status` / `triage_notes` / `triage_updated_utc` / `is_novel_to_address` / `novelty_reason`; new **`recordings`** table; helpers `set_signal_triage` / `add_recording` / `list_recordings`; `TRIAGE_STATUSES`/`TRIAGE_DECISIONS` consts. Migrations are PRAGMA-guarded + idempotent.
+2. **Novelty** (`survey/novelty.py`, new) — `compute_novelty()` (captures⋈sessions by address, `captured_utc < session.created_utc` excludes the current visit) + `mark_session_novelty()` called after each sweep's postprocess in `runner.work()`.
+3. **Gated MANUAL triage backend** — `GET /api/triage/last` (last interior sweep's unexplained detections + counts + `remaining_unexplained`), `POST /api/signals/<id>/triage` (session-scoped, enum-validated). Post-hoc, no radio — works with only the RFE.
+4. **Steerable channel-filter fix** (`survey/demod.py`) — boxcar `_lowpass`/`_decimate` → windowed-sinc Hamming FIR (`_design_fir`/`_fir_lowpass`/`_fir_decimate`/`_auto_taps`); ~>14 dB better stopband so click-to-isolate actually isolates. `_fm_discriminator` LEFT UNCHANGED (POCSAG shares it). `(pcm16, arate)` contract unchanged.
+5. **Fused ANALYZE** — `POST /api/analyze/signal`: ONE IQ capture → `iq_features` + `identify` (sigidwiki candidates + TSCM note) + analyzer + waterfall + (POCSAG decode | demod audio) + novelty. The "real demod" that says WHAT it is. RF-only → demo-available.
+6. **RECORD** — `POST /api/record/start|stop`, `GET /api/recordings`, `GET /api/recordings/<id>/audio` (session-scoped + path-traversal guard), `POST /api/recordings/purge` (MOVES to `_archive/`, never deletes). WAV under `recordings/<session>/` (gitignored).
+7. **Dual-device split** (`survey/sweep/runner.py`) — `devices`/`device_locks`/`listen_stops` dicts, `connect_device(source, keep_other=)`, `busy(source=)`, `monitor_target()`, `device_roles()`, separate `_monitor_thread`. `GET /api/device/roles`, `/api/state.roles`, `/api/device/connect {keep_other}`. **Behind `pluto.concurrent_monitor` (config default FALSE) — flag OFF = byte-identical legacy single-device behavior.**
+8. **UI** (`survey/web/{index.html,app.js}`) — MANUAL TRIAGE nav tab + gated review list with decision buttons/notes/completion-gate; the inspect panel is now the MONITOR with **◎ ANALYZE** + **● REC** + features/candidates/novelty/recordings; ▲ NEW novelty badges. **BUGFIX:** the inspect/monitor panel was authored inside the hidden `view-baseline` section, so every non-baseline list (hunt/results/wiki/triage) called it but it never showed — lifted to a global element at boot (`liftInspectPanel`).
+9. **(NOT DONE — intentional)** flip `pluto.concurrent_monitor` to true. See the bench checklist.
+
+## ADVERSARIAL REVIEW (8-agent workflow) — 2 confirmed, fixed + regression-tested
+- `/api/triage`, `/api/novelty`, `/api/record*` were not demo-gated → added to `DEMO_BLOCKED` (server.py). 2 new `test_demo_guard` cases.
+- `/api/inspect` wasn't ported to the dual-device split → ported to `monitor_target()`/`busy(msrc)` (OFF-path identical).
+- 3 findings refuted by the verify pass (no action).
+
+## VERIFIED vs NOT
+- **Verified:** 140 tests; live UI (no JS errors, triage end-to-end on real session #49, all new endpoints 200, panel-lift confirmed via a11y snapshot).
+- **STILL NEEDS THE PLUTO (Matt):** audio quality of the new FIR demod, POCSAG on a real pager, the fused ANALYZE on live IQ, RECORD on a live signal, and — most importantly — the dual-device concurrency.
+
+## ⚑ STEP-9 BENCH CHECKLIST (before flipping `pluto.concurrent_monitor` true)
+1. Connect BOTH radios: RFE on COM3 (sweeper) + Pluto on USB (monitor).
+2. Set `pluto.concurrent_monitor: true` in `config.yaml`; restart `app.py`.
+3. In the DEVICE card connect the RFE, then connect the Pluto with **keep_other** (don't close the RFE). Confirm `/api/device/roles` shows `rfexplorer=sweeper`, `pluto=monitor`, `concurrent_enabled=true`.
+4. Start an interior sweep on the RFE; while it runs, open a signal → **◎ ANALYZE** and **● REC** on the Pluto. They must succeed WITHOUT a "radio busy" 409 (that proves the per-source locks work).
+5. The MANUAL TRIAGE pill should read "LIVE" (not post-hoc) when both radios are up.
+6. NOTE: continuous live-listen-while-sweeping (the open-ended `/api/listen` stream) was deferred — `analyze` + `record` are wired for concurrency, the streaming-listen path still uses the legacy single-radio lock. Wire `_audio_blocks` to per-source state if you want gapless listen during a sweep. Full simultaneous sweep+monitor on ONE radio still waits for the July 2RX/2TX B220.
+
+## STANDING GOTCHAS (unchanged)
+- `config.yaml` is gitignored + holds live secrets — back it up before any branch switch/merge.
+- A test "Flag" triage decision was left on **825.8318 MHz (sid 3282), session #49 / sweep #89** during verification — re-triage it.
+- Keep the audio path + `device_lock` + POCSAG intact in any listen/sweep change.
+
+---
+
+# ⚡⚡ NEXT-SESSION HANDOFF — 2026-06-25 (late) — signal-hunt shipped; BIG triage/monitor vision to build (now BUILT, see above)
 
 Context ran out mid-build. This is the continuation prompt. The core idea: **demod/triage
 exists to work the ILLEGITIMATE / unknown signals, NOT the legit baseline ones.**

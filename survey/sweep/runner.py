@@ -39,15 +39,28 @@ class SweepController:
     def __init__(self, db, cfg):
         self.db = db
         self.cfg = cfg
-        self.device = None
+        self.device = None               # the ACTIVE/sweeper device (legacy single-device handle)
         self.active_source = None        # which spectrum source is connected (rfexplorer|pluto)
-        self._thread = None
+        # Phase-2 dual-device (flag pluto.concurrent_monitor, default off): hold
+        # >1 radio at once, each with its OWN lock + listen-stop, so an RFE sweep
+        # and a Pluto monitor never contend. When the flag is off these dicts hold
+        # a single entry and everything routes through self.device/device_lock
+        # exactly as before — behaviour is byte-identical.
+        self.devices = {}                # source -> handle
+        self.device_locks = {}           # source -> threading.Lock
+        self.listen_stops = {}           # source -> threading.Event
+        self._thread = None              # the sweep/capture/directional worker
+        self._monitor_thread = None      # the concurrent monitor (recording) worker
+        self._busy_source = None         # source the sweep worker is bound to
+        self._monitor_source = None      # source the monitor worker is bound to
         self.abort_event = threading.Event()
         # serialise radio access across sweep / snapshot-capture / live audio stream
         self.device_lock = threading.Lock()
         self.listen_stop = threading.Event()   # set to stop the active audio stream
         self.listening = False
         self.listen_spectrum = None            # latest live analyzer+waterfall from the audio stream
+        self.record_stop = threading.Event()   # set to stop the active monitor recording
+        self.recording = None                  # active/last recording descriptor
         self.state = {"running": False, "phase": None, "module": None, "room": None,
                       "segment_index": 0, "segment_total": 0, "percent": 0.0,
                       "eta_seconds": 0, "signal_count": 0, "message": "idle",
@@ -57,19 +70,47 @@ class SweepController:
 
     # ---- device ----
 
-    def connect_device(self, source=None):
+    def concurrent_enabled(self) -> bool:
+        return bool(self.cfg.get("pluto", "concurrent_monitor", default=False))
+
+    def connect_device(self, source=None, keep_other=False):
         from .device import open_device
-        old, self.device = self.device, None   # never leave a dead handle assigned
-        if old is not None:
-            try:
-                old.close()
-            except Exception:  # noqa: BLE001
-                pass
-        self.device = open_device(self.cfg, source=source)
-        self.active_source = (source or os.environ.get("SWEEP_SOURCE")
-                              or self.cfg.get("device", "source",
-                                              default="rfexplorer")).strip().lower()
-        return self.device.info
+        src = (source or os.environ.get("SWEEP_SOURCE")
+               or self.cfg.get("device", "source", default="rfexplorer")).strip().lower()
+        if keep_other and self.concurrent_enabled():
+            # DUAL: replace only a same-source handle; keep the OTHER radio open
+            # so it can run concurrently (RFE sweep + Pluto monitor).
+            ex = self.devices.get(src)
+            if ex is not None:
+                try:
+                    ex.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        else:
+            # LEGACY single-device: close everything currently open (today's behavior).
+            old, self.device = self.device, None
+            if old is not None:
+                try:
+                    old.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            for s in list(self.devices):
+                d = self.devices.pop(s)
+                if d is not old:
+                    try:
+                        d.close()
+                    except Exception:  # noqa: BLE001
+                        pass
+        dev = open_device(self.cfg, source=src)
+        self.devices[src] = dev
+        self.device_locks.setdefault(src, threading.Lock())
+        self.listen_stops.setdefault(src, threading.Event())
+        # self.device is the SWEEPER: in dual mode keep the existing sweeper so a
+        # sweep stays on the RFE while the just-added Pluto becomes the monitor.
+        if not (keep_other and self.concurrent_enabled()) or self.device is None:
+            self.device = dev
+            self.active_source = src
+        return dev.info
 
     def _ensure_device(self):
         if self.device is None or not self.device.is_alive():
@@ -102,8 +143,44 @@ class SweepController:
 
     # ---- sweep lifecycle ----
 
-    def busy(self) -> bool:
-        return bool(self._thread and self._thread.is_alive())
+    def busy(self, source=None) -> bool:
+        """No-arg: is ANY worker (sweep or monitor) running — the legacy meaning,
+        byte-identical when concurrent mode is off (monitor thread is unused then).
+        With `source`: is a worker bound to THAT radio running? Lets a Pluto
+        monitor proceed while an RFE sweep is in flight on a different radio."""
+        sweep_alive = bool(self._thread and self._thread.is_alive())
+        mon_alive = bool(self._monitor_thread and self._monitor_thread.is_alive())
+        if source is None:
+            return sweep_alive or mon_alive
+        return ((sweep_alive and self._busy_source == source)
+                or (mon_alive and self._monitor_source == source))
+
+    def monitor_target(self):
+        """(device, lock, listen_stop, source) for live monitor / analyze /
+        record. In dual mode with a Pluto open, returns the Pluto + its OWN lock
+        so it never blocks on the sweeper's lock; otherwise the active device +
+        the legacy lock (so single-device behaviour is unchanged)."""
+        if self.concurrent_enabled() and "pluto" in self.devices:
+            src = "pluto"
+            return (self.devices[src], self.device_locks.setdefault(src, threading.Lock()),
+                    self.listen_stops.setdefault(src, threading.Event()), src)
+        return self.device, self.device_lock, self.listen_stop, self.active_source
+
+    def device_roles(self) -> dict:
+        """What each connected radio is doing — for the UI to show 'RFE sweeping +
+        Pluto monitoring' and decide live vs post-hoc triage."""
+        _, _, _, mon_src = self.monitor_target()
+        roles = []
+        for src, dev in self.devices.items():
+            if src == self.active_source:
+                role = "sweeper"
+            elif src == mon_src:
+                role = "monitor"
+            else:
+                role = "idle"
+            roles.append({"source": src, "role": role, "busy": self.busy(src)})
+        return {"roles": roles, "concurrent_enabled": self.concurrent_enabled(),
+                "active_source": self.active_source}
 
     def abort(self):
         self.abort_event.set()
@@ -154,6 +231,12 @@ class SweepController:
                 log.info("archived %d signal observations to the wiki", added)
             except Exception:  # noqa: BLE001
                 log.exception("observation archive failed")
+            try:
+                from ..novelty import mark_session_novelty
+                n_novel = mark_session_novelty(self.db, session_id)
+                log.info("novelty: %d signals new to this address", n_novel)
+            except Exception:  # noqa: BLE001
+                log.exception("novelty marking failed")
             self._set(running=False,
                       message=f"{phase} sweep ({module}) {status}; "
                               f"{self.state['signal_count']} signals detected")
@@ -161,6 +244,7 @@ class SweepController:
                 on_done(status)
 
         self._thread = threading.Thread(target=work, daemon=True)
+        self._busy_source = self.active_source
         self._set(running=True, phase=phase, module=module, room=room, error=None,
                   segment_index=0, segment_total=len(plan.segments), percent=0.0,
                   signal_count=0, sweep_id=sweep_id,
@@ -331,6 +415,7 @@ class SweepController:
                                   f"documented, {match_count} library matches")
 
         self._thread = threading.Thread(target=work, daemon=True)
+        self._busy_source = self.active_source
         self._set(running=True, phase="capture", error=None,
                   message=f"signal capture: {len(targets)} targets")
         self._thread.start()
@@ -473,9 +558,115 @@ class SweepController:
                           message=f"directional reading logged for {center_mhz:.4f} MHz")
 
         self._thread = threading.Thread(target=work, daemon=True)
+        self._busy_source = self.active_source
         self._set(running=True, phase="directional", room=room, error=None,
                   message=f"directional lock on {center_mhz:.4f} MHz — sweep the antenna")
         self._thread.start()
+
+    # ---- monitor recording (WAV capture of one signal) ----
+
+    def start_recording(self, session_id: int, center_mhz: float, recordings_dir: str,
+                        mode: str = "nfm", offset_hz: float = 0.0, signal_id=None):
+        """Record demodulated audio of ONE monitored signal to a WAV under
+        recordings/<session_id>/ (gitignored, client-sensitive). Worker mirrors
+        start_directional: a daemon thread holds device_lock and streams live IQ
+        through the demodulator, accumulating PCM until stop_recording() (or the
+        configured max length). Phase-1 single-radio: contends with the sweep
+        exactly like the live listen stream does today."""
+        dev, lock, stop_evt, src = self.monitor_target()
+        concurrent = self.concurrent_enabled() and src == "pluto"
+        if concurrent:
+            # dual-device: only the monitor radio must be free; the RFE may sweep
+            if self.busy(src):
+                raise RuntimeError("the monitor radio is already busy")
+        elif self.busy():
+            raise RuntimeError("a sweep is running — stop it to record")
+        if self.recording and self.recording.get("active"):
+            raise RuntimeError("a recording is already in progress")
+        stop_evt.set()                   # free THIS radio from any live audio stream
+        time.sleep(0.4)
+        if not concurrent:
+            self._ensure_device()
+            dev = self.device
+        if not (dev is not None and hasattr(dev, "stream_iq")
+                and getattr(dev, "is_swept_sdr", False)):
+            raise RuntimeError("connect the Pluto (SDR) to record")
+        fs = float(self.cfg.get("pluto", "stream_sample_rate", default=2_400_000))
+        n_block = int(fs * float(self.cfg.get("pluto", "listen_block_seconds", default=0.5)))
+        max_secs = float(self.cfg.get("recordings", "max_seconds", default=120.0))
+        sess_dir = os.path.join(recordings_dir, str(session_id))
+        os.makedirs(sess_dir, exist_ok=True)
+        fname = f"{int(time.time())}_{int(round(center_mhz * 1000))}khz_{mode}.wav"
+        rel_path = os.path.join(str(session_id), fname)
+        abs_path = os.path.join(recordings_dir, rel_path)
+        self.record_stop.clear()
+        rec = {"active": True, "center_mhz": center_mhz, "mode": mode,
+               "started_utc": time.time(), "file_path": rel_path,
+               "signal_id": signal_id, "offset_hz": offset_hz, "recording_id": None}
+        self.recording = rec
+
+        def work():
+            import numpy as _np
+            from ..demod import demodulate, wav_bytes
+            chunks, arate = [], None
+            try:
+                with lock:               # per-source in dual mode; legacy lock otherwise
+                    for iq in dev.stream_iq(center_mhz * 1e6, fs, n_block, self.record_stop):
+                        try:
+                            pcm, arate = demodulate(iq, fs, mode, offset_hz)
+                        except Exception:  # noqa: BLE001
+                            continue
+                        chunks.append(pcm)
+                        if (time.time() - rec["started_utc"]) >= max_secs:
+                            break
+            except Exception:  # noqa: BLE001
+                log.exception("recording worker failed")
+            finally:
+                try:
+                    if chunks and arate:
+                        pcm_all = _np.concatenate(chunks)
+                        with open(abs_path, "wb") as f:
+                            f.write(wav_bytes(pcm_all, arate))
+                        dur = len(pcm_all) / float(arate)
+                        rid = self.db.add_recording(
+                            session_id, round(center_mhz, 5), rel_path,
+                            signal_id=signal_id, offset_hz=offset_hz, mode=mode,
+                            duration_s=round(dur, 2), sample_rate=int(arate),
+                            kind="audio")
+                        rec["recording_id"] = rid
+                        rec["duration_s"] = round(dur, 2)
+                except Exception:  # noqa: BLE001
+                    log.exception("recording finalize failed")
+                rec["active"] = False
+                # In dual mode the sweep owns the global running flag — don't
+                # clobber it from the concurrent monitor thread.
+                if not concurrent:
+                    self._set(running=False,
+                              message=f"recording saved for {center_mhz:.4f} MHz"
+                                      if rec.get("recording_id")
+                                      else "recording produced no audio")
+
+        t = threading.Thread(target=work, daemon=True)
+        if concurrent:
+            self._monitor_thread = t
+            self._monitor_source = src
+        else:
+            self._thread = t
+            self._busy_source = self.active_source
+            self._set(running=True, phase="recording", error=None,
+                      message=f"recording {center_mhz:.4f} MHz ({mode})")
+        t.start()
+        return rec
+
+    def stop_recording(self):
+        """Signal the record worker to finish, wait for it to flush the WAV +
+        insert the row, and return the recording descriptor. No-op-safe; joins
+        whichever slot (sweep-thread in legacy mode, monitor-thread in dual)."""
+        self.record_stop.set()
+        for t in (self._monitor_thread, self._thread):
+            if t and t.is_alive():
+                t.join(timeout=8.0)
+        return self.recording or {}
 
 
 # ---------------------------------------------------------------------------

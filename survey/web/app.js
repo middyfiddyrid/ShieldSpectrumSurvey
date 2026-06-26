@@ -63,6 +63,7 @@ function show(view) {
   if (view === "session") { loadCaseFiles(); loadEngagement(); loadTechTasks(); loadReportOptions(); }
   if (view === "poi") loadPoi();
   if (view === "cases") loadCases();
+  if (view === "triage") loadTriage();
 }
 
 /* ---------- engagement / pre-sweep ---------- */
@@ -864,7 +865,7 @@ function freqLinkDelegate(e) {
   if (a.dataset.huntIdx != null) { huntStep(parseInt(a.dataset.huntIdx, 10)); return; }
   listenAt(parseFloat(a.dataset.center), a.dataset.label || "", a.dataset.mode || undefined);
 }
-["tbl-anomalies", "tbl-signals", "tbl-wiki", "tbl-hunt"].forEach(id => {
+["tbl-anomalies", "tbl-signals", "tbl-wiki", "tbl-hunt", "tbl-triage"].forEach(id => {
   const el = $(id);
   if (el) el.addEventListener("click", freqLinkDelegate, true);  // capture: beat the row onclick
 });
@@ -918,6 +919,8 @@ function inspectByFreq(center, label, mode) {
   $("inspect-panel").style.display = "";
   $("insp-title").textContent = `${fmtF(center)} · ${label || ""}`;   // fmtF already carries the unit
   $("inspect-panel").scrollIntoView({ behavior: "smooth", block: "center" });
+  const ao = $("insp-analyze-out"); if (ao) ao.style.display = "none";
+  loadRecordings();
   stopSpectrumPoll();
   listenStop();
   const au = $("insp-audio"); au.pause(); au.removeAttribute("src");
@@ -1166,6 +1169,174 @@ function tuneDemodFromClick(e, cv) {
 }
 if ($("insp-analyzer")) $("insp-analyzer").addEventListener("click", (e) => tuneDemodFromClick(e, $("insp-analyzer")));
 if ($("insp-waterfall")) $("insp-waterfall").addEventListener("click", (e) => tuneDemodFromClick(e, $("insp-waterfall")));
+
+// BUGFIX: the monitor/inspect panel was authored INSIDE the baseline <section>,
+// which is display:none unless the baseline tab is active — so every other list
+// (hunt, results, wiki, triage) called inspectByFreq but the panel never showed.
+// Lift it to the end of the views' container so it's outside any .view and
+// visible from anywhere it's invoked.
+(function liftInspectPanel() {
+  const p = $("inspect-panel");
+  const sec = p && p.closest("section.view");
+  if (p && sec && sec.parentElement) sec.parentElement.appendChild(p);
+})();
+
+/* ---------- monitor: fused ANALYZE ("what is it?") + RECORD ---------- */
+
+// Receive + identify the inspected signal in ONE capture: modulation features,
+// sigidwiki candidates (with TSCM notes), POCSAG decode, demod audio, and whether
+// it's NEW to this address. The "what IS it" brain behind the monitor — distinct
+// from the live power-vs-freq analyzer trace.
+async function analyzeSignal() {
+  const center = App.inspCenter;
+  if (center == null) { alert("Open a signal in the monitor first (click a frequency)."); return; }
+  const out = $("insp-analyze-out");
+  out.style.display = ""; out.innerHTML = "<span class='note'>analyzing…</span>";
+  const mode = ($("insp-mode") || {}).value || undefined;
+  let j;
+  try { j = await api("/api/analyze/signal", { center_mhz: center, label: App.inspLabel || "", mode }); }
+  catch (e) { out.innerHTML = `<span class='note'>analyze failed: ${esc(e.message || e)}</span>`; return; }
+  renderAnalyze(j);
+  if (j.decode) renderDecode(j);
+  if (j.audio) { const au = $("insp-audio"); au.src = j.audio; }
+}
+
+function renderAnalyze(j) {
+  const out = $("insp-analyze-out");
+  const f = j.features, nv = j.novelty, cands = j.candidates || [];
+  const rows = [];
+  rows.push(`<div class="row"><b>◎ ANALYZE</b> ${j.in_range ? "" : "<span class='pill'>freq-only</span>"} ` +
+            `${j.pocsag_likely ? "<span class='pill'>looks like POCSAG</span>" : ""}</div>`);
+  if (j.note) rows.push(`<div class="note">${esc(j.note)}</div>`);
+  if (f) {
+    rows.push(`<div class="note">${f.signal_present ? "● signal present" : "○ noise floor"} · ` +
+      `<b>${esc(f.modulation_class)}</b> · BW ~${f.occupied_bw_khz} kHz · ${esc(f.continuity)} · ` +
+      `duty ${(f.duty_cycle * 100).toFixed(0)}% · SNR ${f.snr_db} dB` +
+      (f.fsk_states >= 2 ? ` · FSK ${f.fsk_states}-state, shift ${f.fsk_shift_khz} kHz` : "") +
+      (f.symbol_rate_kbd ? ` · ~${f.symbol_rate_kbd} kBd` : "") + `</div>`);
+  }
+  if (nv) {
+    rows.push(nv.is_novel_to_address
+      ? `<div class="note" style="color:#ffd24a">▲ NEW TO THIS ADDRESS — ${esc(nv.novelty_reason || "not seen here before")}</div>`
+      : `<div class="note">seen at this address before · ${nv.prior_sessions} prior sweep(s)` +
+        (nv.differences && nv.differences.power_delta_db != null ? ` · Δpower ${nv.differences.power_delta_db} dB` : "") +
+        `</div>`);
+  }
+  if (cands.length) {
+    rows.push("<div class='note' style='margin-top:4px'>CANDIDATES (sigidwiki — feature match, confirm by ear/eye):</div>");
+    rows.push("<table><tr><th>Signal</th><th>Class</th><th>BW</th><th>TSCM note</th><th></th></tr>" +
+      cands.map(c => `<tr><td>${esc(c.name)}</td><td>${esc(c.class)}</td><td>${c.bandwidth_khz} kHz</td>` +
+        `<td class="note" style="max-width:240px">${esc(c.tscm || "")}</td>` +
+        `<td><a href="${esc(c.url)}" target="_blank" rel="noopener" class="note">ref ↗</a></td></tr>`).join("") +
+      "</table>");
+  }
+  out.innerHTML = rows.join("");
+  out.style.display = "";
+}
+
+// RECORD demodulated audio of the inspected signal to a per-session WAV (toggle).
+async function toggleRecord() {
+  const btn = $("insp-record");
+  if (App.recording) {
+    App.recording = false; btn.textContent = "● REC"; btn.classList.remove("on");
+    try {
+      const r = await api("/api/record/stop", {});
+      $("insp-msg").textContent = r.recording_id ? `■ saved (${r.duration_s || 0}s)` : (r.note || "stopped");
+    } catch (e) { $("insp-msg").textContent = "stop failed: " + (e.message || e); }
+    loadRecordings();
+    return;
+  }
+  const center = App.inspCenter;
+  if (center == null) { alert("Open a signal in the monitor first."); return; }
+  const mode = ($("insp-mode") || {}).value || undefined;
+  try {
+    await api("/api/record/start", { center_mhz: center, mode, label: App.inspLabel || "" });
+    App.recording = true; btn.textContent = "■ STOP REC"; btn.classList.add("on");
+    $("insp-msg").textContent = "● recording…";
+  } catch (e) { alert("Record failed: " + (e.message || e)); }
+}
+
+async function loadRecordings() {
+  const el = $("insp-recordings");
+  if (!el) return;
+  let recs = [];
+  try { recs = await api("/api/recordings"); } catch (e) { el.innerHTML = ""; return; }
+  if (!recs.length) { el.innerHTML = ""; return; }
+  el.innerHTML = "<div class='note'>RECORDINGS (this session · client-sensitive, gitignored):</div>" +
+    recs.map(r => `<div class="row" style="gap:6px"><span class="note">${fmtF(r.center_mhz)} · ` +
+      `${esc(r.mode || "")} · ${r.duration_s || 0}s${r.notes === "archived" ? " · archived" : ""}</span>` +
+      `<audio controls preload="none" src="/api/recordings/${r.id}/audio" style="height:30px"></audio></div>`).join("");
+}
+
+if ($("insp-analyze")) $("insp-analyze").onclick = analyzeSignal;
+if ($("insp-record")) $("insp-record").onclick = toggleRecord;
+
+/* ---------- MANUAL gated triage (post-hoc, no radio) ---------- */
+const TRIAGE_LABELS = { cleared: "Cleared", suspect: "Suspect", flagged: "Flag", ask_client: "Ask client" };
+
+async function loadTriage() {
+  try {
+    const roles = await api("/api/device/roles");
+    const pill = $("triage-mode");
+    if (pill) pill.textContent = roles.concurrent_enabled
+      ? "LIVE triage (dual-device: Pluto monitors while the RFE sweeps)"
+      : "post-hoc (review the last sweep — radio free)";
+  } catch (e) {}
+  let d;
+  try { d = await api("/api/triage/last"); }
+  catch (e) { $("triage-summary").textContent = e.message || e; return; }
+  App.triage = d;
+  const tb = $("tbl-triage");
+  if (!d.sweep_id || !d.signals.length) {
+    tb.innerHTML = "<tr><td class='note'>Nothing to triage — run an interior sweep, or every detection is baseline-explained.</td></tr>";
+    $("triage-summary").textContent = "";
+    $("triage-gate").innerHTML = "";
+    return;
+  }
+  $("triage-summary").textContent =
+    `sweep #${d.sweep_id} · ${d.signals.length} unexplained · ${d.remaining_unexplained} left to review`;
+  $("triage-gate").innerHTML = d.remaining_unexplained > 0
+    ? `<span style="color:#e0a030">⏳ ${d.remaining_unexplained} signal(s) still unreviewed — the review is INCOMPLETE.</span>`
+    : `<span style="color:#39d98a">✓ every signal triaged — review COMPLETE.</span>`;
+  tb.innerHTML =
+    "<tr><th>Score</th><th>Frequency</th><th>Class</th><th>Novel?</th><th>Decision</th><th>Notes</th><th>Monitor</th></tr>" +
+    d.signals.map(triageRow).join("");
+}
+
+function triageRow(s) {
+  const st = s.triage_status || "unreviewed";
+  const btns = Object.keys(TRIAGE_LABELS).map(k =>
+    `<button class="btn ${st === k ? "primary" : ""}" style="padding:2px 6px" ` +
+    `onclick="triageDecide(${s.id},'${k}')">${TRIAGE_LABELS[k]}</button>`).join(" ");
+  const novel = s.is_novel_to_address
+    ? `<span class="pill" style="color:#ffd24a" title="${esc(s.novelty_reason || "")}">▲ NEW</span>` : "";
+  const lbl = (s.matched_label || s.classification || "signal").replace(/'/g, "");
+  return `<tr data-sid="${s.id}">` +
+    `<td>${(s.anomaly_score || 0).toFixed(0)}</td>` +
+    `<td><a href="#" class="freqlink" data-center="${s.center_mhz}" data-label="${esc(lbl)}">${fmtF(s.center_mhz)}</a></td>` +
+    `<td><span class="pill ${s.classification}">${s.classification}</span>${s.caution ? " ⚠" : ""}</td>` +
+    `<td>${novel}</td>` +
+    `<td>${btns}<div class="note" style="margin-top:2px">${st === "unreviewed" ? "— unreviewed" : esc(TRIAGE_LABELS[st] || st)}</div></td>` +
+    `<td><input class="triage-note" data-sid="${s.id}" value="${esc(s.triage_notes || "")}" placeholder="notes…" style="width:150px"></td>` +
+    `<td><button class="btn" onclick="monitorFreq(${s.center_mhz},'${esc(lbl)}')">▶ monitor</button></td>` +
+    `</tr>`;
+}
+
+async function triageDecide(id, status) {
+  const noteEl = document.querySelector(`.triage-note[data-sid="${id}"]`);
+  const notes = noteEl ? noteEl.value : "";
+  try { await api(`/api/signals/${id}/triage`, { status, notes }); }
+  catch (e) { alert("Triage failed: " + (e.message || e)); return; }
+  loadTriage();
+}
+
+// Open the monitor on a triaged signal and auto-run ANALYZE so the operator sees
+// WHAT it is (receive + identify), not just a power trace.
+function monitorFreq(center, label) {
+  listenAt(center, label);
+  setTimeout(analyzeSignal, 400);
+}
+if ($("btn-triage-load")) $("btn-triage-load").onclick = loadTriage;
 
 // 256-entry RGB heat LUT (same curve as the old heat()), for fast per-texel paint.
 const HEAT = (() => {

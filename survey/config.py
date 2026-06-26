@@ -102,8 +102,17 @@ DEFAULTS = {
         # set true to HARD-FAIL at connect if the radio can't reach freq_min/max
         # (i.e. you expect the frequency extension to be applied)
         "require_extended": False,
+        # DUAL-DEVICE (Phase 2): when true, the app holds the RF Explorer (sweeper)
+        # and the Pluto (monitor) at once, each on its own lock, so a sweep and a
+        # live monitor/analyze/record run concurrently. Default OFF — enable only
+        # after a two-radio bench check (HANDOFF: full simultaneous sweep+monitor
+        # on ONE radio waits for the July 2RX/2TX B220).
+        "concurrent_monitor": False,
     },
     "cache": {"dir": "cache", "max_age_hours": 720},
+    # monitor recordings (WAV of a received signal). Client-sensitive PII: the
+    # dir is gitignored and purged per engagement (move-to-archive, never delete).
+    "recordings": {"dir": "recordings", "max_seconds": 120.0},
     "calibration": {},
 }
 
