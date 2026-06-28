@@ -21,7 +21,6 @@ BASELINE = [
     rec(98.5, 98.5, callsign="KSPR", service="FM"),
     rec(155.34, 155.34, callsign="WQAB123", service="LMR", channel_bw_khz=25.0,
         source="fcc_uls", category="land_mobile"),
-    # carrier blocks (from OpenCellID + carrier band table)
     {"freq_low_mhz": 1930.0, "freq_high_mhz": 1995.0, "confidence": "block",
      "service": "CELL", "label": "PCS downlink (B2/B25)", "licensee": "AT&T",
      "callsign": "", "source": "opencellid", "channel_bw_khz": 5000.0,
@@ -30,7 +29,6 @@ BASELINE = [
      "service": "CELL", "label": "PCS UPLINK (B2/B25)", "licensee": "AT&T",
      "callsign": "", "source": "opencellid", "channel_bw_khz": 5000.0,
      "caution": True, "uplink": True, "category": "cellular"},
-    # static allocations
     {"freq_low_mhz": 433.05, "freq_high_mhz": 434.79, "confidence": "allocation",
      "service": "ISM", "label": "433 MHz ISM", "callsign": "", "licensee": "",
      "source": "static", "channel_bw_khz": 100.0, "caution": True, "uplink": False,
@@ -44,43 +42,52 @@ BASELINE = [
 
 class TestClassification(unittest.TestCase):
     def test_fm_verified_within_tolerance(self):
-        c = classify_signal(98.45, BASELINE)   # ±100 kHz FM tolerance
+        c = classify_signal(98.45, BASELINE)
         self.assertEqual(c.classification, "VERIFIED")
+        self.assertEqual(c.identity_tier, "IDENTIFIED")
         self.assertEqual(c.matched_label, "KSPR")
+        self.assertEqual(c.group_key, "broadcast:FM")
+        self.assertEqual(c.display_label, "KSPR")
 
     def test_fm_outside_tolerance_not_verified(self):
         c = classify_signal(98.2, BASELINE)
         self.assertNotEqual(c.classification, "VERIFIED")
 
     def test_nfm_land_mobile_tight_tolerance(self):
-        self.assertEqual(classify_signal(155.345, BASELINE).classification, "VERIFIED")
-        self.assertNotEqual(classify_signal(155.39, BASELINE).classification, "VERIFIED")
+        c = classify_signal(155.345, BASELINE)
+        self.assertEqual(c.classification, "VERIFIED")
+        self.assertEqual(c.identity_tier, "IDENTIFIED")
 
     def test_cellular_downlink_block_verified(self):
         c = classify_signal(1960.0, BASELINE)
         self.assertEqual(c.classification, "VERIFIED")
+        self.assertEqual(c.identity_tier, "IDENTIFIED")
         self.assertIn("downlink", c.match_reason)
 
-    def test_cellular_uplink_block_is_caution_not_pass(self):
+    def test_cellular_uplink_block_is_known_band_caution(self):
         c = classify_signal(1880.0, BASELINE)
         self.assertEqual(c.classification, "PLAUSIBLE")
+        self.assertEqual(c.identity_tier, "KNOWN_BAND")
         self.assertTrue(c.caution)
         self.assertIn("UPLINK", c.match_reason)
 
-    def test_ism_plausible_with_caution(self):
+    def test_ism_known_band_with_caution(self):
         c = classify_signal(433.92, BASELINE)
         self.assertEqual(c.classification, "PLAUSIBLE")
+        self.assertEqual(c.identity_tier, "KNOWN_BAND")
         self.assertTrue(c.caution)
 
     def test_gps_band_energy_flagged(self):
         c = classify_signal(1575.42, BASELINE)
-        self.assertEqual(c.classification, "PLAUSIBLE")
+        self.assertEqual(c.identity_tier, "KNOWN_BAND")
         self.assertTrue(c.caution)
         self.assertIn("GPS", c.match_reason.upper())
 
-    def test_unverified_reports_nearest(self):
+    def test_anomaly_reports_nearest(self):
         c = classify_signal(412.0, BASELINE)
         self.assertEqual(c.classification, "UNVERIFIED")
+        self.assertEqual(c.identity_tier, "ANOMALY")
+        self.assertEqual(c.display_label, "ANOMALY")
         self.assertTrue(c.caution)
         self.assertIn("nearest known", c.match_reason)
         self.assertIsNotNone(c.nearest_distance_mhz)

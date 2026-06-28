@@ -85,6 +85,17 @@ class TestTriage(unittest.TestCase):
         r = self.c.post(f"/api/signals/{osig}/triage", json={"status": "cleared"})
         self.assertEqual(r.status_code, 404)
 
+    def test_bulk_triage_updates_many(self):
+        r = self.c.post("/api/triage/bulk",
+                        json={"signal_ids": [self.u1, self.u2], "status": "cleared",
+                              "notes": "bulk test"})
+        self.assertEqual(r.status_code, 200)
+        body = r.get_json()
+        self.assertEqual(body["updated"], 2)
+        data = self.c.get("/api/triage/last").get_json()
+        self.assertEqual(data["remaining_unexplained"], 0)
+        self.assertEqual(data["counts"].get("cleared"), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

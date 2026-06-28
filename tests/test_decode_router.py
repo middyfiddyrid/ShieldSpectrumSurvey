@@ -10,8 +10,43 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from survey.decode_router import route_decode, interpret      # noqa: E402
+from survey.identify import classify_modulation               # noqa: E402
 from survey.ook import ook_encode                              # noqa: E402
 from survey.tones import dtmf_encode                           # noqa: E402
+
+
+def _feats(**kw):
+    base = {"occupied_bw_khz": 12, "snr_db": 20.0, "continuity": "continuous",
+            "fsk_states": 0, "fsk_shift_khz": 0.0, "distinct_tones": 1,
+            "spectral_flatness": 0.1}
+    base.update(kw)
+    return base
+
+
+class TestClassifyModulation(unittest.TestCase):
+    def test_weak_bursty_keyed_is_ook_not_wideband(self):
+        # the 72.02 MHz failure: weak + bursty + smeared-wide BW MUST be OOK, never OFDM
+        f = _feats(snr_db=9.7, continuity="bursty", occupied_bw_khz=2177,
+                   spectral_flatness=0.5)
+        self.assertEqual(classify_modulation(f), "ook")
+
+    def test_very_weak_is_unknown(self):
+        self.assertEqual(classify_modulation(_feats(snr_db=4.0)), "unknown")
+
+    def test_strong_wide_flat_continuous_is_ofdm(self):
+        f = _feats(snr_db=25, continuity="continuous", occupied_bw_khz=18000,
+                   spectral_flatness=0.6)
+        self.assertEqual(classify_modulation(f), "ofdm_wideband")
+
+    def test_weak_wide_is_not_promoted_to_ofdm(self):
+        # same shape but weak -> must NOT claim OFDM
+        f = _feats(snr_db=9.0, continuity="continuous", occupied_bw_khz=18000,
+                   spectral_flatness=0.6)
+        self.assertNotEqual(classify_modulation(f), "ofdm_wideband")
+
+    def test_narrow_continuous_is_analog_voice(self):
+        self.assertEqual(
+            classify_modulation(_feats(snr_db=20, occupied_bw_khz=12)), "analog_voice")
 
 
 class TestRouteDecode(unittest.TestCase):

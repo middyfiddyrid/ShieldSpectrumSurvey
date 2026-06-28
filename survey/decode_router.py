@@ -108,8 +108,10 @@ def interpret(feats, decoded_protocol=None):
                 "telemetry / control link. The device decoder can read the bit pattern.",
                 "readable": "maybe_decode"}
     if cls == "ook":
-        return {"summary": "Bursty OOK/ASK — cheap remote / sensor / tracker class. "
-                "The device decoder will read its bit pattern if it repeats.",
+        return {"summary": "On-off keyed / bursty — beacon, remote, sensor, or Morse. "
+                "If you HEAR beeping, switch to CW and listen. The device decoder reads "
+                "the bit pattern if it repeats; a keyed carrier in an odd band is worth "
+                "locating (could be a device ID or beacon).",
                 "readable": "maybe_decode"}
     if cls in ("ofdm_wideband", "continuous_digital"):
         return {"summary": "Wideband digital (Wi-Fi / cellular / OFDM class) — NOT a "

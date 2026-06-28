@@ -251,6 +251,14 @@ class Database:
                           "is_novel_to_address INTEGER DEFAULT 0")
             if "novelty_reason" not in cols:
                 c.execute("ALTER TABLE signals ADD COLUMN novelty_reason TEXT DEFAULT ''")
+            if "identity_tier" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN identity_tier TEXT DEFAULT ''")
+            if "display_label" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN display_label TEXT DEFAULT ''")
+            if "group_key" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN group_key TEXT DEFAULT ''")
+            if "group_label" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN group_label TEXT DEFAULT ''")
 
     def _conn(self):
         conn = sqlite3.connect(self.path, timeout=30)
@@ -322,6 +330,22 @@ class Database:
         return self.query_one(
             "SELECT id, triage_status, triage_notes, triage_updated_utc "
             "FROM signals WHERE id=? AND session_id=?", (signal_id, session_id))
+
+    def bulk_set_signal_triage(self, signal_ids, session_id, status, notes=""):
+        """Apply the same triage decision to many signals in one session."""
+        ids = [int(i) for i in signal_ids if i is not None]
+        if not ids:
+            return 0
+        now = time.time()
+        placeholders = ",".join("?" * len(ids))
+        self.execute(
+            f"UPDATE signals SET triage_status=?, triage_notes=?, triage_updated_utc=? "
+            f"WHERE session_id=? AND id IN ({placeholders})",
+            (status, notes, now, session_id, *ids))
+        row = self.query_one(
+            f"SELECT COUNT(*) AS n FROM signals WHERE session_id=? AND id IN ({placeholders})",
+            (session_id, *ids))
+        return int(row["n"]) if row else 0
 
     # --- recordings (monitor captures; gitignored, client-sensitive) ---
 

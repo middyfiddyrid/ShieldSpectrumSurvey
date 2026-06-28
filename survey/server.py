@@ -864,8 +864,24 @@ def create_app(db, cfg, demo=False) -> Flask:
         lo_mhz, hi_mhz = min(m.min_mhz for m in mods), max(m.max_mhz for m in mods)
         if not (lo_mhz <= center_mhz <= hi_mhz):
             return err(f"{center_mhz:.3f} MHz is outside the radio's range", 416)
-        fs = float(cfg.get("pluto", "stream_sample_rate", default=2_400_000))
-        n_block = int(fs * float(cfg.get("pluto", "listen_block_seconds", default=0.5)))
+        ibw = request.args.get("ibw_mhz")
+        if ibw is not None:
+            try:
+                ibw_mhz = max(1.0, min(20.0, float(ibw)))
+                fs = ibw_mhz * 1_000_000
+            except (TypeError, ValueError):
+                fs = float(cfg.get("pluto", "stream_sample_rate", default=2_400_000))
+        else:
+            fs = float(cfg.get("pluto", "stream_sample_rate", default=2_400_000))
+        block_s = request.args.get("block_s")
+        if block_s is not None:
+            try:
+                block_s = max(0.1, min(1.0, float(block_s)))
+            except (TypeError, ValueError):
+                block_s = float(cfg.get("pluto", "listen_block_seconds", default=0.5))
+        else:
+            block_s = float(cfg.get("pluto", "listen_block_seconds", default=0.5))
+        n_block = max(1024, int(fs * block_s))
         cal = float(cfg.get("pluto", "cal_offset_db", default=-30.0))
         return center_mhz, mode, dev, fs, n_block, cal
 
@@ -1136,7 +1152,8 @@ def create_app(db, cfg, demo=False) -> Flask:
 
     # ---------- planning & sweeping ----------
 
-    def _plans(profile, custom_minutes, scan_mode="full", seg_width=None):
+    def _plans(profile, custom_minutes, scan_mode="full", seg_width=None,
+               custom_avg_passes=None, custom_maxhold_s=None):
         # auto-(re)connects and lazily reads any module range the connect-time
         # identity pass failed to capture; raises DeviceError if truly absent
         modules = st.controller.module_ranges()
@@ -1151,7 +1168,20 @@ def create_app(db, cfg, demo=False) -> Flask:
                     pcfg = _WidthCfg(cfg, w)
             except (TypeError, ValueError):
                 pass
-        return plan_full_sweep(modules, pcfg, profile, custom_minutes, targets=targets)
+        avg_p = custom_avg_passes
+        if avg_p is not None:
+            try:
+                avg_p = int(avg_p)
+            except (TypeError, ValueError):
+                avg_p = None
+        mh = custom_maxhold_s
+        if mh is not None:
+            try:
+                mh = float(mh)
+            except (TypeError, ValueError):
+                mh = None
+        return plan_full_sweep(modules, pcfg, profile, custom_minutes, targets=targets,
+                             custom_avg_passes=avg_p, custom_maxhold_s=mh)
 
     @app.get("/api/plan")
     def plan_preview():
@@ -1160,7 +1190,9 @@ def create_app(db, cfg, demo=False) -> Flask:
         scan_mode = request.args.get("scan_mode", "full")
         seg = request.args.get("segment_width_mhz")
         try:
-            plans = _plans(profile, minutes, scan_mode, seg)
+            plans = _plans(profile, minutes, scan_mode, seg,
+                           request.args.get("custom_avg_passes"),
+                           request.args.get("custom_maxhold_s"))
         except Exception as e:  # noqa: BLE001 - device absent/dead included
             return err(e)
         return jsonify({side: p.to_dict() for side, p in plans.items()})
@@ -1178,12 +1210,21 @@ def create_app(db, cfg, demo=False) -> Flask:
         minutes = float(body.get("custom_minutes") or 45)
         scan_mode = body.get("scan_mode", "full")        # full | bug
         seg = body.get("segment_width_mhz")               # optional segment-width override
+        # F5: manual segment advance is a custom-mode-only behaviour
+        manual_advance = bool(body.get("manual_advance")) and profile == "custom"
         try:
-            plans = _plans(profile, minutes, scan_mode, seg)
+            plans = _plans(profile, minutes, scan_mode, seg,
+                           body.get("custom_avg_passes"),
+                           body.get("custom_maxhold_s"))
             plan = plans.get(module)
+            # F4: single-RX devices (Pluto) report one module; if the requested
+            # side has no plan but only one exists, fall back to it rather than erroring.
+            if (plan is None or not plan.segments) and len(plans) == 1:
+                module, plan = next(iter(plans.items()))
             if plan is None or not plan.segments:
                 return err(f"no plan for module {module}")
-            sweep_id = st.controller.start_sweep(session["id"], phase, module, room, plan)
+            sweep_id = st.controller.start_sweep(session["id"], phase, module, room, plan,
+                                                 manual_advance=manual_advance)
         except Exception as e:  # noqa: BLE001 - busy, device dead, plan failure
             log.exception("sweep start failed")
             return err(e, 409)
@@ -1195,6 +1236,12 @@ def create_app(db, cfg, demo=False) -> Flask:
     def sweep_abort():
         st.controller.abort()
         return jsonify({"aborted": True})
+
+    @app.post("/api/sweep/next_segment")
+    def sweep_next_segment():
+        """F5: release the manual-advance gate so the sweep moves to the next segment."""
+        st.controller.advance()
+        return jsonify({"ok": True})
 
     # ---------- results ----------
 
@@ -1298,6 +1345,31 @@ def create_app(db, cfg, demo=False) -> Flask:
         row = db.set_signal_triage(signal_id, session["id"], status,
                                    body.get("notes", ""))
         return jsonify(row)
+
+    @app.post("/api/triage/bulk")
+    def triage_bulk():
+        """Apply one triage decision to many signals (filtered client-side)."""
+        session = st.session()
+        if not session:
+            return err("no session")
+        body = request.get_json(force=True)
+        ids = body.get("signal_ids") or []
+        if not isinstance(ids, list) or not ids:
+            return err("signal_ids required (non-empty list)")
+        status = (body.get("status") or "").strip()
+        if status not in TRIAGE_DECISIONS:
+            return err(f"status must be one of {', '.join(TRIAGE_DECISIONS)}")
+        notes = body.get("notes", "")
+        # reject IDs outside this session (don't leak existence of other sessions)
+        placeholders = ",".join("?" * len(ids))
+        owned = db.query(
+            f"SELECT id FROM signals WHERE session_id=? AND id IN ({placeholders})",
+            (session["id"], *ids))
+        owned_ids = [r["id"] for r in owned]
+        if not owned_ids:
+            return err("no matching signals in this session", 404)
+        updated = db.bulk_set_signal_triage(owned_ids, session["id"], status, notes)
+        return jsonify({"updated": updated, "status": status})
 
     @app.get("/api/novelty")
     def novelty_lookup():

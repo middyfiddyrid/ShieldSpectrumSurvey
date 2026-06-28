@@ -540,8 +540,23 @@ class PlutoSource(AD936xSource):
         # Manual gain at a FIXED level for repeatable baseline comparison;
         # slow_attack AGC only for first-look survey (per spec).
         self.sdr.gain_control_mode_chan0 = mode
-        if mode == "manual":
-            self.sdr.rx_hardwaregain_chan0 = float(db)
+        if mode != "manual":
+            return
+        # The AD936x manual hardwaregain has a FREQUENCY-DEPENDENT valid range, and
+        # at the power-on LO the configured value can be out of range -> EINVAL.
+        # That used to kill connect() entirely (every demod then failed). Try the
+        # requested gain, back off to safe values, and finally fall back to AGC so
+        # a bad gain number can NEVER take the whole radio down.
+        for g in (float(db), 60.0, 50.0, 40.0):
+            try:
+                self.sdr.rx_hardwaregain_chan0 = g
+                return
+            except OSError:
+                continue
+        try:
+            self.sdr.gain_control_mode_chan0 = "slow_attack"
+        except Exception:  # noqa: BLE001
+            pass
 
     def _flush_buffer(self):
         try:

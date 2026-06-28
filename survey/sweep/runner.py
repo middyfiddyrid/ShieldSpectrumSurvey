@@ -23,8 +23,9 @@ import os
 import threading
 import time
 
-from ..correlation import (anomaly_score, classify_signal, compute_interior_delta,
-                           compute_room_localization)
+from ..correlation import (_matches, anomaly_score, classify_signal,
+                           compute_interior_delta, compute_room_localization)
+from ..expected import expected_for_range
 from .detector import Accumulator, detect_signals
 from .device import DeviceError
 
@@ -61,11 +62,18 @@ class SweepController:
         self.listen_spectrum = None            # latest live analyzer+waterfall from the audio stream
         self.record_stop = threading.Event()   # set to stop the active monitor recording
         self.recording = None                  # active/last recording descriptor
+        # F5 manual segment advance (custom mode): when on, the worker pauses
+        # between segments until advance_event fires (still honouring abort_event).
+        self.manual_advance = False
+        self.advance_event = threading.Event()
+        # F2 anomaly accumulator — persists across segments for the whole sweep.
+        self._anomalies = []
         self.state = {"running": False, "phase": None, "module": None, "room": None,
                       "segment_index": 0, "segment_total": 0, "percent": 0.0,
                       "eta_seconds": 0, "signal_count": 0, "message": "idle",
                       "live_trace": None, "current_segment": None, "error": None,
-                      "directional": None, "calibration": None, "capture": None}
+                      "directional": None, "calibration": None, "capture": None,
+                      "awaiting_advance": False, "anomalies_found": []}
         self._lock = threading.Lock()
 
     # ---- device ----
@@ -184,20 +192,28 @@ class SweepController:
 
     def abort(self):
         self.abort_event.set()
+        self.advance_event.set()   # wake a manually-paused sweep so it can stop
         self._set(message="abort requested — keeping data collected so far")
+
+    def advance(self):
+        """F5: operator tapped NEXT SEGMENT — release the manual-advance gate."""
+        self.advance_event.set()
 
     def _set(self, **kw):
         with self._lock:
             self.state.update(kw)
 
     def start_sweep(self, session_id: int, phase: str, module: str, room: str,
-                    plan, on_done=None):
+                    plan, manual_advance: bool = False, on_done=None):
         if self.busy():
             raise RuntimeError("a sweep is already running")
         self.listen_stop.set()           # stop any live audio stream and let it release the radio
         time.sleep(0.4)
         self._ensure_device()
         self.abort_event.clear()
+        self.manual_advance = bool(manual_advance)
+        self.advance_event.clear()
+        self._anomalies = []
         sweep_id = self.db.execute(
             "INSERT INTO sweeps (session_id,phase,module,room,profile,started_utc,"
             "range_low_mhz,range_high_mhz,status,simulated) VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -247,7 +263,8 @@ class SweepController:
         self._busy_source = self.active_source
         self._set(running=True, phase=phase, module=module, room=room, error=None,
                   segment_index=0, segment_total=len(plan.segments), percent=0.0,
-                  signal_count=0, sweep_id=sweep_id,
+                  signal_count=0, sweep_id=sweep_id, awaiting_advance=False,
+                  anomalies_found=[],
                   message=f"starting {phase} sweep on {module} module")
         self._thread.start()
         return sweep_id
@@ -267,17 +284,22 @@ class SweepController:
         for idx, seg in enumerate(plan.segments):
             if self.abort_event.is_set():
                 break
+            # F2: what licensed records do we EXPECT in this segment's range —
+            # published as status='looking', flipped to 'found' in _sweep_segment.
+            seg_expected = expected_for_range(baseline_rows, seg.low_mhz, seg.high_mhz)
             self._set(segment_index=idx + 1,
                       current_segment={"low_mhz": seg.low_mhz, "high_mhz": seg.high_mhz,
                                        "band_tag": seg.band_tag,
-                                       "rbw_khz": round(seg.rbw_khz(plan.sweep_points), 1)},
+                                       "rbw_khz": round(seg.rbw_khz(plan.sweep_points), 1),
+                                       "expected": seg_expected},
                       eta_seconds=int(remaining),
                       message=f"segment {idx + 1}/{len(plan.segments)}: "
                               f"{seg.low_mhz:.3f}-{seg.high_mhz:.3f} MHz [{seg.band_tag}]")
             for attempt in range(1, MAX_SEGMENT_RETRIES + 1):
                 try:
                     self._sweep_segment(session_id, sweep_id, phase, module, room, seg,
-                                        plan, baseline_rows, threshold_db, merge_gap)
+                                        plan, baseline_rows, threshold_db, merge_gap,
+                                        seg_expected)
                     break
                 except (DeviceError, OSError) as e:
                     log.warning("segment %s attempt %d failed: %s", idx + 1, attempt, e)
@@ -292,9 +314,20 @@ class SweepController:
             remaining -= seg.avg_passes * sps + seg.maxhold_dwell_s + 0.9
             self._set(percent=round(100.0 * (idx + 1) / len(plan.segments), 1),
                       eta_seconds=max(int(remaining), 0))
+            # F5: in custom manual mode, hold here until the operator advances.
+            # Still wakes on abort (abort() sets advance_event). Last segment never waits.
+            if (self.manual_advance and idx < len(plan.segments) - 1
+                    and not self.abort_event.is_set()):
+                self.advance_event.clear()
+                self._set(awaiting_advance=True,
+                          message=f"segment {idx + 1}/{len(plan.segments)} done — "
+                                  "tap NEXT SEGMENT to continue")
+                while not self.advance_event.is_set() and not self.abort_event.is_set():
+                    self.advance_event.wait(0.25)
+                self._set(awaiting_advance=False)
 
     def _sweep_segment(self, session_id, sweep_id, phase, module, room, seg, plan,
-                       baseline_rows, threshold_db, merge_gap):
+                       baseline_rows, threshold_db, merge_gap, seg_expected=None):
         dev = self.device
         dev.set_range(seg.low_mhz, seg.high_mhz)
         first = dev.read_sweep(timeout_s=8.0)
@@ -351,17 +384,40 @@ class SweepController:
             "maxhold_dwell_s,status,data_json) VALUES (?,?,?,?,?,?,?,?)",
             (sweep_id, seg.low_mhz, seg.high_mhz, round(floor, 1), seg.avg_passes,
              seg.maxhold_dwell_s, "done", json.dumps(acc.to_dict())))
+        detected = []
         for s in signals:
             cls = classify_signal(s.center_mhz, baseline_rows)
+            detected.append((s, cls))
             self.db.execute(
                 "INSERT INTO signals (sweep_id,session_id,segment_id,room,module,phase,"
                 "center_mhz,bw_khz,peak_dbm,avg_dbm,floor_dbm,persistence,classification,"
-                "matched_label,match_reason,caution) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "matched_label,match_reason,caution,identity_tier,display_label,"
+                "group_key,group_label) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (sweep_id, session_id, segment_id, room, module, phase,
                  s.center_mhz, s.bw_khz, s.peak_dbm, s.avg_dbm, s.floor_dbm,
                  s.persistence, cls.classification, cls.matched_label,
-                 cls.match_reason, int(cls.caution)))
-        self._set(signal_count=self.state["signal_count"] + len(signals))
+                 cls.match_reason, int(cls.caution), cls.identity_tier,
+                 cls.display_label, cls.group_key, cls.group_label))
+
+        # F2: flip expected records found, accumulate anomalies for the side panel.
+        # Same _matches rule the report uses, so live panel and PDF agree.
+        if seg_expected:
+            updated = [{**e, "status": "found"} if any(_matches(e, s.center_mhz)
+                                                       for s, _ in detected)
+                       else e for e in seg_expected]
+            cur = dict(self.state.get("current_segment") or {})
+            cur["expected"] = updated
+            self._set(current_segment=cur)
+        new_anoms = [{"center_mhz": s.center_mhz, "peak_dbm": s.peak_dbm,
+                      "bw_khz": s.bw_khz,
+                      "label": cls.display_label or cls.matched_label or "",
+                      "reason": cls.match_reason or ""}
+                     for s, cls in detected
+                     if cls.identity_tier == "ANOMALY" or cls.caution]
+        if new_anoms:
+            self._anomalies.extend(new_anoms)
+        self._set(signal_count=self.state["signal_count"] + len(signals),
+                  anomalies_found=list(self._anomalies))
 
     # ---- signal capture (wiki fingerprints) ----
 
@@ -737,10 +793,12 @@ def postprocess_session(db, cfg, session_id: int):
         db.execute(
             "UPDATE signals SET interior_delta_db=?, localization_score=?, "
             "strongest_room=?, anomaly_score=?, classification=?, matched_label=?, "
-            "match_reason=?, caution=? WHERE id=?",
+            "match_reason=?, caution=?, identity_tier=?, display_label=?, "
+            "group_key=?, group_label=? WHERE id=?",
             (round(delta, 1) if delta is not None else None,
              loc_delta, strongest, score, cls.classification, cls.matched_label,
-             cls.match_reason, int(cls.caution), s["id"]))
+             cls.match_reason, int(cls.caution), cls.identity_tier,
+             cls.display_label, cls.group_key, cls.group_label, s["id"]))
 
     # ambient signals get classified too (no localization boosts)
     for s in ambient:
@@ -749,6 +807,8 @@ def postprocess_session(db, cfg, session_id: int):
                               interior_flag, room_flag)
         db.execute(
             "UPDATE signals SET anomaly_score=?, classification=?, matched_label=?, "
-            "match_reason=?, caution=? WHERE id=?",
+            "match_reason=?, caution=?, identity_tier=?, display_label=?, "
+            "group_key=?, group_label=? WHERE id=?",
             (score, cls.classification, cls.matched_label, cls.match_reason,
-             int(cls.caution), s["id"]))
+             int(cls.caution), cls.identity_tier, cls.display_label,
+             cls.group_key, cls.group_label, s["id"]))
