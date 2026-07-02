@@ -82,9 +82,12 @@ class TestFeatureExtraction(unittest.TestCase):
 
 class TestClassify(unittest.TestCase):
     def test_ofdm_class(self):
+        # OFDM/Wi-Fi is CONTINUOUS, wide, flat, and strong — a bursty/weak signal
+        # must NOT be called wideband-digital (that was the 72 MHz mislabel bug).
         self.assertEqual(classify_modulation(
             {"occupied_bw_khz": 20000, "spectral_flatness": 0.8, "distinct_tones": 30,
-             "fsk_states": 0, "fsk_shift_khz": 0, "continuity": "bursty"}), "ofdm_wideband")
+             "fsk_states": 0, "fsk_shift_khz": 0, "continuity": "continuous",
+             "snr_db": 25.0}), "ofdm_wideband")
 
 
 class TestIdentify(unittest.TestCase):

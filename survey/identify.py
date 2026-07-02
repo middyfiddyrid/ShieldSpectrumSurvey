@@ -31,10 +31,18 @@ log = logging.getLogger("survey.identify")
 # IQ modulation feature extraction
 # ---------------------------------------------------------------------------
 
-def _occupied_bw_hz(freqs_hz: np.ndarray, psd_db: np.ndarray, down_db: float = 10.0) -> float:
-    """Width of the band within `down_db` of the peak bin (rough occupied BW)."""
+def _occupied_bw_hz(freqs_hz: np.ndarray, psd_db: np.ndarray, down_db: float = 10.0,
+                    floor_margin_db: float = 6.0) -> float:
+    """Occupied bandwidth — bins both within `down_db` of the peak AND clearly
+    above the noise floor. The noise-floor gate is what stops a WEAK signal from
+    reading as full-capture-width: at low SNR the peak is barely above the floor,
+    so a plain peak-minus-10dB threshold smears across the whole window and
+    measures noise. Anchoring to median + margin keeps a faint narrowband carrier
+    narrow instead of mislabeling it as a 2 MHz wideband emission."""
     peak = float(np.max(psd_db))
-    above = psd_db >= (peak - down_db)
+    floor = float(np.median(psd_db))
+    thr = max(peak - down_db, floor + floor_margin_db)
+    above = psd_db >= thr
     if not np.any(above):
         return 0.0
     idx = np.where(above)[0]
@@ -180,19 +188,34 @@ def iq_features(iq, fs: float) -> dict:
 
 
 def classify_modulation(f: dict) -> str:
-    """Coarse modulation class from features — matches sigidwiki_ref 'class' tags."""
+    """Coarse modulation class from features — matches sigidwiki_ref 'class' tags.
+
+    Order matters: keyed/bursty and FSK are decided BEFORE any wideband-digital
+    call, and the 'scary' wideband labels (OFDM/video/continuous-digital) require
+    a STRONG, CONTINUOUS signal. This stops the old failure where a weak, bursty,
+    keyed carrier (a beacon / Morse / remote) got mislabeled 'wideband digital'
+    because a low-SNR bandwidth measurement smeared across the whole capture."""
     bw = f["occupied_bw_khz"]
-    if f["spectral_flatness"] > 0.45 and bw > 4000:
-        return "ofdm_wideband"       # Wi-Fi / LTE: flat, wide
+    snr = float(f.get("snr_db", 0.0))
+    cont = f["continuity"]
+    # too weak to characterize — don't manufacture a class from noisy features
+    if snr < 6.0:
+        return "unknown"
+    # genuine multi-state FSK wins (bursty or continuous)
     if f["fsk_states"] >= 2 and f["fsk_shift_khz"] > 0.1:
         return "fsk"
-    if f["continuity"] == "bursty" and bw < 300:
-        return "ook"                 # short narrow on/off bursts (keying sidebands ok)
-    if f["continuity"] == "continuous" and f["distinct_tones"] <= 2 and bw > 2000:
+    # bursty / on-off keyed => OOK (keyed carrier, beacon, Morse, remote, sensor).
+    # A low-duty signal is NEVER OFDM/Wi-Fi, regardless of a smeared bandwidth.
+    if cont == "bursty":
+        return "ook"
+    # wideband digital ONLY when strong + continuous + flat + genuinely wide
+    if cont == "continuous" and f["spectral_flatness"] > 0.45 and bw > 4000 and snr >= 15:
+        return "ofdm_wideband"       # Wi-Fi / LTE: flat, wide, strong
+    if cont == "continuous" and f["distinct_tones"] <= 2 and bw > 2000 and snr >= 12:
         return "analog_video"        # wide continuous FM
-    if f["continuity"] == "continuous" and bw <= 300:
+    if cont == "continuous" and bw <= 300:
         return "analog_voice"        # narrow continuous carrier
-    if f["spectral_flatness"] > 0.35 and bw > 500:
+    if cont == "continuous" and f["spectral_flatness"] > 0.35 and bw > 500 and snr >= 12:
         return "continuous_digital"
     return "unknown"
 
@@ -287,3 +310,25 @@ def spectrogram(iq, fs: float, n_time: int = 120, nperseg: int = 256) -> dict:
             "db": np.round(grid, 1).tolist(),
             "vmin": float(np.percentile(grid, 5)),
             "vmax": float(np.percentile(grid, 99))}
+
+
+def waterfall_stft(iq, fs: float, nperseg: int = 512, rows: int = 8) -> dict:
+    """Fast contiguous waterfall for the live listen view: `rows` STFT slices that
+    SPAN the whole capture (continuous time axis, not isolated snapshots), via a
+    single batched FFT over a sliding window. Each audio block yields a smooth
+    multi-row scroll. Returns db as an ndarray (rows x nperseg). Falls back to the
+    spectrogram() loop on numpy < 1.20."""
+    iq = np.asarray(iq, dtype=np.complex64)
+    nperseg = min(nperseg, iq.size)
+    fr = np.fft.fftshift(np.fft.fftfreq(nperseg, d=1.0 / fs))
+    try:
+        swv = np.lib.stride_tricks.sliding_window_view
+        hop = max(1, (iq.size - nperseg) // max(rows - 1, 1))
+        frames = swv(iq, nperseg)[::hop][:rows]
+        win = np.hanning(nperseg).astype(np.float64)
+        sp = np.fft.fftshift(np.fft.fft(frames * win, axis=1), axes=1)
+        db = 10.0 * np.log10(np.abs(sp) ** 2 + 1e-20)
+        return {"freqs_hz": fr.tolist(), "db": np.round(db, 1)}
+    except (AttributeError, ValueError):       # numpy < 1.20 or degenerate size
+        spec = spectrogram(iq, fs, n_time=rows, nperseg=nperseg)
+        return {"freqs_hz": spec["freqs_hz"], "db": np.asarray(spec["db"])}

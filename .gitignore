@@ -4,6 +4,7 @@ reports/
 cache/
 capture_images/
 case_files/
+recordings/
 __pycache__/
 *.pyc
 # live config holds API keys / credentials — keep it LOCAL, never commit secrets.
@@ -11,3 +12,6 @@ __pycache__/
 config.yaml
 # deploy/staging copy of marketing/dcs_explainer.html (near-duplicate, drifts) — keep source only
 marketing/netlify_build/
+# Claude Code session/editor state — local only
+.claude/
+config.yaml.*

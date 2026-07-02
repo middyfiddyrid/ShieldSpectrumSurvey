@@ -28,7 +28,20 @@ C_BAD = colors.HexColor("#c0392b")
 
 CLASS_COLOR = {"VERIFIED": colors.HexColor("#1e8449"),
                "PLAUSIBLE": colors.HexColor("#b9770e"),
-               "UNVERIFIED": colors.HexColor("#922b21")}
+               "UNVERIFIED": colors.HexColor("#922b21"),
+               "IDENTIFIED": colors.HexColor("#1e8449"),
+               "KNOWN_BAND": colors.HexColor("#b9770e"),
+               "ANOMALY": colors.HexColor("#922b21")}
+
+# Plain, client-facing names for the internal classification codes. The stored
+# values stay VERIFIED/PLAUSIBLE/UNVERIFIED; only the printed text changes.
+CLASS_DISPLAY = {"VERIFIED": "Identified", "PLAUSIBLE": "Likely normal",
+                 "UNVERIFIED": "Anomaly", "IDENTIFIED": "Identified",
+                 "KNOWN_BAND": "Likely normal", "ANOMALY": "Anomaly"}
+
+
+def _class_label(v):
+    return CLASS_DISPLAY.get(v or "", v or "")
 
 BAND_COLORS = {"broadcast": "#2e86c1", "land_mobile": "#7d3c98", "ism": "#e67e22",
                "cellular": "#16a085", "aviation": "#5d6d7e", "gps": "#c0392b",
@@ -451,7 +464,7 @@ GLOSSARY = [
      "like here."),
     ("Noise floor", "The background level of radio energy with no specific signal present; "
      "signals are detected when they rise a set amount above it."),
-    ("VERIFIED / PLAUSIBLE / UNVERIFIED", "How each detected signal was classified: matched to a "
+    ("IDENTIFIED / KNOWN BAND / ANOMALY", "How each detected signal was classified: matched to a "
      "specific licensed source; inside a known band but unmatched; or matching nothing known — "
      "the last being the candidates for investigation."),
     ("Persistence", "How consistently a signal was present across repeated passes — steady "
@@ -567,9 +580,9 @@ def generate_report(db, cfg, session_id: int, reports_dir: str) -> dict:
         "the outside RF environment: a signal meaningfully stronger inside the premises than "
         "outside is locally sourced. Where multiple rooms were swept, per-room amplitude "
         "comparison localizes a source to the room in which it is strongest.",
-        "Every detected signal was correlated against the baseline and classified VERIFIED "
-        "(matches a specific licensed record), PLAUSIBLE (falls within a known allocation; "
-        "flagged with caution in bands where covert devices commonly hide), or UNVERIFIED "
+        "Every detected signal was correlated against the baseline and classified IDENTIFIED "
+        "(matches a specific licensed record or carrier), KNOWN BAND (falls within a known "
+        "allocation; flagged with caution in bands where covert devices commonly hide), or ANOMALY "
         "(no database or allocation match — candidate anomalies for physical investigation). "
         "This survey is receive-only; no transmissions were made.",
     ):
@@ -611,7 +624,7 @@ def generate_report(db, cfg, session_id: int, reports_dir: str) -> dict:
                             0.0, hi))
     el.append(Paragraph(
         "Colored bands: expected allocations by category. Vertical markers: detected "
-        "signals (green = verified, amber = plausible, red = unverified).", ss["Cell"]))
+        "signals (green = identified, amber = likely normal, red = anomaly).", ss["Cell"]))
 
     # ---- Detected signals per module ----
     for module in ("left", "right", "single"):
@@ -626,7 +639,7 @@ def generate_report(db, cfg, session_id: int, reports_dir: str) -> dict:
                 _fmt_freq(s["center_mhz"]), f"{s['peak_dbm']:.0f}",
                 f"{s['bw_khz']:.0f}" if s["bw_khz"] else "",
                 f"{(s['persistence'] or 0) * 100:.0f}%",
-                s["classification"] or "",
+                _class_label(s["classification"]),
                 Paragraph(((s["matched_label"] or "") + " — " +
                            (s["match_reason"] or ""))[:220], ss["Cell"]),
                 s["room"] or ""])
@@ -698,7 +711,7 @@ def generate_report(db, cfg, session_id: int, reports_dir: str) -> dict:
                 f"+{s['interior_delta_db']:.0f} dB" if s["interior_delta_db"] else "—",
                 (s["strongest_room"] or "—") +
                 (f" (+{s['localization_score']:.0f} dB)" if s["localization_score"] else ""),
-                s["classification"],
+                _class_label(s["classification"]),
                 Paragraph((s["match_reason"] or "")[:240], ss["Cell"])])
         el.append(_table(rows, [0.45 * inch, 0.95 * inch, 0.45 * inch, 0.5 * inch,
                                 0.6 * inch, 1.15 * inch, 0.75 * inch, 2.15 * inch]))

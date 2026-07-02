@@ -52,18 +52,29 @@ def _ensure_libiio_on_path(libiio_dir: str = ""):
     else %LOCALAPPDATA%\\libiio\\bin) before importing adi. No-op off Windows."""
     if os.name != "nt":
         return
-    candidates = [libiio_dir] if libiio_dir else []
+    # Prefer DLLs bundled INSIDE the app (native/libiio at the repo root): a GUI/
+    # desktop launch can run on a machine where %LOCALAPPDATA%\libiio\bin isn't
+    # present/visible, but the app's own folder always is.
+    here = os.path.dirname(os.path.abspath(__file__))
+    bundled = os.path.normpath(os.path.join(here, "..", "..", "native", "libiio"))
+    candidates = [bundled]
+    if libiio_dir:
+        candidates.append(libiio_dir)
     local = os.environ.get("LOCALAPPDATA")
     if local:
         candidates.append(os.path.join(local, "libiio", "bin"))
+    candidates.append(r"C:\Program Files\PothosSDR\bin")   # common alt install
     for d in candidates:
         if d and os.path.isdir(d):
             try:
                 os.add_dll_directory(d)
             except (OSError, AttributeError):
                 pass
-            if d.lower() not in os.environ.get("PATH", "").lower():
-                os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
+            # ALWAYS prepend the resolved dir, even if PATH seems to already have
+            # libiio: a GUI/shortcut launch can carry a stale or unexpanded entry
+            # that ctypes.util.find_library('iio') can't use, and putting the real
+            # absolute dir FIRST guarantees the loader finds libiio.dll.
+            os.environ["PATH"] = d + os.pathsep + os.environ.get("PATH", "")
             return
 
 
@@ -468,6 +479,20 @@ class PlutoSource(AD936xSource):
             raise DeviceError(
                 "pyadi-iio not installed (pip install pyadi-iio) — and on "
                 "Windows the native libiio runtime must be on PATH") from e
+        except (TypeError, OSError) as e:
+            # native libiio.dll couldn't be located/loaded (the classic
+            # "LoadLibrary() argument 1 must be str, not None" when find_library
+            # returns None). Report the bundled dir so it's actionable.
+            import ctypes.util
+            here = os.path.dirname(os.path.abspath(__file__))
+            bundled = os.path.normpath(os.path.join(here, "..", "..", "native", "libiio"))
+            raise DeviceError(
+                f"native libiio runtime not loadable ({e}). App-bundled dir {bundled}: "
+                f"exists={os.path.isdir(bundled)}, has libiio.dll="
+                f"{os.path.isfile(os.path.join(bundled, 'libiio.dll'))}; "
+                f"find_library('iio')={ctypes.util.find_library('iio')!r}. The app ships "
+                f"libiio in native/libiio — if exists=False, that folder didn't reach this "
+                f"machine; if exists=True it should load on restart.") from e
         # A fast reconnect can race the previous libiio context's release (the
         # radio reports busy for a beat), so retry a few times before giving up.
         last = None
@@ -515,8 +540,23 @@ class PlutoSource(AD936xSource):
         # Manual gain at a FIXED level for repeatable baseline comparison;
         # slow_attack AGC only for first-look survey (per spec).
         self.sdr.gain_control_mode_chan0 = mode
-        if mode == "manual":
-            self.sdr.rx_hardwaregain_chan0 = float(db)
+        if mode != "manual":
+            return
+        # The AD936x manual hardwaregain has a FREQUENCY-DEPENDENT valid range, and
+        # at the power-on LO the configured value can be out of range -> EINVAL.
+        # That used to kill connect() entirely (every demod then failed). Try the
+        # requested gain, back off to safe values, and finally fall back to AGC so
+        # a bad gain number can NEVER take the whole radio down.
+        for g in (float(db), 60.0, 50.0, 40.0):
+            try:
+                self.sdr.rx_hardwaregain_chan0 = g
+                return
+            except OSError:
+                continue
+        try:
+            self.sdr.gain_control_mode_chan0 = "slow_attack"
+        except Exception:  # noqa: BLE001
+            pass
 
     def _flush_buffer(self):
         try:

@@ -11,6 +11,11 @@ import time
 
 _LOCK = threading.Lock()
 
+# Valid per-detection triage decisions for gated MANUAL review.
+# 'unreviewed' is the default state; the rest are operator decisions.
+TRIAGE_STATUSES = ("unreviewed", "cleared", "suspect", "flagged", "ask_client")
+TRIAGE_DECISIONS = ("cleared", "suspect", "flagged", "ask_client")
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
     id INTEGER PRIMARY KEY,
@@ -177,9 +182,26 @@ CREATE TABLE IF NOT EXISTS case_studies (
                                        -- only attested studies render in reports
     created_utc REAL, updated_utc REAL
 );
+CREATE TABLE IF NOT EXISTS recordings (
+    id INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL,
+    signal_id INTEGER,                 -- originating detection, if any
+    center_mhz REAL NOT NULL,
+    offset_hz REAL DEFAULT 0,          -- demod tuner offset at time of capture
+    mode TEXT DEFAULT '',              -- nfm | wfm | am | usb | lsb | cw
+    duration_s REAL,
+    sample_rate INTEGER,
+    file_path TEXT NOT NULL,           -- relative path under recordings/ (gitignored)
+    kind TEXT DEFAULT 'audio',         -- audio (WAV) | iq (follow-on)
+    created_utc REAL,
+    notes TEXT DEFAULT ''
+);
 CREATE INDEX IF NOT EXISTS idx_baseline_session ON baseline(session_id);
 CREATE INDEX IF NOT EXISTS idx_signals_session ON signals(session_id);
 CREATE INDEX IF NOT EXISTS idx_segments_sweep ON segments(sweep_id);
+CREATE INDEX IF NOT EXISTS idx_recordings_session ON recordings(session_id);
+CREATE INDEX IF NOT EXISTS idx_recordings_freq ON recordings(center_mhz);
+CREATE INDEX IF NOT EXISTS idx_signals_session_phase ON signals(session_id, phase);
 """
 
 
@@ -214,6 +236,29 @@ class Database:
             if "scheduling_note" not in cols:
                 c.execute("ALTER TABLE engagement "
                           "ADD COLUMN scheduling_note TEXT DEFAULT ''")
+            # Per-detection triage state (gated MANUAL review) + novelty flags.
+            cols = {r["name"] for r in c.execute("PRAGMA table_info(signals)")}
+            if "triage_status" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN "
+                          "triage_status TEXT DEFAULT 'unreviewed'")
+                # unreviewed | cleared | suspect | flagged | ask_client
+            if "triage_notes" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN triage_notes TEXT DEFAULT ''")
+            if "triage_updated_utc" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN triage_updated_utc REAL")
+            if "is_novel_to_address" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN "
+                          "is_novel_to_address INTEGER DEFAULT 0")
+            if "novelty_reason" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN novelty_reason TEXT DEFAULT ''")
+            if "identity_tier" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN identity_tier TEXT DEFAULT ''")
+            if "display_label" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN display_label TEXT DEFAULT ''")
+            if "group_key" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN group_key TEXT DEFAULT ''")
+            if "group_label" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN group_label TEXT DEFAULT ''")
 
     def _conn(self):
         conn = sqlite3.connect(self.path, timeout=30)
@@ -272,3 +317,53 @@ class Database:
 
     def clear_baseline(self, session_id):
         self.execute("DELETE FROM baseline WHERE session_id=?", (session_id,))
+
+    # --- triage (gated MANUAL review) ---
+
+    def set_signal_triage(self, signal_id, session_id, status, notes=""):
+        """Set a detection's triage decision. Scoped to session to block
+        cross-session writes. Returns the updated row, or None if not found."""
+        self.execute(
+            "UPDATE signals SET triage_status=?, triage_notes=?, triage_updated_utc=? "
+            "WHERE id=? AND session_id=?",
+            (status, notes, time.time(), signal_id, session_id))
+        return self.query_one(
+            "SELECT id, triage_status, triage_notes, triage_updated_utc "
+            "FROM signals WHERE id=? AND session_id=?", (signal_id, session_id))
+
+    def bulk_set_signal_triage(self, signal_ids, session_id, status, notes=""):
+        """Apply the same triage decision to many signals in one session."""
+        ids = [int(i) for i in signal_ids if i is not None]
+        if not ids:
+            return 0
+        now = time.time()
+        placeholders = ",".join("?" * len(ids))
+        self.execute(
+            f"UPDATE signals SET triage_status=?, triage_notes=?, triage_updated_utc=? "
+            f"WHERE session_id=? AND id IN ({placeholders})",
+            (status, notes, now, session_id, *ids))
+        row = self.query_one(
+            f"SELECT COUNT(*) AS n FROM signals WHERE session_id=? AND id IN ({placeholders})",
+            (session_id, *ids))
+        return int(row["n"]) if row else 0
+
+    # --- recordings (monitor captures; gitignored, client-sensitive) ---
+
+    def add_recording(self, session_id, center_mhz, file_path, *, signal_id=None,
+                      offset_hz=0.0, mode="", duration_s=None, sample_rate=None,
+                      kind="audio", notes=""):
+        return self.execute(
+            "INSERT INTO recordings (session_id,signal_id,center_mhz,offset_hz,mode,"
+            "duration_s,sample_rate,file_path,kind,created_utc,notes) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (session_id, signal_id, center_mhz, offset_hz, mode, duration_s,
+             sample_rate, file_path, kind, time.time(), notes))
+
+    def list_recordings(self, session_id, signal_id=None):
+        if signal_id is not None:
+            return self.query(
+                "SELECT * FROM recordings WHERE session_id=? AND signal_id=? "
+                "ORDER BY created_utc DESC", (session_id, signal_id))
+        return self.query(
+            "SELECT * FROM recordings WHERE session_id=? ORDER BY created_utc DESC",
+            (session_id,))

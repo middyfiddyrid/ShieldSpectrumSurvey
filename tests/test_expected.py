@@ -4,7 +4,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from survey.expected import expectation_level, expected_vs_found  # noqa: E402
+from survey.expected import (expectation_level, expected_for_range,  # noqa: E402
+                             expected_vs_found)
 
 
 class FakeDB:
@@ -93,6 +94,38 @@ class TestExpectedVsFound(unittest.TestCase):
                           "phase": "interior", "room": ""}])
         by_call = {r["callsign"]: r for r in out["rows"]}
         self.assertFalse(by_call["KFND"]["found"])
+
+
+class TestExpectedForRange(unittest.TestCase):
+    def setUp(self):
+        # records + a band allocation (must be ignored — record-only)
+        self.rows = [rec(98.5, "FM", 12, "KFM"),
+                     rec(101.1, "FM", 70, "KFAR"),
+                     rec(155.34, "LMR", 3, "WLMR"),
+                     {"freq_low_mhz": 2400.0, "freq_high_mhz": 2483.5, "service": "ISM",
+                      "confidence": "allocation", "label": "ISM 2.4G"}]
+
+    def test_only_overlapping_records(self):
+        out = expected_for_range(self.rows, 88.0, 108.0)
+        calls = {e["callsign"] for e in out}
+        self.assertEqual(calls, {"KFM", "KFAR"})          # FM band only
+        self.assertTrue(all(e["status"] == "looking" for e in out))
+
+    def test_allocation_excluded(self):
+        out = expected_for_range(self.rows, 2400.0, 2483.5)
+        self.assertEqual(out, [])                          # band rows are not 'records'
+
+    def test_sorted_strongest_first(self):
+        out = expected_for_range(self.rows, 88.0, 200.0)
+        self.assertEqual(out[0]["expectation"], "strong")  # KFM (12 mi) leads
+        self.assertIn("center_mhz", out[0])
+
+    def test_carries_match_fields(self):
+        out = expected_for_range(self.rows, 98.0, 99.0)
+        self.assertEqual(len(out), 1)
+        e = out[0]
+        for k in ("freq_low_mhz", "freq_high_mhz", "service", "channel_bw_khz"):
+            self.assertIn(k, e)
 
 
 if __name__ == "__main__":

@@ -50,6 +50,43 @@ def _record_swept(record: dict, segments: list[dict]) -> bool:
     return any(seg["low_mhz"] <= hi and seg["high_mhz"] >= lo for seg in segments)
 
 
+def expected_for_range(baseline_rows: list[dict], low_mhz: float,
+                       high_mhz: float) -> list[dict]:
+    """The specific licensed records (confidence='record') whose frequency
+    overlaps [low,high] — i.e. what we EXPECT to hear in the segment the radio
+    is on right now. Each entry starts status='looking'; the live sweep loop
+    flips it to 'found' on detection. Pure (no DB); unit tested.
+
+    Carries the fields correlation._matches needs (freq_low/high, service,
+    channel_bw_khz) so the caller can match detections back to these entries
+    with the exact same rule the report uses.
+    """
+    out = []
+    for rec in baseline_rows:
+        if (rec.get("confidence") or "") != "record":
+            continue
+        lo = rec.get("freq_low_mhz")
+        hi = rec.get("freq_high_mhz")
+        if lo is None or hi is None:
+            continue
+        if lo <= high_mhz and hi >= low_mhz:        # overlap, not center-only
+            level, basis = expectation_level(rec)
+            out.append({
+                "freq_low_mhz": lo, "freq_high_mhz": hi,
+                "center_mhz": round((lo + hi) / 2.0, 4),
+                "service": rec.get("service"),
+                "channel_bw_khz": rec.get("channel_bw_khz"),
+                "callsign": rec.get("callsign"),
+                "label": rec.get("label") or rec.get("callsign") or rec.get("service"),
+                "distance_mi": rec.get("distance_mi"),
+                "expectation": level, "basis": basis,
+                "status": "looking",
+            })
+    order = {"strong": 0, "medium": 1, "weak": 2}
+    out.sort(key=lambda r: (order.get(r["expectation"], 3), r["center_mhz"]))
+    return out
+
+
 def _absence_reason(record: dict, level: str, swept: bool) -> str:
     if not swept:
         return ("frequency was NOT covered by any completed sweep segment — "

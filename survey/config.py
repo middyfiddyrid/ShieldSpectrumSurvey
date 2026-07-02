@@ -73,10 +73,26 @@ DEFAULTS = {
         # "tune & listen" inspect panel: IQ capture for analyzer + waterfall + audio
         "listen_sample_rate": 2_400_000,   # wide one-shot IQ for the analyzer/waterfall snapshot
         "listen_seconds": 0.5,
+        "analyze_seconds": 2.0,            # ANALYZE one-shot: longer so decoders get enough symbols
         # continuous audio stream: lower rate so USB2 sustains REAL-TIME (smooth);
         # 600 kHz still covers WFM (~200 kHz) and NFM channels.
         "stream_sample_rate": 2_400_000,
-        "listen_block_seconds": 0.5,       # bigger blocks amortize the per-buffer refill gap
+        "listen_block_seconds": 0.15,      # spectrum latency lever: smaller -> more
+                                           # live (faster scroll); bigger -> smoother
+                                           # audio if the USB capture underruns
+        # live analyzer + scrolling waterfall (the poll-tuned /api/listen_spectrum
+        # path). Each audio block emits listen_wf_rows_per_block contiguous STFT
+        # rows so the waterfall scrolls smoothly; the client owns the scroll
+        # history (listen_wf_history_rows must match the client ROWS constant).
+        "listen_wf_nperseg": 512,          # waterfall FFT size -> 512 freq bins
+        "listen_wf_rows_per_block": 8,     # contiguous waterfall rows per block
+        "listen_wf_history_rows": 240,     # visible history depth (client ROWS)
+        "listen_analyzer_nperseg": 2048,   # Welch FFT for the analyzer trace
+        "listen_analyzer_bins": 512,       # analyzer points (power-domain decimate)
+        "listen_analyzer_ema": 0.4,        # analyzer smoothing across blocks
+        "listen_wf_floor_ema": 0.1,        # noise-floor EMA for a stable color map
+        "listen_wf_span_lo_db": -5.0,      # color span: [floor+lo, floor+hi]
+        "listen_wf_span_hi_db": 40.0,
         # ~approximate~ dBFS -> dBm calibration offset. NOT lab-grade; lean on
         # baseline-delta detection. Tune per-unit in calibration mode.
         "cal_offset_db": -30.0,
@@ -87,8 +103,17 @@ DEFAULTS = {
         # set true to HARD-FAIL at connect if the radio can't reach freq_min/max
         # (i.e. you expect the frequency extension to be applied)
         "require_extended": False,
+        # DUAL-DEVICE (Phase 2): when true, the app holds the RF Explorer (sweeper)
+        # and the Pluto (monitor) at once, each on its own lock, so a sweep and a
+        # live monitor/analyze/record run concurrently. Default OFF — enable only
+        # after a two-radio bench check (HANDOFF: full simultaneous sweep+monitor
+        # on ONE radio waits for the July 2RX/2TX B220).
+        "concurrent_monitor": False,
     },
     "cache": {"dir": "cache", "max_age_hours": 720},
+    # monitor recordings (WAV of a received signal). Client-sensitive PII: the
+    # dir is gitignored and purged per engagement (move-to-archive, never delete).
+    "recordings": {"dir": "recordings", "max_seconds": 120.0},
     "calibration": {},
 }
 

@@ -19,6 +19,9 @@ AUDIO_RATE = 24000
 SSB_BW = 3000.0      # SSB audio passband (~3 kHz, communications voice)
 CW_BFO = 700.0       # CW beat-frequency oscillator offset -> audible tone (Hz)
 CW_BW = 1200.0       # narrow filter around the CW carrier before the beat
+NFM_CHAN_BW = 16_000.0    # narrowband-FM channel filter cutoff (voice / bug / LMR)
+WFM_CHAN_BW = 150_000.0   # broadcast-FM channel filter cutoff
+FIR_MAX_TAPS = 401        # cap on the windowed-sinc channel filter length (compute bound)
 
 
 def pick_mode(center_mhz: float, label: str = "") -> str:
@@ -39,6 +42,12 @@ def pick_mode(center_mhz: float, label: str = "") -> str:
     return "nfm"   # narrowband default; digital signals will sound like hash
 
 
+def _fm_discriminator(x: np.ndarray) -> np.ndarray:
+    """Instantaneous frequency of complex IQ via the phase of consecutive-sample
+    products. Shared by demodulate()'s FM path and the POCSAG decoder."""
+    return np.angle(x[1:] * np.conj(x[:-1])).astype(np.float64)
+
+
 def _decimate(x: np.ndarray, factor: int) -> np.ndarray:
     """Boxcar (moving-average) anti-alias + downsample. Works for real/complex."""
     factor = max(1, int(factor))
@@ -50,24 +59,62 @@ def _decimate(x: np.ndarray, factor: int) -> np.ndarray:
     return x[:n].reshape(-1, factor).mean(axis=1)
 
 
+def _auto_taps(fs: float, cutoff: float, beta: float = 4.0,
+               max_taps: int = FIR_MAX_TAPS) -> int:
+    """Pick an odd FIR length for a `cutoff` filter at `fs`. More taps = sharper
+    transition; capped so a narrow channel at a high capture rate stays cheap."""
+    taps = int(round(beta * fs / max(cutoff, 1.0)))
+    taps = max(31, min(int(max_taps), taps))
+    return taps | 1   # odd -> symmetric, integer group delay
+
+
+def _design_fir(numtaps: int, cutoff: float, fs: float) -> np.ndarray:
+    """Windowed-sinc (Hamming) low-pass FIR, unity DC gain. ~-53 dB stopband —
+    vastly better out-of-channel rejection than a boxcar's ~-13 dB sidelobes, so
+    a clicked-on signal is actually ISOLATED instead of swamped by its neighbors."""
+    numtaps = max(3, int(numtaps)) | 1
+    fc = min(max(cutoff / fs, 1e-4), 0.49)          # normalized cutoff (cycles/sample)
+    n = np.arange(numtaps) - (numtaps - 1) / 2.0
+    h = 2.0 * fc * np.sinc(2.0 * fc * n) * np.hamming(numtaps)
+    s = float(np.sum(h))
+    if s:
+        h = h / s
+    return h.astype(np.float64)
+
+
+def _fir_lowpass(x: np.ndarray, fir: np.ndarray) -> np.ndarray:
+    """Linear-phase FIR low-pass (real or complex input)."""
+    return np.convolve(x, fir, mode="same")
+
+
+def _fir_decimate(x: np.ndarray, fir: np.ndarray, factor: int) -> np.ndarray:
+    """FIR anti-alias low-pass then downsample by `factor` (real or complex)."""
+    factor = max(1, int(factor))
+    y = np.convolve(x, fir, mode="same")
+    return y if factor == 1 else y[::factor]
+
+
 def _lowpass(x: np.ndarray, fs: float, cutoff: float) -> np.ndarray:
-    """Boxcar (moving-average) low-pass that keeps the sample rate. The first
-    null of an L-tap boxcar sits at fs/L, so size the window to ~fs/cutoff.
-    Works for real or complex input (used for SSB/CW channel filtering)."""
-    taps = max(1, int(round(fs / max(cutoff, 1.0))))
-    if taps <= 1:
-        return x
-    kernel = np.ones(taps, dtype=np.float64) / taps
-    return np.convolve(x, kernel, mode="same")
+    """Windowed-sinc FIR low-pass that keeps the sample rate (used for SSB/CW
+    channel filtering). Replaces the old boxcar: same role, far cleaner stopband
+    so adjacent signals don't bleed into the passband."""
+    fir = _design_fir(_auto_taps(fs, cutoff), cutoff, fs)
+    return _fir_lowpass(x, fir)
 
 
-def demodulate(iq, fs: float, mode: str = "nfm") -> tuple[np.ndarray, int]:
+def demodulate(iq, fs: float, mode: str = "nfm", offset_hz: float = 0.0) -> tuple[np.ndarray, int]:
     """IQ -> (int16 PCM mono, sample_rate).
-    mode: 'wfm' | 'nfm' | 'am' | 'usb' | 'lsb' | 'cw'."""
+    mode: 'wfm' | 'nfm' | 'am' | 'usb' | 'lsb' | 'cw'.
+    offset_hz: a movable demod tuner WITHIN the captured band — shifts the signal
+    at (center + offset_hz) down to baseband so the per-mode channel filter below
+    isolates THAT one signal, not the LO-spike-corrupted band center. 0 = center."""
     iq = np.asarray(iq, dtype=np.complex64)
     if iq.size < 16:
         raise ValueError("capture too short to demodulate")
     mode = (mode or "nfm").lower()
+    if offset_hz:
+        t = np.arange(iq.size, dtype=np.float64) / fs
+        iq = (iq * np.exp(-1j * 2 * np.pi * offset_hz * t)).astype(np.complex64)
 
     if mode == "am":
         audio = np.abs(iq).astype(np.float64)
@@ -94,15 +141,18 @@ def demodulate(iq, fs: float, mode: str = "nfm") -> tuple[np.ndarray, int]:
         audio = np.real(x).astype(np.float64)
         arate = fs
     else:
-        # complex channel-decimate toward the channel bandwidth (rejects
-        # out-of-channel noise) before the FM discriminator.
-        chan_bw = 16_000.0 if mode == "nfm" else 150_000.0
+        # FIR channel-filter + decimate toward the channel bandwidth before the
+        # FM discriminator. The sharp stopband rejects out-of-channel signals
+        # (the steerable-tuner "isolate THIS signal" requirement); the boxcar it
+        # replaces leaked neighbours straight through its -13 dB sidelobes.
+        chan_bw = NFM_CHAN_BW if mode == "nfm" else WFM_CHAN_BW
         dec = max(1, int(fs / (chan_bw * 2.0)))
-        x = _decimate(iq, dec)
+        fir = _design_fir(_auto_taps(fs, chan_bw), chan_bw, fs)
+        x = _fir_decimate(iq, fir, dec)
         arate = fs / dec
         if x.size < 4:
             raise ValueError("capture too short for this mode")
-        audio = np.angle(x[1:] * np.conj(x[:-1])).astype(np.float64)  # FM discriminator
+        audio = _fm_discriminator(x)                   # FM discriminator (unchanged: POCSAG shares it)
 
     dec2 = max(1, int(round(arate / AUDIO_RATE)))
     audio = _decimate(audio, dec2)
