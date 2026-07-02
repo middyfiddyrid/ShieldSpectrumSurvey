@@ -1035,6 +1035,29 @@ $("btn-create").onclick = async () => {
   } catch (e) { $("session-msg").textContent = "ERROR: " + e.message; }
 };
 
+
+/* DEVICE card: plain-language "who is doing what" line so the operator can SEE
+   dual-radio mode working (connections reset on every app restart). */
+async function renderDeviceRoles() {
+  const el = $("device-roles");
+  if (!el) return;
+  try {
+    const r = await api("/api/device/roles");
+    if (!r.roles || !r.roles.length) { el.style.display = "none"; return; }
+    const name = s => s === "pluto" ? "Pluto" : "RF Explorer";
+    const job  = x => x.role === "sweeper" ? "runs the sweep"
+                    : x.role === "monitor" ? "listens/analyzes signals"
+                    : "connected (idle)";
+    el.innerHTML = r.roles.map(x =>
+      `<b>${name(x.source)}</b> — ${job(x)}${x.busy ? " (busy)" : ""}`).join(" &nbsp;·&nbsp; ");
+    if (r.concurrent_enabled && r.roles.length >= 2)
+      el.innerHTML += ` &nbsp;·&nbsp; <b style="color:var(--ok,#4c8)">BOTH RADIOS ACTIVE</b> — you can inspect signals while a sweep runs`;
+    else if (r.concurrent_enabled && r.roles.length === 1)
+      el.innerHTML += ` &nbsp;·&nbsp; connect the other radio too to inspect during sweeps`;
+    el.style.display = "";
+  } catch (_) { el.style.display = "none"; }
+}
+
 $("btn-connect").onclick = async () => {
   const src = $("device-source") ? $("device-source").value : null;
   $("device-msg").textContent = `connecting to ${src === "pluto" ? "Pluto" : "RF Explorer"}…`;
@@ -1057,8 +1080,10 @@ $("btn-connect").onclick = async () => {
       (d.wideband_license ? "<div>License</div><div>RFELIC05 wideband EXTENSION ACTIVE</div>" : "") +
       (d.modules.length < 2 ? `<div>⚠ Coverage</div><div class="caution">single-module mode — coverage gap will be noted in the report</div>` : "") +
       (d.warnings.length ? `<div>⚠ Warnings</div><div class="caution">${d.warnings.map(esc).join("<br>")}</div>` : "");
+    renderDeviceRoles();
   } catch (e) { $("device-msg").textContent = "FAILED: " + e.message; }
 };
+renderDeviceRoles();   // show current radio roles on page load too
 
 $("btn-baseline").onclick = async () => {
   try { await api("/api/baseline/build", {}); } catch (e) { $("baseline-msg").textContent = e.message; }

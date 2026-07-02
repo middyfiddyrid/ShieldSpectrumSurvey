@@ -118,6 +118,13 @@ class SweepController:
         if not (keep_other and self.concurrent_enabled()) or self.device is None:
             self.device = dev
             self.active_source = src
+        # dual mode: the Pluto is ALWAYS the monitor (see monitor_target), so once
+        # both radios are open make the RF Explorer the sweeper regardless of the
+        # order the operator connected them — but never yank a sweep in flight.
+        if (self.concurrent_enabled() and not self.busy()
+                and "rfexplorer" in self.devices and "pluto" in self.devices):
+            self.device = self.devices["rfexplorer"]
+            self.active_source = "rfexplorer"
         return dev.info
 
     def _ensure_device(self):
