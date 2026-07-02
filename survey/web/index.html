@@ -431,6 +431,19 @@ body.demo #card-casefiles { display:none !important; }
         <option value="10">10 MHz</option>
         <option value="20">20 MHz</option>
       </select>
+      <label class="note">Filter</label>
+      <select id="insp-bw" title="Demodulator channel width — the shaded yellow band on the analyzer. Narrow for a tight signal (pager/voice), wide for a wireless mic or video subcarrier. Scroll-wheel over the analyzer also adjusts it.">
+        <option value="auto" selected>Auto (mode)</option>
+        <option value="3000">3 kHz</option>
+        <option value="6000">6 kHz</option>
+        <option value="12000">12 kHz</option>
+        <option value="16000">16 kHz</option>
+        <option value="25000">25 kHz</option>
+        <option value="50000">50 kHz</option>
+        <option value="100000">100 kHz</option>
+        <option value="150000">150 kHz</option>
+        <option value="250000">250 kHz</option>
+      </select>
       <label class="note">Block</label>
       <select id="insp-block-s" title="Shorter blocks = faster, more live spectrum (more USB load)">
         <option value="0.1">0.1 s</option>

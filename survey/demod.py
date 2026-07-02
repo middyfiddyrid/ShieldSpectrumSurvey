@@ -102,7 +102,8 @@ def _lowpass(x: np.ndarray, fs: float, cutoff: float) -> np.ndarray:
     return _fir_lowpass(x, fir)
 
 
-def demodulate(iq, fs: float, mode: str = "nfm", offset_hz: float = 0.0) -> tuple[np.ndarray, int]:
+def demodulate(iq, fs: float, mode: str = "nfm", offset_hz: float = 0.0,
+               chan_bw_hz: float = None) -> tuple[np.ndarray, int]:
     """IQ -> (int16 PCM mono, sample_rate).
     mode: 'wfm' | 'nfm' | 'am' | 'usb' | 'lsb' | 'cw'.
     offset_hz: a movable demod tuner WITHIN the captured band — shifts the signal
@@ -117,6 +118,8 @@ def demodulate(iq, fs: float, mode: str = "nfm", offset_hz: float = 0.0) -> tupl
         iq = (iq * np.exp(-1j * 2 * np.pi * offset_hz * t)).astype(np.complex64)
 
     if mode == "am":
+        if chan_bw_hz:                                 # adjustable channel width (AM audio ~bw/2)
+            iq = _lowpass(iq, fs, max(2000.0, min(float(chan_bw_hz) / 2.0, fs * 0.45)))
         audio = np.abs(iq).astype(np.float64)
         arate = fs
     elif mode in ("usb", "lsb"):
@@ -145,7 +148,9 @@ def demodulate(iq, fs: float, mode: str = "nfm", offset_hz: float = 0.0) -> tupl
         # FM discriminator. The sharp stopband rejects out-of-channel signals
         # (the steerable-tuner "isolate THIS signal" requirement); the boxcar it
         # replaces leaked neighbours straight through its -13 dB sidelobes.
-        chan_bw = NFM_CHAN_BW if mode == "nfm" else WFM_CHAN_BW
+        default_bw = NFM_CHAN_BW if mode == "nfm" else WFM_CHAN_BW
+        chan_bw = float(chan_bw_hz) if chan_bw_hz else default_bw
+        chan_bw = max(2000.0, min(chan_bw, fs * 0.45))   # adjustable channel width (the on-screen band)
         dec = max(1, int(fs / (chan_bw * 2.0)))
         fir = _design_fir(_auto_taps(fs, chan_bw), chan_bw, fs)
         x = _fir_decimate(iq, fir, dec)

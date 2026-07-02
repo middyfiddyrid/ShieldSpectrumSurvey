@@ -919,13 +919,15 @@ def create_app(db, cfg, demo=False) -> Flask:
             mstop.clear()
             st.controller.listening = True
             st.controller.listen_offset_hz = 0.0   # new tune -> demod band center until clicked
+            st.controller.listen_chan_bw_hz = None # new tune -> per-mode default channel width
             st.controller.listen_spectrum = None
             stop = mstop
             try:
                 for iq in dev.stream_iq(center_mhz * 1e6, fs, n_block, stop):
                     try:
                         off = float(getattr(st.controller, "listen_offset_hz", 0.0) or 0.0)
-                        pcm, arate = demodulate(iq, fs, mode, off)
+                        bw = getattr(st.controller, "listen_chan_bw_hz", None)
+                        pcm, arate = demodulate(iq, fs, mode, off, bw)
                     except Exception:  # noqa: BLE001
                         continue
                     yield pcm, arate
@@ -1047,6 +1049,23 @@ def create_app(db, cfg, demo=False) -> Flask:
         lim = fs * 0.48                        # stay inside the captured band edges
         st.controller.listen_offset_hz = max(-lim, min(lim, off))
         return jsonify({"offset_hz": st.controller.listen_offset_hz})
+
+    @app.post("/api/listen/bandwidth")
+    def listen_bandwidth():
+        """Adjust the demodulator CHANNEL WIDTH live — the shaded band on the
+        analyzer. Narrow for a tight signal (pager, NFM voice), wide for a
+        wireless mic / video subcarrier. 'auto' restores the per-mode default."""
+        body = request.get_json(silent=True) or {}
+        v = body.get("chan_bw_hz")
+        if v in (None, "", "auto"):
+            st.controller.listen_chan_bw_hz = None
+            return jsonify({"chan_bw_hz": None})
+        try:
+            bw = float(v)
+        except (TypeError, ValueError):
+            return err("chan_bw_hz must be a number or 'auto'")
+        st.controller.listen_chan_bw_hz = max(2000.0, min(bw, 20_000_000.0))
+        return jsonify({"chan_bw_hz": st.controller.listen_chan_bw_hz})
 
     # ---------- monitor recordings (WAV; client-sensitive, gitignored) ----------
 

@@ -1548,6 +1548,8 @@ function inspectByFreq(center, label, mode) {
   const tuneId = (App.tuneId = (App.tuneId || 0) + 1);
   App.inspCenter = center; App.inspLabel = label;   // for mode <select> re-tune
   App.demodMhz = center;                             // demod tuner starts at band center (offset 0)
+  App.demodBwHz = null;                              // new signal -> per-mode default channel width
+  if ($("insp-bw")) $("insp-bw").value = "auto";
   App._lastSpecSeq = null;                           // new tune → first frame always draws
   $("inspect-panel").style.display = "";
   $("insp-title").textContent = `${fmtF(center)} · ${label || ""}`;   // fmtF already carries the unit
@@ -1839,13 +1841,60 @@ function drawAnalyzer(cv, a, meter) {
   ctx.fillText(hi.toFixed(0) + " dBm", 3, 11);
 }
 
-// Vertical cursor at the current demod tuner (App.demodMhz) within [f0,f1].
+const DEMOD_BW_STEPS = [3000, 6000, 12000, 16000, 25000, 50000, 100000, 150000, 250000];
+
+// The demodulator channel width in Hz: an explicit operator choice (App.demodBwHz)
+// or the per-mode default. This is what actually gets filtered/heard/decoded, and
+// what the shaded band on the analyzer shows.
+function currentDemodBwHz() {
+  if (App.demodBwHz != null) return App.demodBwHz;
+  const m = (($("insp-mode") || {}).value || "nfm");
+  if (m === "wfm") return 150000;
+  if (m === "am") return 10000;
+  if (m === "usb" || m === "lsb") return 3000;
+  if (m === "cw") return 1000;
+  return 16000;                                  // nfm + decode modes (pocsag/flex/ook/dtmf)
+}
+
+// Vertical cursor + shaded CHANNEL-WIDTH band at the demod tuner within [f0,f1].
 function drawDemodMarker(ctx, W, H, f0, f1) {
   if (App.demodMhz == null || f1 === f0) return;
-  const mx = W * (App.demodMhz - f0) / (f1 - f0);
+  const span = f1 - f0;
+  const mx = W * (App.demodMhz - f0) / span;
+  const halfMhz = (currentDemodBwHz() / 1e6) / 2;   // band half-width in MHz
+  const xL = W * (App.demodMhz - halfMhz - f0) / span;
+  const xR = W * (App.demodMhz + halfMhz - f0) / span;
+  const cl = Math.max(0, xL), cr = Math.min(W, xR);
+  if (cr > cl) {                                     // the passband the operator hears/decodes
+    ctx.fillStyle = "rgba(255,210,74,0.14)";
+    ctx.fillRect(cl, 0, cr - cl, H);
+    ctx.strokeStyle = "rgba(255,210,74,0.55)"; ctx.lineWidth = 1;
+    ctx.beginPath();
+    if (xL >= 0 && xL <= W) { ctx.moveTo(Math.round(xL) + 0.5, 0); ctx.lineTo(Math.round(xL) + 0.5, H); }
+    if (xR >= 0 && xR <= W) { ctx.moveTo(Math.round(xR) + 0.5, 0); ctx.lineTo(Math.round(xR) + 0.5, H); }
+    ctx.stroke();
+  }
   if (mx < 0 || mx > W) return;
-  ctx.strokeStyle = "#ffd24a"; ctx.lineWidth = 1; ctx.beginPath();
+  ctx.strokeStyle = "#ffd24a"; ctx.lineWidth = 1; ctx.beginPath();       // center hairline
   ctx.moveTo(Math.round(mx) + 0.5, 0); ctx.lineTo(Math.round(mx) + 0.5, H); ctx.stroke();
+}
+
+// Set the demod channel width (Hz, or null=auto) and push it to the live audio filter.
+function setDemodBw(hz) {
+  App.demodBwHz = hz;
+  const sel = $("insp-bw");
+  if (sel) sel.value = (hz == null) ? "auto" : String(hz);
+  api("/api/listen/bandwidth", { chan_bw_hz: (hz == null) ? "auto" : hz }).catch(() => {});
+}
+
+// Scroll-wheel over the analyzer widens/narrows the channel through the preset steps.
+function nudgeDemodBw(dir) {
+  const cur = currentDemodBwHz();
+  let idx = 0, best = Infinity;
+  DEMOD_BW_STEPS.forEach((s, i) => { const d = Math.abs(s - cur); if (d < best) { best = d; idx = i; } });
+  idx = Math.max(0, Math.min(DEMOD_BW_STEPS.length - 1, idx + (dir > 0 ? 1 : -1)));
+  setDemodBw(DEMOD_BW_STEPS[idx]);
+  $("insp-msg").textContent = "filter " + (DEMOD_BW_STEPS[idx] / 1000) + " kHz";
 }
 
 // Click the live spectrum/waterfall to tune the demodulator to THAT signal — a
@@ -1863,6 +1912,11 @@ function tuneDemodFromClick(e, cv) {
 }
 if ($("insp-analyzer")) $("insp-analyzer").addEventListener("click", (e) => tuneDemodFromClick(e, $("insp-analyzer")));
 if ($("insp-waterfall")) $("insp-waterfall").addEventListener("click", (e) => tuneDemodFromClick(e, $("insp-waterfall")));
+if ($("insp-bw")) $("insp-bw").addEventListener("change", () => {
+  const v = $("insp-bw").value;
+  setDemodBw(v === "auto" ? null : parseFloat(v));
+});
+if ($("insp-analyzer")) $("insp-analyzer").addEventListener("wheel", (e) => { e.preventDefault(); nudgeDemodBw(-e.deltaY); }, { passive: false });
 
 // BUGFIX: the monitor/inspect panel was authored INSIDE the baseline <section>,
 // which is display:none unless the baseline tab is active — so every other list
