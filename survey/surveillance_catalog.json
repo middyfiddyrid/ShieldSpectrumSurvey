@@ -1,0 +1,522 @@
+{
+  "_meta": {
+    "purpose": "Internal surveillance-device identification aid for the Shield TSCM spectrum survey app. Extends the sigidwiki-style matcher with per-device-class intelligence: real product examples, identifying RF features, and confirm-in-the-field steps. Each per-signature object uses the SAME field names/values as data/sigidwiki_ref.json so survey/identify.py can rank it identically. This is ADDITIVE to sigidwiki_ref.json, not a replacement.",
+    "source": "Hand-curated from public device specs and vendor pages, grounded via web search where noted. Where a model number could not be independently confirmed it is labeled as a device-class/form-factor example only, never asserted as a verified SKU. Honest about false-positive overlap with legitimate consumer devices.",
+    "license_note": "sigidwiki content is CC BY-NC-SA. Product names/specs cited here are for internal identification only. Do NOT embed vendor waterfall images or spy-shop marketing copy in client deliverables without review.",
+    "generated_note": "Assembled 2026-07-02 from verified per-class research. All verifier corrections applied to the underlying content (not appended). No device class was dropped as WRONG; two were marked NEEDS_FIX and fixed (wifi_ip_camera 5 GHz Pluto-reach caveat; bluetooth_audio_bug field-name/class-name reconciliation).",
+    "matchable_fields": [
+      "name",
+      "freq_min_mhz",
+      "freq_max_mhz",
+      "bandwidth_khz",
+      "mode",
+      "class",
+      "duty",
+      "tscm",
+      "url"
+    ],
+    "signal_classes": [
+      "analog_voice",
+      "analog_video",
+      "fsk",
+      "ook",
+      "psk",
+      "ofdm_wideband",
+      "fhss",
+      "continuous_digital",
+      "noise_like"
+    ],
+    "matcher_note": "identify.classify_modulation() only ever EMITS: analog_voice, analog_video, fsk, ook, ofdm_wideband, continuous_digital, unknown, noise_floor. It never returns psk/fhss/noise_like at runtime, so signatures tagged those still score on band + bandwidth + duty but will not receive the +20 same-class bonus. This is by design (e.g. FHSS trackers present to the classifier as fsk/ook bursts); the operator note in each such signature explains the true modulation.",
+    "hardware_note": "A STOCK ADALM-Pluto tunes 325-3800 MHz (200 kHz-20 MHz BW). It CANNOT see 5 GHz Wi-Fi or 5.8 GHz FPV/video unless the AD9363->AD9364 firmware frequency-expansion mod is applied (raises the top to ~6 GHz, 56 MHz instantaneous BW). Any signature with freq_min_mhz above 3800 requires the modded radio OR a different front end; this is flagged inline."
+  },
+  "device_classes": [
+    {
+      "device_class": "wifi_ip_camera",
+      "summary": "Wi-Fi / IP hidden cameras streaming video over 2.4 GHz (and, on dual-band units, 5 GHz) WLAN. The camera itself rides ordinary 802.11 traffic, so the RF tell is bursty wideband OFDM plus a device that should not be on the network. 2.4 GHz is reachable by a stock Pluto; 5 GHz is NOT unless the Pluto is modded — route 5 GHz detection to the Wi-Fi NIC / network scan instead.",
+      "example_products": [
+        "Generic 'spy' Wi-Fi mini cams (clock, USB charger, smoke-detector, picture-frame form factors) sold widely on Amazon/AliExpress — 2.4 GHz 802.11b/g/n, app live-view (verified as a device class; specific listing model numbers churn constantly and are NOT individually asserted)",
+        "Wyze Cam / Wyze Cam v3 — real 2.4 GHz-only consumer Wi-Fi camera (legitimate, but the exact hardware class a hidden-cam build clones)",
+        "Ring / Blink / Nest indoor cams — real dual-band (2.4/5 GHz) consumer Wi-Fi cameras; legitimate, listed to show what a benign 5 GHz camera burst looks like"
+      ],
+      "confirm_steps": [
+        "2.4 GHz: sweep 2400-2483.5 MHz with the Pluto; a hidden cam shows bursty wideband OFDM (~20 MHz channel) that intensifies when the scene changes (wave a hand / turn a light on and off and watch the uplink burst rate rise).",
+        "5 GHz: a STOCK ADALM-Pluto CANNOT tune 5 GHz (its ceiling is 3.8 GHz). Do NOT sweep 5150-5895 MHz on an unmodified Pluto — you will see nothing and wrongly clear the band. Either (a) apply the AD9364 firmware frequency-expansion mod first, then sweep 5170-5250 (U-NII-1) and 5745-5825 (U-NII-3) where consumer dual-band cams land, or (b) detect 5 GHz cameras via the Wi-Fi NIC / router client list instead of the SDR.",
+        "Cross-check the network: enumerate DHCP clients / Wi-Fi stations; an unexplained camera-class MAC (OUI lookup) with steady uplink is the strongest confirmation. Correlate RF burst timing with a device that appears/disappears when you power the suspected cam.",
+        "Physical: look for a lens/pinhole co-located with the strongest 2.4 GHz burst using a lens-detector or oblique light."
+      ],
+      "false_positive_overlap": [
+        "Every legitimate 2.4 GHz Wi-Fi device (phones, laptops, printers, smart-home hubs, streaming sticks, other cameras) produces the same bursty wideband OFDM — bandwidth/class alone cannot distinguish a spy cam from a benign AP or client.",
+        "Baby monitors and video doorbells are cameras streaming over Wi-Fi and will match this signature exactly; identity, not RF class, resolves it.",
+        "5 GHz bursts from routers, laptops, and TVs dominate that band; a 5 GHz hit is almost always benign infrastructure."
+      ],
+      "tscm_notes": "Wi-Fi cameras are identified by inventory + burst-timing correlation, not by RF class alone (bandwidth and modulation are indistinguishable from any WLAN device). Keep this honest in client reports: 'a 2.4 GHz Wi-Fi camera signature' means 'a WLAN device consistent with a camera,' confirmed only by tying the burst to an unexplained camera on the network. Note the Pluto 5 GHz limitation explicitly so the survey does not silently skip the band a dual-band cam may be on.",
+      "signatures": [
+        {
+          "name": "Wi-Fi IP camera — 2.4 GHz WLAN uplink (spy cam / baby monitor)",
+          "freq_min_mhz": 2400,
+          "freq_max_mhz": 2483.5,
+          "bandwidth_khz": 20000,
+          "mode": "OFDM/DSSS (802.11b/g/n, 20 MHz channel); video uplink bursts rise with scene motion",
+          "class": "ofdm_wideband",
+          "duty": "bursty",
+          "tscm": "Hidden Wi-Fi camera on 2.4 GHz. Bursty wideband OFDM; burst rate climbs when the scene moves. Reachable by a stock Pluto. Confirm by correlating burst timing to an unexplained camera-class device on the network — RF class alone matches any WLAN device.",
+          "url": "https://www.sigidwiki.com/index.php?search=WLAN+802.11"
+        },
+        {
+          "name": "Wi-Fi IP camera — 5 GHz U-NII (dual-band cam) [REQUIRES MODDED PLUTO or Wi-Fi NIC]",
+          "freq_min_mhz": 5170,
+          "freq_max_mhz": 5825,
+          "bandwidth_khz": 20000,
+          "mode": "OFDM (802.11a/n/ac, 20 MHz HT20/VHT20; U-NII-1 5170-5250 & U-NII-3 5745-5825 where consumer cams land)",
+          "class": "ofdm_wideband",
+          "duty": "bursty",
+          "tscm": "5 GHz dual-band camera. A STOCK ADALM-Pluto CANNOT tune here (ceiling 3.8 GHz) — needs the AD9364 firmware mod (~6 GHz) or detect via the Wi-Fi NIC/router client list. On 80/160 MHz channels a modded Pluto's 56 MHz instantaneous BW cannot span the whole channel; step across it. 5 GHz hits are usually benign routers/laptops/TVs.",
+          "url": "https://www.sigidwiki.com/index.php?search=WLAN+802.11"
+        }
+      ]
+    },
+    {
+      "device_class": "analog_fpv_micro_camera",
+      "summary": "Analog FPV / covert video transmitters on 1.2/1.3 GHz, 2.4 GHz, and 5.8 GHz — wide continuous FM video links (drone cams, pinhole board cams). Continuous carrier makes them easy to hear on an FM-video demod, but 5.8 GHz is above a stock Pluto's reach.",
+      "example_products": [
+        "5.8 GHz FPV video transmitters (VTx) — real, ubiquitous class (e.g. Raceband 40-channel modules); sold for drone/RC hobby, repurposed for covert board cams",
+        "1.2/1.3 GHz analog VTx modules — real, module-selectable channel class used for longer-range FPV",
+        "2.4 GHz analog video micro-cams (board/pinhole 'nanny cam' transmitters) — real device class, transmit continuous FM video to a paired receiver (no Wi-Fi)"
+      ],
+      "confirm_steps": [
+        "1.2/1.3 GHz: sweep ~1080-1360 MHz for a continuous wide FM-video carrier; common module channels cluster here. Note 1256/1280 MHz are the commonly cited US amateur-legal channels (sources vary; 1258 also appears) — legality does not make it benign.",
+        "2.4 GHz: an analog video carrier is CONTINUOUS and wide (~6-18 MHz), unlike bursty Wi-Fi OFDM — demod as FM video and look for a live picture; a steady non-hopping carrier that is NOT 802.11 is the tell.",
+        "5.8 GHz: a STOCK Pluto CANNOT reach 5.8 GHz (ceiling 3.8 GHz). Use the AD9364-modded Pluto or a dedicated 5.8 GHz FPV receiver/goggles to scan Raceband (~5658-5917 MHz, ~37 MHz spacing; bands A/B/E/F ~20-35 MHz spacing).",
+        "Demodulate as analog FM video on any candidate carrier — a recovered picture is definitive."
+      ],
+      "false_positive_overlap": [
+        "2.4 GHz analog video overlaps the same band as Wi-Fi/Bluetooth/Zigbee, but analog video is CONTINUOUS and wide vs. their bursty/hopping nature — that continuity is the discriminator.",
+        "Licensed 1.2/1.3 GHz amateur TV (ATV) and radar/aeronautical services occupy nearby spectrum; a hobbyist ATV operator is a benign continuous-video source.",
+        "5.8 GHz ISM also hosts Wi-Fi and cordless devices; a continuous FM-video carrier (not bursty OFDM) distinguishes an FPV link."
+      ],
+      "tscm_notes": "Analog video links announce themselves by a CONTINUOUS wide FM carrier that demodulates to a picture — that is the confirmation, not the frequency alone. Flag the 5.8 GHz stock-Pluto blind spot in the survey so the highest-traffic FPV band is not skipped. US-legal-channel claims are hedged; do not present legality conclusions in a client doc without counsel review.",
+      "signatures": [
+        {
+          "name": "Analog FPV/covert video — 1.2/1.3 GHz FM video",
+          "freq_min_mhz": 1080,
+          "freq_max_mhz": 1360,
+          "bandwidth_khz": 12000,
+          "mode": "Analog FM video (module-selectable channels; 1256/1280 MHz commonly cited US ham-legal, sources vary)",
+          "class": "analog_video",
+          "duty": "continuous",
+          "tscm": "Covert analog video on 1.2/1.3 GHz. Continuous wide FM carrier — demod as FM video for a picture. Reachable by a stock Pluto. Legality of a given channel does not make the emitter benign.",
+          "url": "https://www.sigidwiki.com/index.php?search=analog+video"
+        },
+        {
+          "name": "Analog FPV/covert video — 2.4 GHz FM video",
+          "freq_min_mhz": 2400,
+          "freq_max_mhz": 2483.5,
+          "bandwidth_khz": 18000,
+          "mode": "Analog FM video (continuous ~6-18 MHz carrier, NOT bursty 802.11)",
+          "class": "analog_video",
+          "duty": "continuous",
+          "tscm": "Covert analog video on 2.4 GHz. A CONTINUOUS wide carrier here (vs bursty Wi-Fi/BLE) is the tell; demod FM video. Reachable by a stock Pluto.",
+          "url": "https://www.sigidwiki.com/index.php?search=analog+video"
+        },
+        {
+          "name": "Analog FPV video — 5.8 GHz (Raceband/A/B/E/F) [REQUIRES MODDED PLUTO or FPV Rx]",
+          "freq_min_mhz": 5645,
+          "freq_max_mhz": 5945,
+          "bandwidth_khz": 18000,
+          "mode": "Analog FM video (Raceband ~37 MHz spacing; A/B/E/F ~20-35 MHz — nominal, varies by band)",
+          "class": "analog_video",
+          "duty": "continuous",
+          "tscm": "5.8 GHz FPV link. STOCK Pluto CANNOT reach here (ceiling 3.8 GHz) — use an AD9364-modded Pluto or a 5.8 GHz FPV receiver/goggles. Continuous wide FM video carrier; a recovered picture confirms.",
+          "url": "https://www.sigidwiki.com/index.php?search=analog+video"
+        }
+      ]
+    },
+    {
+      "device_class": "ble_tracker",
+      "summary": "Bluetooth LE item trackers used for covert location tracking (AirTag, Galaxy SmartTag, Tile, Chipolo, Pebblebee, Moto Tag, and Find My / Find Hub knockoffs). They beacon short GFSK advertising bursts on the 3 fixed BLE advertising channels; a paired phone/network relays position. RF tell is periodic FSK-class advertising bursts in 2.4 GHz.",
+      "example_products": [
+        "Apple AirTag — real, BLE + UWB, advertises Find My; anti-stalking beep on separation",
+        "Samsung Galaxy SmartTag / SmartTag2 — real, BLE (+ UWB on 2), Find Hub / SmartThings Find network",
+        "Tile (Mate/Pro/Slim/Sticker) — real, BLE-only trackers on the Tile network",
+        "Chipolo ONE/CARD, Pebblebee Clip/Card, Motorola Moto Tag — real BLE trackers; Chipolo/Pebblebee/Moto ship Find My- and Find Hub-compatible SKUs"
+      ],
+      "confirm_steps": [
+        "Sweep 2.4 GHz and watch the 3 BLE advertising channels (2402, 2426, 2480 MHz) for periodic short GFSK bursts — a tracker beacons on a regular cadence even when 'lost'.",
+        "Use a phone's native detection: iOS/Android 'unknown tracker' alerts, Apple's Tracker Detect, or a BLE scanner app; filter for Find My (Apple 0x004C manufacturer data) and Google FMDN (service UUID 0xFEAA, frame type 0x41).",
+        "Force the anti-stalking sound: an AirTag separated from its owner beeps after a randomized ~8-24 hours on later firmware (older units up to ~3 days). Trigger and localize by ear.",
+        "Physically search the vehicle/bag once RF + app point to a tracker; UWB-equipped tags (AirTag, SmartTag2) support precision-find on a compatible phone."
+      ],
+      "false_positive_overlap": [
+        "Every phone, laptop, earbud, watch, and smart-home device advertises BLE — a raw 2.4 GHz GFSK advertising burst is not by itself a tracker.",
+        "Apple manufacturer data 0x004C is used by ALL Apple Continuity/Handoff traffic (phones, Macs, Watches), not just Find My — 0x004C alone is not a tracker tell; you need Find My-specific payloads.",
+        "Google FMDN uses service UUID 0xFEAA, the SAME 16-bit UUID as legacy Eddystone / physical-web beacons — a benign Eddystone beacon can produce a 0xFEAA hit; disambiguate via FMDN frame type 0x41.",
+        "Retail beacons and BLE sensors in stores/offices advertise constantly and are benign."
+      ],
+      "tscm_notes": "Runtime modulation note: the app's own sigidwiki_ref labels generic 'Bluetooth / BLE' as fhss (data connections hop 40 channels), but a tracker's ADVERTISING burst is fixed GFSK on 3 non-hopping channels — correctly 'fsk', which is also what classify_modulation() would emit for such a burst (it has no fhss code path). Trackers therefore match this catalog on class:'fsk' by design. Confirmation is app/UUID-based, not RF-class-based; keep client wording at 'a BLE tracker consistent with Find My/Find Hub,' confirmed by payload, not by the burst alone.",
+      "signatures": [
+        {
+          "name": "BLE item tracker — advertising bursts (AirTag/SmartTag/Tile/Chipolo/Pebblebee)",
+          "freq_min_mhz": 2400,
+          "freq_max_mhz": 2483.5,
+          "bandwidth_khz": 2000,
+          "mode": "GFSK advertising bursts on 3 fixed channels (2402/2426/2480 MHz); ~1-2 MHz per burst, periodic",
+          "class": "fsk",
+          "duty": "intermittent",
+          "tscm": "BLE location tracker. Periodic fixed-channel GFSK advertising (not a hopping data link). Confirm via unknown-tracker phone alerts + Find My (Apple 0x004C payload) or Google FMDN (0xFEAA service data, frame 0x41), then force the anti-stalking beep and localize.",
+          "url": "https://www.sigidwiki.com/index.php?search=Bluetooth"
+        }
+      ]
+    },
+    {
+      "device_class": "bluetooth_audio_bug",
+      "summary": "Covert audio bugs that exfiltrate room audio over Bluetooth — Classic (A2DP/HFP streaming) or BLE (connected or advertising). Frequency-hopping GFSK across 2.4 GHz; a streaming Classic link is high-duty (near-continuous), which distinguishes an active bug from an idle BLE beacon.",
+      "example_products": [
+        "Bluetooth 'listening' bug modules / disguised BT speakers and earpieces sold by spy-shops — real device class that streams live room audio to a paired phone via A2DP/HFP (specific model numbers churn and are NOT individually asserted)",
+        "Repurposed BT audio SoCs (e.g. modules in fake chargers/power banks) — real class; a hidden BT audio sink pairs and streams mic audio",
+        "Consumer BT speakers/headsets left in a room — the legitimate hardware a bug impersonates"
+      ],
+      "confirm_steps": [
+        "Sweep 2.4 GHz and watch for frequency-hopping GFSK energy that stays HIGH-duty (near-continuous) — an active A2DP/HFP audio stream hops fast and rarely goes quiet, unlike a low-duty BLE beacon.",
+        "Enumerate Bluetooth: run a BT/BLE discovery scan for an unexplained paired-or-pairable audio device (A2DP/HFP profile) in a room that should have none.",
+        "Correlate with sound: introduce a distinctive audio cue in the room and watch whether the BT stream's activity/hop rate responds (a live mic link tracks the audio).",
+        "Physically locate the strongest hopping source; a covert BT bug is power-limited so proximity search converges quickly."
+      ],
+      "false_positive_overlap": [
+        "Legitimate BT speakers, headsets, car kits, earbuds, and hands-free devices stream A2DP/HFP with the same hopping GFSK signature — an active stream is not by itself a bug.",
+        "Any 2.4 GHz hopping device (Bluetooth mice/keyboards, some proprietary links) can present similar hop patterns.",
+        "A paused/idle BT device still advertises and may look like a low-duty beacon."
+      ],
+      "tscm_notes": "This class is confirmed by BT device enumeration + audio correlation, not RF class alone. Runtime note: classify_modulation() has no fhss path, so a hopping BT stream typically reads as fsk (or ook if very bursty) to the app — the catalog tags the Classic-streaming row 'fhss' for human accuracy but the operator note explains the app will likely score it as fsk. Bandwidth figures below are PER-HOP CHANNEL width (1 MHz Classic / 2 MHz BLE), not aggregate occupied bandwidth across a full-band hop. AFH uses a minimum of 15 channels in the US (20 is the EU/spec floor).",
+      "signatures": [
+        {
+          "name": "Bluetooth Classic audio bug — A2DP/HFP streaming (per-hop 1 MHz)",
+          "freq_min_mhz": 2400,
+          "freq_max_mhz": 2483.5,
+          "bandwidth_khz": 1000,
+          "mode": "GFSK FHSS, 1 MHz per-hop channel; streaming A2DP/HFP is high-duty (near-continuous), AFH min 15 ch (US)/20 ch (EU)",
+          "class": "fhss",
+          "duty": "continuous",
+          "tscm": "Covert audio streamed over Bluetooth Classic. Near-continuous hopping GFSK (an active mic stream rarely goes quiet). App likely classes this as fsk (no fhss runtime path). Confirm by BT enumeration for an unexplained A2DP/HFP device + audio-cue correlation. bandwidth_khz is per-hop channel width, not stream occupancy.",
+          "url": "https://www.sigidwiki.com/index.php?search=Bluetooth"
+        },
+        {
+          "name": "Bluetooth LE audio bug — connected/advertising (per-hop 2 MHz)",
+          "freq_min_mhz": 2400,
+          "freq_max_mhz": 2483.5,
+          "bandwidth_khz": 2000,
+          "mode": "GFSK, 2 MHz per-hop channel; BLE data hops 37 channels, advertising on 3 fixed channels",
+          "class": "fsk",
+          "duty": "intermittent",
+          "tscm": "Covert audio over BLE. Advertising is fixed-channel GFSK bursts; a connected LE-audio link hops. Confirm by BLE enumeration + audio correlation. bandwidth_khz is per-hop channel width.",
+          "url": "https://www.sigidwiki.com/index.php?search=Bluetooth"
+        }
+      ]
+    },
+    {
+      "device_class": "gsm_cellular_audio_bug",
+      "summary": "Room-audio bugs that call out over cellular (2G GSM historically; 4G LTE-M / NB-IoT on modern units). They hide inside ordinary cellular uplink traffic. Often voice-activated (VOX). In the US, pure-2G SKUs may not register a tower (2G is shut down), so modern bugs use LTE-M/NB-IoT.",
+      "example_products": [
+        "GSM 'SIM card' audio bugs / N9-class mini GSM listening devices — real device class sold by spy-shops (StealthTronic, DPL, Efeel, spyequipmentuk and similar EU vendors); auto-answer + VOX callback. Specific model internals vary and are NOT individually asserted beyond the class.",
+        "LTE-M / NB-IoT audio bugs — real modern class using Cat-M1/NB-IoT modems to place data/voice callbacks where 2G is dead",
+        "Disguised GSM bugs in power strips, chargers, and clocks — real form-factor class"
+      ],
+      "confirm_steps": [
+        "Sweep cellular uplink bands and watch for an unexplained bursty cellular emission from within the room, especially one that keys up when you speak (VOX) — voice-activation typically triggers around ~45 dB at a few meters (vendor-variable), not a fixed 60 dB.",
+        "2G GSM: look for ~200 kHz GMSK bursts in a GSM uplink band; note in the US a pure-GSM bug may fail to register (2G off) and stay silent.",
+        "LTE-M: a ~1.4 MHz Cat-M1 SC-FDMA uplink; NB-IoT: a ~180 kHz carrier or a 3.75 kHz single-tone uplink that can look like a thin CW-ish line — treat any narrow single-tone uplink energy from the room as a flag-for-localization regardless of the class the app assigns.",
+        "Use a nearby-emitter/IMSI-aware detector or simply localize the burst source; a bug calling out sits inches from your sweep antenna and is easy to receive on any band."
+      ],
+      "false_positive_overlap": [
+        "Every phone, tablet, hotspot, smartwatch, and cellular IoT device (alarm panels, trackers, meters) produces cellular uplink bursts — an uplink burst is not by itself a bug.",
+        "A 3.75 kHz NB-IoT single-tone uplink can alias to analog_voice in the app (narrow, continuous), so a benign NB-IoT meter/sensor may match; identity resolves it.",
+        "In the US, full-rate LTE is ofdm_wideband in the app's reference; LTE-M/NB-IoT is deliberately treated as continuous_digital here because occupied bandwidth is only 1.4 MHz / ~180 kHz — do not read this as a 'wrong class' flag against the LTE reference entry."
+      ],
+      "tscm_notes": "Confirmed by localizing an unexplained cellular uplink that correlates with room audio (VOX), not by RF class alone. A bug is indistinguishable from a phone on spectrum; the tell is 'a cellular emitter that should not be in this room.' Keep VOX/threshold claims hedged in client docs. The app's classifier output key is 'modulation_class'; the values used here (continuous_digital, ofdm_wideband) are valid enum members.",
+      "signatures": [
+        {
+          "name": "GSM cellular audio bug — 2G uplink (GMSK)",
+          "freq_min_mhz": 380,
+          "freq_max_mhz": 1990,
+          "bandwidth_khz": 200,
+          "mode": "GMSK TDMA, ~200 kHz uplink burst; often VOX-gated (~45 dB, vendor-variable)",
+          "class": "continuous_digital",
+          "duty": "bursty",
+          "tscm": "Room audio over 2G GSM. ~200 kHz GMSK uplink; may key up on voice (VOX). In the US a pure-GSM bug may not register (2G shut down) and stay silent. Confirm by localizing an unexplained uplink that tracks room audio.",
+          "url": "https://www.sigidwiki.com/index.php?search=GSM"
+        },
+        {
+          "name": "Cellular audio bug — LTE-M (Cat-M1) uplink",
+          "freq_min_mhz": 600,
+          "freq_max_mhz": 2200,
+          "bandwidth_khz": 1400,
+          "mode": "SC-FDMA, ~1.4 MHz Cat-M1 uplink; VOX callback",
+          "class": "continuous_digital",
+          "duty": "bursty",
+          "tscm": "Modern audio bug over LTE-M where 2G is dead. ~1.4 MHz SC-FDMA uplink burst — narrowband vs full-rate LTE (ofdm_wideband), hence continuous_digital here. Confirm by localizing a room-origin uplink that tracks audio.",
+          "url": "https://www.sigidwiki.com/index.php?search=LTE"
+        },
+        {
+          "name": "Cellular audio bug — NB-IoT uplink (may present as thin CW line)",
+          "freq_min_mhz": 600,
+          "freq_max_mhz": 2200,
+          "bandwidth_khz": 180,
+          "mode": "NB-IoT ~180 kHz, or 3.75 kHz single-tone uplink (can look like a thin CW-ish line)",
+          "class": "continuous_digital",
+          "duty": "intermittent",
+          "tscm": "Audio bug over NB-IoT. A 3.75 kHz single-tone uplink may alias to analog_voice in the app — treat ANY narrow single-tone uplink energy from the room as flag-for-localization regardless of assigned class.",
+          "url": "https://www.sigidwiki.com/index.php?search=LTE"
+        }
+      ]
+    },
+    {
+      "device_class": "analog_rf_audio_bug",
+      "summary": "Classic analog RF audio bugs / body wires / wireless mics — a continuous narrowband FM (or SCA sub-carrier) voice carrier the operator can simply demod and listen to. Ranges from cheap 88-108 MHz free-running FM bug kits to professional wireless-mic bands. The tell is a continuous narrow voice carrier where none should be.",
+      "example_products": [
+        "Single-transistor Colpitts free-running FM bug kits, 88-108 MHz — real, widely-sold hobby/spy class (continuous FM audio)",
+        "Shure BLX wireless mic systems — real UHF mics; verified band edges: H8 518-542, H9 512-542, H10 542-572, J10 584-608 MHz (legitimate; the class a mic-based bug mimics)",
+        "VHF wireless mics on 169-172 MHz 'traveling frequencies' and the 174-216 MHz mic band — real allocation",
+        "SCA/sub-carrier audio hidden on 67/92 kHz sub-carriers of an FM signal — real technique (device-class; retail 'F908'-type internals are marketing-only and NOT asserted as a verified SKU; LEA body-wire model numbers unconfirmed)"
+      ],
+      "confirm_steps": [
+        "Sweep VHF/UHF for a CONTINUOUS narrowband carrier (~10-220 kHz) and demod as FM — a bug reveals room audio directly; that recovered audio is the confirmation.",
+        "Free-running bugs cluster 88-108 MHz (to hide near broadcast) and sometimes 108-137 MHz — note 108-137 MHz is the aeronautical band (VOR/ILS/ATC), so a bug there is atypical and easy to spot, not an empty gap.",
+        "Wireless-mic bands: check 169-172 MHz, 174-216 MHz, and UHF TV-band mic ranges (470-608 MHz, with the 608-614 MHz radio-astronomy carve-out per 47 CFR 15.236); a compandered mic carrier that carries room audio when no mic is in use is suspect.",
+        "SCA sub-carrier: if a nearby FM carrier has hidden audio, demod the 67/92 kHz sub-carrier; recovered speech confirms."
+      ],
+      "false_positive_overlap": [
+        "Licensed wireless microphones, IEMs, and assistive-listening systems occupy these same bands and are benign — a mic in active legitimate use is not a bug.",
+        "FM broadcast (87.5-108 MHz) and its legitimate SCA sub-carriers (reading services, background music) can carry audio and overlap the free-running-bug band.",
+        "Aeronautical VOR/ILS/ATC voice in 108-137 MHz is expected ambient, not a bug.",
+        "A wideband compandered mic measured >300 kHz would fall out of analog_voice into continuous_digital in this app (classify_modulation only assigns analog_voice when occupied BW <= 300 kHz); the mic figures below stay under that cap."
+      ],
+      "tscm_notes": "This is the most directly confirmable class: demod and listen. The confirmation is recovered room audio, not the frequency. All signatures stay <= 300 kHz so they remain classifiable as analog_voice in the app; note a real compandered mic measured wider would reclassify. F908/retail-spy internals and specific LEA body-wire model numbers are UNVERIFIED (marketing/device-class only) and must not be presented as confirmed SKUs.",
+      "signatures": [
+        {
+          "name": "Free-running FM audio bug (88-108 MHz kit)",
+          "freq_min_mhz": 65,
+          "freq_max_mhz": 130,
+          "bandwidth_khz": 180,
+          "mode": "FM analog voice (single-transistor Colpitts; hides near/at broadcast, sometimes 108-130 MHz aeronautical band)",
+          "class": "analog_voice",
+          "duty": "continuous",
+          "tscm": "Cheap continuous FM room bug. Demod FM and listen — recovered audio confirms. Clusters 88-108 MHz; 108-137 MHz is the aeronautical band so a bug there is atypical and stands out.",
+          "url": "https://www.sigidwiki.com/index.php?search=wireless+microphone"
+        },
+        {
+          "name": "Wireless microphone / body wire — VHF (169-172 / 174-216 MHz)",
+          "freq_min_mhz": 169,
+          "freq_max_mhz": 216,
+          "bandwidth_khz": 200,
+          "mode": "FM analog voice (compandered wireless mic / body wire)",
+          "class": "analog_voice",
+          "duty": "continuous",
+          "tscm": "VHF wireless mic / body wire. Continuous compandered FM voice. A carrier here carrying room audio when no legit mic is in use is suspect; demod to confirm.",
+          "url": "https://www.sigidwiki.com/index.php?search=wireless+microphone"
+        },
+        {
+          "name": "Wireless microphone / body wire — UHF TV-band (470-608 MHz)",
+          "freq_min_mhz": 470,
+          "freq_max_mhz": 608,
+          "bandwidth_khz": 200,
+          "mode": "FM analog voice (Shure BLX-class; 608-614 MHz astronomy carve-out per 47 CFR 15.236)",
+          "class": "analog_voice",
+          "duty": "continuous",
+          "tscm": "UHF wireless mic / body wire (e.g. Shure BLX bands). Continuous FM voice. Confirm by demod; distinguish from a mic in legitimate active use.",
+          "url": "https://www.sigidwiki.com/index.php?search=wireless+microphone"
+        },
+        {
+          "name": "SCA sub-carrier audio (67/92 kHz on an FM carrier)",
+          "freq_min_mhz": 87.5,
+          "freq_max_mhz": 108,
+          "bandwidth_khz": 220,
+          "mode": "FM with hidden 67/92 kHz SCA sub-carrier audio",
+          "class": "analog_voice",
+          "duty": "continuous",
+          "tscm": "Audio hidden on a 67/92 kHz sub-carrier of an FM signal. Demod the sub-carrier; recovered speech confirms. Overlaps legitimate SCA services (reading/background-music) — identity resolves it.",
+          "url": "https://www.sigidwiki.com/index.php?search=SCA+subcarrier"
+        }
+      ]
+    },
+    {
+      "device_class": "dect_cordless_bug",
+      "summary": "DECT-based bugs and cordless-phone/baby-monitor style relays in the 1880-1930 MHz DECT band (US UPCS 1920-1930 MHz). ~1.728 MHz TDMA channels; classed continuous_digital to match the app's DECT reference. Power-limited (100 mW UPCS) with listen-before-talk, so absolute signal strength is not a discriminator — timing + inventory are.",
+      "example_products": [
+        "DECT cordless phones and headset bases — real (e.g. Poly CA22CD-SC office DECT headset base; discontinued 2025 but still illustrative of the form factor)",
+        "DECT baby monitors — real device class using the DECT band for audio",
+        "Covert DECT audio relays — device class that hides a mic behind a DECT link"
+      ],
+      "confirm_steps": [
+        "Sweep 1880-1930 MHz (US: focus 1920-1930 MHz UPCS) for ~1.728 MHz TDMA bursts.",
+        "Inventory every DECT emitter in range (phones, headsets, monitors) and account for each — an UNEXPLAINED DECT source is the flag.",
+        "Note UPCS DECT is power-limited to 100 mW with mandatory listen-before-talk channel selection, so a covert relay obeys the same power cap — do NOT rely on absolute signal strength; use timing/localization + inventory.",
+        "Localize the unexplained source and search physically."
+      ],
+      "false_positive_overlap": [
+        "Legitimate DECT cordless phones, office headset bases, and DECT baby monitors occupy exactly this band and are benign — the band is theirs.",
+        "In the US the UPCS band is shared; any compliant DECT device is expected there."
+      ],
+      "tscm_notes": "DECT is fundamentally TDMA/bursty yet is tagged continuous_digital to match the app's own sigidwiki_ref DECT convention (duty stays 'bursty'); this internal-consistency choice is intentional. Confirmation is inventory + localization, not RF class. The Poly CA22CD-SC example is a discontinued-2025 product cited only to illustrate the office DECT form factor, not as current stock.",
+      "signatures": [
+        {
+          "name": "DECT cordless / covert audio relay (1.9 GHz)",
+          "freq_min_mhz": 1880,
+          "freq_max_mhz": 1930,
+          "bandwidth_khz": 1728,
+          "mode": "GFSK TDMA, ~1.728 MHz channel (US UPCS 1920-1930 MHz, 100 mW, listen-before-talk)",
+          "class": "continuous_digital",
+          "duty": "bursty",
+          "tscm": "DECT-band cordless phone / baby monitor / covert audio relay. ~1.728 MHz TDMA bursts. Power-limited to 100 mW (UPCS) so signal strength is not a discriminator — account for every DECT emitter and localize the unexplained one.",
+          "url": "https://www.sigidwiki.com/index.php?search=DECT"
+        }
+      ]
+    },
+    {
+      "device_class": "subghz_ism_tracker",
+      "summary": "Sub-GHz ISM location/telemetry devices — LoRa/CSS (433/868/915 MHz), FSK trackers, and short-range 433 MHz recovery beacons. Very low power and low duty, so they are easy to miss; the chirp (CSS) shape and periodic beacon cadence are the tells.",
+      "example_products": [
+        "Digital Matter Yabby Edge LoRaWAN — real, verified (US915, IP68, AAA lithium)",
+        "Digital Matter Barra Recovery — real, verified 433 MHz last-metre RF recovery beacon (powered by 2x AA per vendor page)",
+        "HopeRF RFM95W / Semtech SX1276 LoRa modules — real current modules used to build 915 MHz CSS links",
+        "LandAirSea 54 & Overdrive, Spytec GL300, Trackimo — real consumer GPS trackers cited as FORM-FACTOR examples; their exfil is cellular, not confirmed sub-GHz emitters (labeled as such)"
+      ],
+      "confirm_steps": [
+        "Sweep 433 / 868 / 915 MHz ISM for periodic low-power bursts; a LoRa/CSS transmission shows a distinctive CHIRP (frequency ramp) on the waterfall — that chirp shape is the load-bearing tell (the app has no CSS class, so watch the waterfall, not just the class label).",
+        "For a last-metre recovery beacon, sweep ~433 MHz for a directional RF beacon used to home in on a hidden tracker (exact sub-channel within 433 ISM not spec-confirmed for all units).",
+        "Because these are very low power, dwell longer and get close; SX1276 sensitivity ranges ~-123 dBm (SF7/125 kHz) to ~-137 dBm (SF12/125 kHz), with -148 dBm the datasheet floor at max spreading/narrow BW — low power means short detection range, so proximity search matters.",
+        "Correlate a periodic sub-GHz beacon with a physically hidden device on the vehicle/asset."
+      ],
+      "false_positive_overlap": [
+        "433/868/915 MHz ISM is crowded with benign devices: OOK/ASK remotes, keyfobs, garage openers, TPMS, weather sensors, smart meters, LoRaWAN IoT sensors — a sub-GHz burst is usually benign telemetry.",
+        "Legitimate LoRaWAN asset/sensor networks use the same CSS chirps as a covert LoRa tracker.",
+        "Consumer GPS trackers in this list actually exfil over cellular; their presence in sub-GHz is form-factor context, not a confirmed emitter."
+      ],
+      "tscm_notes": "class:'fhss' is used as a STAND-IN for LoRa/CSS because the app enum has no chirp/CSS class — this is flagged for a future maintainer, and the operator note about the chirp shape MUST survive into any export so the signature is not lost. Backlog: add a 'css' class if the Pluto feature-extractor gains chirp detection. LoRa sensitivity is stated as a range, not the -148 dBm floor. Cellular trackers are labeled form-factor examples, not confirmed sub-GHz emitters.",
+      "signatures": [
+        {
+          "name": "LoRa / CSS sub-GHz tracker (433/868/915 MHz)",
+          "freq_min_mhz": 433,
+          "freq_max_mhz": 928,
+          "bandwidth_khz": 125,
+          "mode": "LoRa CSS chirp (frequency ramp on waterfall); low power, periodic. class 'fhss' is a stand-in — app has no CSS class",
+          "class": "fhss",
+          "duty": "intermittent",
+          "tscm": "Low-power LoRa/CSS tracker. The CHIRP (frequency ramp) on the waterfall is the tell — the app has no CSS class so watch the waterfall, not the label. SX1276 sensitivity ~-123 dBm (SF7) to ~-137 dBm (SF12); low power = short range, so dwell and get close.",
+          "url": "https://www.sigidwiki.com/index.php?search=LoRa"
+        },
+        {
+          "name": "433 MHz last-metre RF recovery beacon (Barra-class)",
+          "freq_min_mhz": 433,
+          "freq_max_mhz": 434,
+          "bandwidth_khz": 40,
+          "mode": "433 MHz directional RF recovery beacon (exact sub-channel not spec-confirmed)",
+          "class": "ook",
+          "duty": "intermittent",
+          "tscm": "Short-range 433 MHz beacon for last-metre directional recovery of a hidden tracker. Periodic low-power bursts. Overlaps benign 433 remotes/sensors — localize the periodic source physically.",
+          "url": "https://www.sigidwiki.com/index.php?search=OOK"
+        },
+        {
+          "name": "Sub-GHz FSK telemetry tracker (ISM)",
+          "freq_min_mhz": 300,
+          "freq_max_mhz": 928,
+          "bandwidth_khz": 50,
+          "mode": "2-FSK low-rate telemetry burst",
+          "class": "fsk",
+          "duty": "bursty",
+          "tscm": "Low-rate 2-FSK telemetry/tracker on ISM. Overlaps benign sensors/trackers — periodic cadence + physical search resolves it.",
+          "url": "https://www.sigidwiki.com/index.php?search=FSK"
+        }
+      ]
+    },
+    {
+      "device_class": "cellular_gps_tracker",
+      "summary": "Cellular GPS trackers (covert vehicle/asset trackers) that report position over LTE-M / NB-IoT (or 2G on legacy units). GPS is receive-only, so the RF tell is the CELLULAR uplink callback — bursty, low-duty, on LTE-M/NB-IoT bands. A tracker sitting inches from the sweep antenna is easy to receive on any band.",
+      "example_products": [
+        "LandAirSea 54, LandAirSea Overdrive — real magnetic covert GPS trackers",
+        "Spytec GL300 / GL300MA — real consumer GPS tracker",
+        "Trackimo — real GPS/cellular tracker (Amazon ASIN B07R6ZD8JS live)",
+        "Digital Matter Yabby Edge / Oyster — real LTE-M/NB-IoT asset trackers"
+      ],
+      "confirm_steps": [
+        "Sweep LTE-M / NB-IoT uplink bands for a bursty, low-duty cellular emission originating from the vehicle/asset — a tracker checks in periodically, so watch for a repeating uplink cadence.",
+        "GPS L1 (1575.42 MHz) is receive-only; do NOT expect a tracker to emit there. Energy above the noise floor at L1 instead suggests a jammer/repeater, a separate concern.",
+        "A tracker sitting inches from your sweep antenna is easily received on any band regardless of path loss to the tower (higher bands have more tower path loss, but that does not weaken the tracker's own local emission you are receiving).",
+        "Localize the periodic uplink to the physical tracker (common hide spots: wheel wells, bumpers, OBD-II port, under seats); confirm with a physical/magnetic search."
+      ],
+      "false_positive_overlap": [
+        "Every phone, hotspot, smartwatch, connected-car TCU, and cellular IoT device emits the same LTE-M/NB-IoT/2G uplink bursts — a cellular burst near a vehicle is not by itself a tracker.",
+        "Factory connected-car telematics (eCall, OnStar-style TCUs) legitimately transmit cellular uplink from the vehicle.",
+        "Full-rate LTE is ofdm_wideband in this catalog while LTE-M/NB-IoT is deliberately continuous_digital (occupied BW only 1.4 MHz / ~180 kHz) — this is not a 'wrong class' flag against the LTE reference entry."
+      ],
+      "tscm_notes": "Confirmed by localizing a periodic cellular uplink to a physically hidden tracker, not by RF class alone (indistinguishable from a phone on spectrum). duty is 'bursty' even though class contains 'continuous' (continuous_digital) — duty cycle, not the class name, drives the check; ensure any consumer of this record does not assume duty=='continuous' whenever class contains 'continuous'. GPS L1 is receive-only; a tracker is found by its cellular callback, not a GPS emission.",
+      "signatures": [
+        {
+          "name": "Cellular GPS tracker — LTE-M (Cat-M1) uplink callback",
+          "freq_min_mhz": 600,
+          "freq_max_mhz": 2200,
+          "bandwidth_khz": 1400,
+          "mode": "SC-FDMA ~1.4 MHz Cat-M1 uplink; periodic low-duty check-in",
+          "class": "continuous_digital",
+          "duty": "bursty",
+          "tscm": "Covert GPS tracker reporting over LTE-M. Periodic ~1.4 MHz uplink burst from the vehicle/asset (narrowband vs full-rate LTE, hence continuous_digital). Localize the repeating uplink and search physically; GPS L1 is receive-only so the cellular callback is the tell.",
+          "url": "https://www.sigidwiki.com/index.php?search=LTE"
+        },
+        {
+          "name": "Cellular GPS tracker — NB-IoT uplink callback",
+          "freq_min_mhz": 600,
+          "freq_max_mhz": 2200,
+          "bandwidth_khz": 180,
+          "mode": "NB-IoT ~180 kHz (or single-tone) uplink; infrequent check-in",
+          "class": "continuous_digital",
+          "duty": "intermittent",
+          "tscm": "Covert GPS tracker over NB-IoT. Infrequent narrow uplink check-in. Watch for a repeating cadence from the asset; a tracker inches from the antenna is easy to receive on any band. Confirm by physical search.",
+          "url": "https://www.sigidwiki.com/index.php?search=LTE"
+        },
+        {
+          "name": "Cellular GPS tracker — legacy 2G GSM uplink callback",
+          "freq_min_mhz": 380,
+          "freq_max_mhz": 1990,
+          "bandwidth_khz": 200,
+          "mode": "GMSK ~200 kHz uplink; legacy units (may not register where 2G is off)",
+          "class": "continuous_digital",
+          "duty": "bursty",
+          "tscm": "Legacy covert tracker over 2G. ~200 kHz GMSK uplink. In the US may fail to register (2G shut down). Localize the periodic uplink to the hidden device.",
+          "url": "https://www.sigidwiki.com/index.php?search=GSM"
+        }
+      ]
+    },
+    {
+      "device_class": "wifi_gadget_spy",
+      "summary": "Disguised everyday gadgets (pens, USB drives, chargers, power banks, clocks) that record and/or live-stream audio/video over 2.4 GHz Wi-Fi — no SIM, no cellular. RF tell is bursty 2.4 GHz WLAN traffic from an object that has no business being a network client.",
+      "example_products": [
+        "SpyEquipmentUK 'WiFi Listen and Record Pen' — real, verified: functional pen, 2.4 GHz Wi-Fi (no SIM), app live-listen with VOX push, 1-30 min or continuous recording, ~8 m mic range, 5-9 day battery",
+        "'Mriya' Wi-Fi variant (spy-shop, e.g. spyshopeurope.com) — real 2.4 GHz Wi-Fi audio bug: WAV 128 kbps, VOX, 32 GB microSD (NOTE: a same-named 'Mriya' 4G/GSM variant also exists — the name alone does not confirm the RF class)",
+        "Wi-Fi hidden-cam gadgets (USB chargers, clocks, smoke detectors) — real class overlapping wifi_ip_camera; here the emphasis is the disguised-object form factor streaming over 2.4 GHz Wi-Fi"
+      ],
+      "confirm_steps": [
+        "Sweep 2400-2483.5 MHz for bursty WLAN OFDM and correlate to a small gadget (pen, charger, USB stick) that appears as an unexplained Wi-Fi client.",
+        "Enumerate Wi-Fi stations / DHCP clients; an OUI/MAC tied to a no-name module in a pen-or-charger form factor is the flag.",
+        "Trigger VOX: many of these are voice-activated — speak and watch the uplink burst rate rise (audio) or wave/change the scene (video).",
+        "Physically inspect the suspect object for a lens/pinhole or mic port co-located with the strongest 2.4 GHz burst."
+      ],
+      "false_positive_overlap": [
+        "Every legitimate 2.4 GHz Wi-Fi client (phones, laptops, IoT, real USB Wi-Fi adapters, smart pens) produces the same bursty OFDM — the disguise, not the RF, is the giveaway.",
+        "Legitimate voice recorders and webcams in pen/charger form factors exist and are benign.",
+        "Overlaps wifi_ip_camera: a disguised streaming cam matches both classes; treat them together."
+      ],
+      "tscm_notes": "Same honest caveat as wifi_ip_camera: RF class (bursty 2.4 GHz OFDM) is indistinguishable from any WLAN device; identification is by tying the burst to a disguised object that should not be a network client. 802.11b is DSSS (~22 MHz occupied) while g/n is OFDM (20 MHz) — the 'OFDM/DSSS, 20 MHz' hedge matches the app's own Wi-Fi reference row. The SpyEquipmentUK pen and Mriya Wi-Fi specs are vendor-verified; the Mriya name also tags a non-Wi-Fi GSM variant.",
+      "signatures": [
+        {
+          "name": "Wi-Fi spy gadget (pen/charger/USB) — 2.4 GHz WLAN",
+          "freq_min_mhz": 2400,
+          "freq_max_mhz": 2483.5,
+          "bandwidth_khz": 20000,
+          "mode": "OFDM/DSSS (802.11b/g/n, 20 MHz channel); often VOX audio or motion video",
+          "class": "ofdm_wideband",
+          "duty": "bursty",
+          "tscm": "Disguised gadget (pen/charger/USB/clock) streaming audio/video over 2.4 GHz Wi-Fi — no SIM. Bursty WLAN OFDM; VOX audio makes the uplink rise when you speak. Confirm by tying the burst to an unexplained Wi-Fi client in a disguised form factor.",
+          "url": "https://www.sigidwiki.com/index.php?search=WLAN+802.11"
+        }
+      ]
+    }
+  ]
+}
