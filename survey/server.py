@@ -854,12 +854,14 @@ def create_app(db, cfg, demo=False) -> Flask:
             return err("need center_mhz")
         center_mhz = float(request.args["center_mhz"])
         mode = (request.args.get("mode") or pick_mode(center_mhz)).lower()
-        dev = st.controller.device
+        # dual mode: listen on the MONITOR radio (the Pluto) so a sweep can keep
+        # running on the RF Explorer; single-device behaviour is unchanged.
+        dev, _mlock, _mstop, msrc = st.controller.monitor_target()
         if not (dev is not None and hasattr(dev, "stream_iq")
                 and getattr(dev, "is_swept_sdr", False)):
             return err("connect the Pluto (SDR) to listen", 409)
-        if st.controller.busy():
-            return err("a sweep is running — stop it to listen", 409)
+        if st.controller.busy(msrc):
+            return err("the monitor radio is busy — stop its sweep to listen", 409)
         mods = dev.info.modules
         lo_mhz, hi_mhz = min(m.min_mhz for m in mods), max(m.max_mhz for m in mods)
         if not (lo_mhz <= center_mhz <= hi_mhz):
@@ -911,13 +913,14 @@ def create_app(db, cfg, demo=False) -> Flask:
         span_hi = float(cfg.get("pluto", "listen_wf_span_hi_db", default=40.0))
         psd_ema = nf_ema = None
         wf_seq = 0
-        st.controller.listen_stop.set()       # preempt whatever stream is running now
-        with st.controller.device_lock:       # wait for the previous user of the radio to release
-            st.controller.listen_stop.clear()
+        _mdev, mlock, mstop, _msrc = st.controller.monitor_target()
+        mstop.set()                           # preempt whatever stream is running now
+        with mlock:                           # wait for the previous user of THIS radio to release
+            mstop.clear()
             st.controller.listening = True
             st.controller.listen_offset_hz = 0.0   # new tune -> demod band center until clicked
             st.controller.listen_spectrum = None
-            stop = st.controller.listen_stop
+            stop = mstop
             try:
                 for iq in dev.stream_iq(center_mhz * 1e6, fs, n_block, stop):
                     try:

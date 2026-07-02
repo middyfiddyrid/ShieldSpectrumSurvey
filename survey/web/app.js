@@ -1008,7 +1008,8 @@ async function refreshLiveSweepSignals(sweepId) {
       const cls = s.identity_tier || (s.classification === "VERIFIED" ? "IDENTIFIED"
         : s.classification === "PLAUSIBLE" ? "KNOWN_BAND" : "ANOMALY");
       const id = s.display_label || s.matched_label || s.match_reason || "";
-      return `<tr><td>${shown.length - i}</td><td>${fmtF(s.center_mhz)}</td>` +
+      return `<tr><td>${shown.length - i}</td><td><a class="freqlink" href="#" ` +
+        `data-center="${s.center_mhz}" data-label="${esc(id)}">${fmtF(s.center_mhz)}</a></td>` +
         `<td>${s.peak_dbm} dBm</td><td>${s.bw_khz != null ? Math.round(s.bw_khz) + " kHz" : "—"}</td>` +
         `<td><span class="pill ${cls}">${k}</span>${s.caution ? " ⚠" : ""}</td>` +
         `<td>${esc(id).slice(0, 70)}</td></tr>`;
@@ -1364,17 +1365,23 @@ function freqLinkDelegate(e) {
   if (a.dataset.huntIdx != null) { huntStep(parseInt(a.dataset.huntIdx, 10)); return; }
   listenAt(parseFloat(a.dataset.center), a.dataset.label || "", a.dataset.mode || undefined);
 }
-["tbl-anomalies", "tbl-signals", "tbl-wiki", "tbl-hunt", "tbl-triage"].forEach(id => {
+["tbl-anomalies", "tbl-signals", "tbl-wiki", "tbl-hunt", "tbl-triage", "tbl-live-ledger"].forEach(id => {
   const el = $(id);
   if (el) el.addEventListener("click", freqLinkDelegate, true);  // capture: beat the row onclick
 });
 
 function inRangeClient(center) {
+  // dual mode: if a Pluto is connected as the monitor, listening works even
+  // while the RF Explorer is the active sweeper — the server tunes the Pluto
+  // and enforces its own range check.
+  const roles = App.state && App.state.roles;
+  if (roles && roles.roles && roles.roles.some(r => r.source === "pluto"))
+    return { ok: true };
   const dev = App.state && App.state.device;
   if (!dev || !dev.modules || !dev.modules.length)
     return { ok: false, msg: "connect a device first (Session tab)." };
   if (dev.driver !== "pluto")
-    return { ok: false, msg: "tune / view / listen needs the Pluto (SDR) — the RF Explorer is amplitude-only." };
+    return { ok: false, msg: "tune / view / listen needs the Pluto (SDR) — connect it in the DEVICE card (it can stay connected alongside the RF Explorer)." };
   const lo = Math.min(...dev.modules.map(m => m.min_mhz));
   const hi = Math.max(...dev.modules.map(m => m.max_mhz));
   if (center < lo || center > hi)
