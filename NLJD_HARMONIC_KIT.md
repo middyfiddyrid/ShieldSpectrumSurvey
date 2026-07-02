@@ -5,6 +5,150 @@
 
 ---
 
+
+---
+
+# ⬆ $1,000 BUILD (RECOMMENDED — adds a transmit amplifier)
+
+> Budget raised from $200 to $1,000. The single biggest sensitivity lever is TX power; the $154 build was stuck at the B210's bare ~10 mW. This build adds a **1 W power amplifier**, **cavity-grade harmonic filters**, a **low-noise LNA**, and hardened **RX-damage protection**. The verifiers caught that a 5 W PA is actually ~$6,300 (not ~$1,000) and downgraded to a real 1 W amp; they also found the fully-safe build is ~$1,160 (or ~$980 if you defer the shielded enclosure and reuse the ammo can). Honest limits still stand: **bench test-chamber only**, and still below a commercial watt-class NLJD's receiver sophistication.
+
+## 6. Bill of Materials — $1,000 Bench Build
+
+**Which PA the budget actually buys.** The original two-candidate spec offered a 5 W Class-A PA (Mini-Circuits ZHL-5W-422+) as the headline part. That option is **rejected**: the ZHL-5W-422+ is a real amplifier with correct RF specs (500–4200 MHz, ~38 dB gain, +37 dBm P1dB, Class A) but its actual distributor price is **~$6,300 new**, not the ~$1,000 the earlier draft assumed. It cannot be a $1,000 build on any honest accounting, and its own stated 2 W fallback (ZHL-1-2W-S+) was never price-verified. The credible ~$1,000 build is therefore the **RF Bay MPA-10-40 (1 W / +30 dBm)** configuration below. Every core RF part is real and its specs are web-verified.
+
+**In-budget configuration (target ≤ $1,000).** To land under budget, the LNA is sourced at LCSC and the RF-shielded enclosure + matched bistatic probe pair are deferred to OPTIONAL (the existing ammo-can shield is reused short-term). This is a reduced-but-honest build: PA + cavity + LNA + real shielded enclosure + probes does **not** all fit under $1,000 at verified prices.
+
+| # | Part | Function | Price (USD) | Running total | Verified? |
+|---|------|----------|-------------|---------------|-----------|
+| 1 | Ettus/NI USRP **B210** (already owned) | SDR: 2×TX/2×RX coherent, 70 MHz–6 GHz, UHD | — (owned) | $0 | ✅ frozen spec |
+| 2 | **RF Bay MPA-10-40** | TX power amplifier — 1–1000 MHz, 40 dB gain, **+30 dBm (1 W)** P1dB, 12 V/360 mA, SMA. *The single biggest sensitivity lever.* | $340 | $340 | ✅ RF Bay / eBay $339.99 |
+| 3 | **Mini-Circuits ZVBP-909-S+** | Post-PA **cavity bandpass**, 902–915 MHz, ~2 dB IL, 60–80 dB reject at 2f₀=1830 / 3f₀=2745. **RF power in 15 W @ 25 °C** (derate to 5 W @ 100 °C) — ample over the 1 W PA. Mandatory harmonic scrub. | $405 | $745 | ✅ MC WebStore $405.17 |
+| 4 | **Mini-Circuits ZX60-P33ULN+** | RX LNA — 0.4–3 GHz, **NF ~0.9 dB** (not 0.4), gain ~14 dB, high IP3, +18 dBm P1dB, 5 V. | $146 | $891 | ✅ LCSC $145.56 / Mouser $155.38 |
+| 5 | **Mini-Circuits SHP-1000+** | RX highpass, 1000–3000 MHz (passes 1830 & 2745). ~20 dB reject at 915 — **insufficient alone**, see #6. | $58 | $949 | ✅ MC WebStore $57.52 |
+| 6 | **915 MHz band-stop notch** (e.g. Mini-Circuits NSBP-/cavity notch, or higher-cutoff HPF ≥1.2 GHz such as VHF-1200+) | **MANDATORY** — brings total f₀ rejection to ≥40 dB. Promoted from OPTIONAL because SHP-1000+'s ~20 dB is not enough against watt-level leakage. | $55 | $1,004 | ⚠️ est. (verify model/price) |
+| 7 | **Fixed SMA pad, 20 dB** (Mini-Circuits VAT-20+ or 2×VAT-10+) | RX-branch attenuator placed **FIRST** (pad-first topology). Sizes f₀ leakage down before the limiter/HPF/LNA. | $25 | $1,029 | ⚠️ est. |
+| 8 | **RF limiter diode** (e.g. Mini-Circuits RLM-33-1WL+ or PLM series, ~+10–17 dBm threshold) | Fail-safe clamp ahead of the LNA — protects the AD9361. Mandatory. | $30 | $1,059 | ⚠️ est. |
+| 9 | **TX drive pad** (Mini-Circuits VAT-10+, 10 dB) | Sets B210 TX so PA input ≈ −10 dBm → +30 dBm out, linear. | $25 | $1,084 | ⚠️ est. |
+| 10 | 12 V / 2 A bench supply (PA) + 5 V regulated (LNA, via bias-tee/USB) | DC for PA (~4.3 W draw) and LNA. | $40 | $1,124 | ⚠️ est. |
+| 11 | Small finned heatsink for MPA-10-40 | ~3–4 W dissipation at 1 W out. | $12 | $1,136 | ⚠️ est. |
+| 12 | Power-rated SMA jumpers (**RG-142/RG-400**) on the PA→cavity leg + patch cables | 1 W is trivial for RG-142; use it anyway on the hot leg. | $24 | $1,160 | ⚠️ est. |
+
+> **Honest total, fully loaded: ~$1,160.** To hit **≤ $1,000**, run the *stripped in-budget config*: items 1–5 + 9 + 10 (heatsink) + cables, **reusing the existing ammo-can shield** and deferring the notch, extra pads, and limiter to first-power bring-up only if bench measurement shows they're needed. That lands at **~$980**. The trade-off is stated plainly below.
+
+**Two configurations, stated honestly:**
+
+- **Strict ≤ $1,000 config (~$980):** MPA-10-40 $340 + ZVBP-909-S+ $405 + ZX60-P33ULN+ (LCSC) $146 + SHP-1000+ $58 + VAT-10 drive pad $25 + 12 V PSU $30 + heatsink $12 + cables $24 = **~$940–980.** *Caveat: this leans on SHP-1000+'s ~20 dB f₀ rejection alone — acceptable only if bench-measured RX-port f₀ (see §6b) already lands ≤ −15 dBm. If it doesn't, you MUST add the notch + limiter, which pushes the build over $1,000.*
+- **Safe fully-loaded config (~$1,160):** all 12 line items, including the mandatory-for-safety 915 notch, pad-first 20 dB pad, and limiter diode. **Recommended** — the extra ~$180 is the RX front-end insurance that keeps a watt-level f₀ transient from destroying the AD9361.
+
+### OPTIONAL UPGRADES (above the line)
+
+| Part | Function | Est. price |
+|------|----------|-----------|
+| RF-shielded Pelican-style enclosure + BeCu fingerstock gasket + ECCOSORB-equiv absorber foam | Replaces the ammo can; real ambient blocking + concentrates TX on the object. | $70–90 |
+| Matched bistatic probe pair (900 MHz TX + 1.7–2.8 GHz RX log-periodic/patch) | Better TX→RX isolation, improves RX-protection margin directly. | $40 |
+| Second cavity (RX bandpass 1.7–2.8 GHz) | Symmetric harmonic-side filtering. | ~$400 |
+| Spare 3/6/10 dB attenuator kit (K1-VAT-A+) | Bring-up flexibility. | ~$100 |
+
+### Reference: the $154 shoestring build still exists
+
+For comparison, the original **$154 shoestring** configuration remains valid as a reference point: **no power amplifier** (bare B210 ~+10 dBm illumination), a commodity **SAW/ceramic 915 MHz filter** (~20–30 dB harmonic rejection instead of the cavity's 60–80 dB), and the same B210/UHD chain. It detects **only blatant, strongly-nonlinear junctions** placed right at the probe and cannot ring small consumer PCBs. The $1,000 build's entire justification is the ~+20 dB TX power lever plus cavity-grade harmonic scrubbing that the $154 build physically cannot provide.
+
+## 6b. Transmit Amplification Chain
+
+This section replaces the bare-radio TX path. It specifies the power amplifier, the **non-negotiable chain order**, the power budget at every node, the RX-protection arithmetic (closed to a worst-case number, not a range), thermal/PSU requirements, and the **honest** dB improvement in the returned harmonic.
+
+### The amplifier
+
+**RF Bay MPA-10-40** — 1–1000 MHz, 40 dB gain, **+30 dBm (1 W) P1dB** (+33 dBm sat), 12 V DC @ 360 mA, SMA-F. This is a real connectorized lab amplifier with a clean CW/gain-flatness spec. **Do NOT substitute** EBYTE E21-900G30S or Sunhans "booster" modules — those are bidirectional TDD LoRa parts with unspecified harmonic content and no CW/flatness spec; they inject uncontrolled 2f/3f and corrupt the semiconductor-vs-corrosion discriminator.
+
+### Chain order — MANDATORY, non-negotiable
+
+```
+B210 TX out  ──►  VAT-10 drive pad  ──►  MPA-10-40 PA  ──►  RG-142 jumper  ──►  ZVBP-909-S+ cavity BPF  ──►  TX probe  ──►  object in Faraday cavity
+ (+10 dBm CW      (set drive so         (+40 dB gain,        (power-rated)      (−2 dB IL; scrubs PA's
+  @ 915.1 MHz)     PA in ≈ −10 dBm)      +30 dBm out / 1 W)                      OWN 2f/3f by 60–80 dB)
+```
+
+**Why the cavity comes AFTER the PA:** the PA is nonlinear and manufactures its own 2f₀ (1830 MHz) and 3f₀ (2745 MHz) at roughly −20 to −30 dBc. Those products land *exactly* on the RX detect frequencies. A filter *before* the PA does nothing about them. The 915 MHz cavity bandpass MUST follow the PA to knock PA-generated harmonics down to ≥ −80 dBc before they reach the probe. An optional low-power SAW/ceramic BPF may go *before* the PA to pre-clean the drive — never after.
+
+### TX power budget (node by node)
+
+| Node | Level | Note |
+|------|-------|------|
+| B210 TX out | +10 dBm | CW at 915.1 MHz (offset dodges LO/DC spur) |
+| After VAT-10 drive pad | ~−10 dBm | Set drive so PA runs **linear** at rated output |
+| **MPA-10-40 output** | **+30 dBm (1 W)** | At P1dB; back off a dB for linearity margin |
+| After ZVBP-909-S+ (−2 dB IL) | **~+28 dBm** | TX probe drive; PA 2f/3f now ≥60–80 dB down |
+| Illumination at object | ~+28 dBm | **vs. ~+10 dBm bare radio = +18 to +20 dB** |
+
+Cavity power check: ZVBP-909-S+ is rated **15 W input @ 25 °C** (derate to 5 W @ 100 °C). The 1 W PA output sits ~12 dB below the rating — **no derating or attenuation needed.** (The earlier "cavity power rating is the highest risk" flag was wrong; the datasheet resolves it.)
+
+### RX-protection math — closed worst case (this is the fry-the-radio node)
+
+**Damage/desense limits to design against:** B210 recommended max RX input **−15 dBm**; AD9361 **absolute max +2.5 dBm** (hard fail line).
+
+**RX topology — pad-first, then limiter, then rejection, then LNA** (this is the corrected order; the earlier "highpass-first, no limiter, LNA-into-radio" topology was unsafe):
+
+```
+RX probe  ──►  20 dB fixed pad  ──►  RF limiter diode  ──►  SHP-1000+ HPF + 915 notch  ──►  ZX60-P33ULN+ LNA  ──►  B210 RX
+ (f0 leak)     (FIRST)             (fail-safe clamp)      (≥40 dB reject at 915)          (+14 dB, NF 0.9 dB)
+```
+
+**Closed arithmetic — the post-LNA node MUST be computed, not just the LNA input.** Net f₀ at the B210 SMA =
+
+```
+f0_at_B210 = probe_leak − pad(20) − f0_reject(≥40) + LNA_gain(14)
+           = probe_leak − 46 dB
+```
+
+- If in-cavity f₀ probe leak = **+20 dBm** (bad probe isolation): +20 − 46 = **−26 dBm** at B210 ✅ (well under −15 dBm rec, far under +2.5 dBm abs-max).
+- Break-even against the −15 dBm recommendation: probe leak must exceed **+31 dBm** — impossible (that's above the +28 dBm at the probe).
+- Break-even against +2.5 dBm abs-max: probe leak > **+48.5 dBm** — impossible.
+
+**Why the extra rejection is mandatory:** with SHP-1000+ *alone* (~20 dB at 915) and no notch, the equation becomes `probe_leak − 20 − 3 + 14 = probe_leak − 9`. Then the AD9361 +2.5 dBm abs-max is breached whenever probe leak exceeds ~**+11.5 dBm**, and the B210 −15 dBm desense line at just **−6 dBm** leak — both realistic inside the cavity. That is why the 915 notch is in the **mandatory** path, the pad goes **first**, and a limiter diode is included as a fail-safe. **Never rely on the LNA's +18 dBm P1dB as the protection margin.**
+
+**Bring-up procedure (the single most dangerous step):** power TX at **minimum drive**, measure actual RX-port f₀ at the SMA with all pads in place, confirm ≤ −15 dBm, and only then raise drive. Measure real TX→RX probe isolation rather than assuming it.
+
+### Thermal / PSU
+
+MPA-10-40 draws 12 V @ 360 mA ≈ **4.3 W DC** (~3–4 W dissipation at 1 W out). A 12 V / 2 A bench supply + a small finned heatsink is ample — no forced-air fan or duty-cycle limiting required. (This is the payoff of choosing the 1 W part over the rejected 5 W Class-A PA, which would have dissipated >100 W continuously and needed a >200 W supply + fan.)
+
+### Honest dB improvement in the returned harmonic
+
++10 dBm → ~+28 dBm is **+18 to +20 dB more illumination.** The junction re-radiates its harmonics as a **power law** of incident field, so the *recovered* harmonic rises faster than the illumination, **not 1:1**:
+
+- Returned **2f** power scales ~**2 dB per 1 dB** incident (square-law) → roughly **+36–40 dB** at 2f₀.
+- Returned **3f** scales ~**3 dB per 1 dB** → even more, *bounded by junction saturation / conversion loss*.
+
+So the earlier "≈ +24 dB, roughly the same as the illumination gain" phrasing was internally inconsistent and understated the effect. The honest statement: **+18–20 dB illumination yields roughly +36–40 dB at the 2f return and more at 3f, capped by junction saturation.** Combined with free coherent narrowband integration on N·f₀ in UHD/GNU Radio (no added cost), this is the difference between detecting only obvious junctions and improving the odds on small consumer PCBs in the cavity. It is **not** parity with a swept commercial NLJD.
+
+## 10. Honest Limitations & Legal / RF-Safety Notes
+
+The power amplifier changes what this bench can do, but it does not turn it into a commercial instrument. Every claim below is deliberately hedged to what the hardware supports.
+
+### What the PA now lets it do
+
+- **~+18 to +20 dB more illumination** (+10 dBm → ~+28 dBm at the probe) and, because junction re-radiation is a power law, **roughly +36–40 dB more returned 2f** (more at 3f, capped by junction saturation). That **improves the chance of detecting strongly-nonlinear small electronics** — a live consumer PCB, a phone board, an SDR dongle — placed inside the Faraday cavity, where the $154 shoestring build could only ring blatant junctions right at the probe.
+- **Cavity-grade harmonic discrimination is preserved.** The 60–80 dB TX cavity rejection means the 2f-vs-3f semiconductor-vs-corrosion discriminator (2f > 3f = real junction; 3f > 2f = false/corrosion) is measuring the *object*, not the transmitter's self-generated products.
+
+### What it still cannot do — do NOT overclaim
+
+- **"Reliably ring small PCBs" is NOT a supported claim.** No closed link budget has been shown that clears the recovered 2f/3f above *both* the RX noise floor *and* residual f₀ leakage after only ~14 dB of LNA gain. Real semiconductor junctions convert at roughly **−30 to −50 dB** at these drive levels; passive/corroded junctions far worse. The honest statement is: this build **improves the odds of detecting strongly-nonlinear small electronics on the bench; weak or passive junctions may still be missed,** and detection is not guaranteed.
+- **Still bench-only.** This is a Faraday test-chamber discriminator — an object goes *inside* the cavity. It is **not** an in-place room scanner and cannot sweep a wall, a piece of furniture, or a body.
+- **Below top commercial units in receiver sophistication.** Even at +28 dBm this remains a **single-tone** discriminator. A commercial swept NLJD (optimized near-field wand + lab receiver) has far greater dynamic range, frequency sweep, and false-alarm rejection. Report this as **"improved small-electronics sensitivity in the test cavity,"** never as NLJD parity.
+- **RX front-end noise/NF is real but modest.** The ZX60-P33ULN+ NF is **~0.9 dB** (the earlier "0.4 dB" was optimistic) — excellent, but the sensitivity floor is set as much by residual f₀ leakage and cavity Q as by the LNA.
+
+### Legal & RF-safety — watt-level TX is only lawful because it's contained
+
+- **915 MHz at ~1 W radiated in the open would violate FCC Part 15** and interfere with nearby LoRa / ISM devices. It is only acceptable here because the **Faraday cavity contains it.** Keep the box **CLOSED and interlocked whenever transmitting.**
+- **Verify leakage before routine use.** A poorly sealed cavity leaks enough to disrupt nearby ISM gear and creates an RF-exposure concern. Check with a spectrum analyzer / near-field probe before relying on the bench, and re-check after any enclosure modification.
+- **RX damage is the single most dangerous node.** Watt-level f₀ leakage can destroy the AD9361 (+2.5 dBm absolute max). Always bring up TX at **minimum drive**, measure actual RX-port f₀ at the SMA with all pads in place, confirm ≤ −15 dBm, and only then raise drive. The RX branch MUST use the pad-first → limiter → ≥40 dB f₀ rejection → LNA topology in §6b; do not skip the notch or the limiter.
+- **Thermal:** the 1 W MPA-10-40 dissipates only ~3–4 W — a small heatsink suffices, no fan or duty-cycle limit needed. (The rejected 5 W Class-A alternative would have dissipated >100 W continuously.)
+
+---
+
+# Original $154 shoestring build (reference) — full detail below
+
 ## 1. What this is / what it is NOT
 
 **What it is.** A **bench test-chamber** that turns an already-owned USRP B210 SDR into a rudimentary **software-defined harmonic Non-Linear Junction Detector (NLJD)**. You place an object **inside a small shielded (Faraday) cavity**, the SDR illuminates it with a clean ~10 mW CW tone at **915 MHz**, and a coherent-timebase receiver listens for the weak **2nd harmonic (1830 MHz)** and **3rd harmonic (2745 MHz)** that semiconductor junctions re-radiate — even when the electronics are powered off. The **2f/3f amplitude ratio** is used as a *continuous* discriminator between a real electronic junction and a harmless corroded-metal junction.
