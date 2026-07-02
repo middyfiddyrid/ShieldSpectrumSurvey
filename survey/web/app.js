@@ -1039,7 +1039,15 @@ $("btn-connect").onclick = async () => {
   const src = $("device-source") ? $("device-source").value : null;
   $("device-msg").textContent = `connecting to ${src === "pluto" ? "Pluto" : "RF Explorer"}…`;
   try {
-    const d = await api("/api/device/connect", src ? { source: src } : {});
+    // dual-radio: if concurrent monitoring is on and ANOTHER radio is already
+    // connected, keep it open (RFE sweeps while the Pluto monitors)
+    let keepOther = false;
+    try {
+      const roles = await api("/api/device/roles");
+      keepOther = !!(roles.concurrent_enabled &&
+                     roles.roles.some(r => r.source !== src));
+    } catch (_) { /* roles unavailable → legacy single-device connect */ }
+    const d = await api("/api/device/connect", src ? { source: src, keep_other: keepOther } : {});
     $("device-msg").textContent = "connected";
     $("device-detail").innerHTML =
       `<div>Model</div><div>${esc(d.model)} (driver: ${esc(d.driver)})</div>` +
@@ -1508,10 +1516,9 @@ function inspectByFreq(center, label, mode) {
   const tuneId = (App.tuneId = (App.tuneId || 0) + 1);
   App.inspCenter = center; App.inspLabel = label;   // for mode <select> re-tune
   App.demodMhz = center;                             // demod tuner starts at band center (offset 0)
-  App._lastSpecSeq = null;                           // new tune → first frame always draws
   $("inspect-panel").style.display = "";
   $("insp-title").textContent = `${fmtF(center)} · ${label || ""}`;   // fmtF already carries the unit
-  $("inspect-panel").scrollIntoView({ block: "center" });   // instant — no smooth-scroll animation delay
+  $("inspect-panel").scrollIntoView({ behavior: "smooth", block: "center" });
   const ao = $("insp-analyze-out"); if (ao) ao.style.display = "none";
   loadRecordings();
   stopSpectrumPoll();
@@ -1718,11 +1725,6 @@ function startSpectrumPoll() {
     catch (e) { busy = false; return; }
     busy = false;
     if (!s || s.center_mhz == null) return;
-    // skip redundant redraws: the server stamps each frame with a monotonic seq;
-    // at low frame rates most polls return the SAME frame, so only redraw on new ones
-    // (also stops the 60 s signal-history from being oversampled with duplicate points).
-    if (s.seq != null && s.seq === App._lastSpecSeq) { $("insp-msg").textContent = "● live"; return; }
-    App._lastSpecSeq = s.seq;
     if (s.mode) $("insp-mode").value = s.mode;
     $("insp-msg").textContent = "● live";
     const mode = s.mode || ($("insp-mode") || {}).value;
@@ -1742,18 +1744,11 @@ function stopSpectrumPoll() {
 
 function smoothSpectrumTrace(p) {
   const n = p.length;
-  const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
   if (!App._specSmooth || App._specSmooth.length !== n) {
-    App._specSmooth = p.slice(); App._specSmoothT = now;
+    App._specSmooth = p.slice();
     return App._specSmooth;
   }
-  // instant attack, TIME-BASED fall (tau seconds): the trace tracks the radio at the
-  // same wall-clock speed regardless of frame rate, so falling signals don't linger
-  // for seconds when frames are slow (the old per-frame 0.18 decay did exactly that).
-  const dt = Math.max(0, (now - (App._specSmoothT || now)) / 1000);
-  App._specSmoothT = now;
-  const tau = 0.12;
-  const decay = dt > 0 ? (1 - Math.exp(-dt / tau)) : 0.5;
+  const decay = 0.18;
   for (let i = 0; i < n; i++) {
     const raw = p[i], prev = App._specSmooth[i];
     App._specSmooth[i] = raw > prev ? raw : prev - (prev - raw) * decay;
