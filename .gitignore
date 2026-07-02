@@ -14,3 +14,4 @@ config.yaml
 marketing/netlify_build/
 # Claude Code session/editor state — local only
 .claude/
+config.yaml.*
