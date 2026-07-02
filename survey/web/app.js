@@ -1516,9 +1516,10 @@ function inspectByFreq(center, label, mode) {
   const tuneId = (App.tuneId = (App.tuneId || 0) + 1);
   App.inspCenter = center; App.inspLabel = label;   // for mode <select> re-tune
   App.demodMhz = center;                             // demod tuner starts at band center (offset 0)
+  App._lastSpecSeq = null;                           // new tune → first frame always draws
   $("inspect-panel").style.display = "";
   $("insp-title").textContent = `${fmtF(center)} · ${label || ""}`;   // fmtF already carries the unit
-  $("inspect-panel").scrollIntoView({ behavior: "smooth", block: "center" });
+  $("inspect-panel").scrollIntoView({ block: "center" });   // instant — no smooth-scroll animation delay
   const ao = $("insp-analyze-out"); if (ao) ao.style.display = "none";
   loadRecordings();
   stopSpectrumPoll();
@@ -1725,6 +1726,11 @@ function startSpectrumPoll() {
     catch (e) { busy = false; return; }
     busy = false;
     if (!s || s.center_mhz == null) return;
+    // skip redundant redraws: the server stamps each frame with a monotonic seq;
+    // at low frame rates most polls return the SAME frame, so only redraw on new ones
+    // (also stops the 60 s signal-history from being oversampled with duplicate points).
+    if (s.seq != null && s.seq === App._lastSpecSeq) { $("insp-msg").textContent = "● live"; return; }
+    App._lastSpecSeq = s.seq;
     if (s.mode) $("insp-mode").value = s.mode;
     $("insp-msg").textContent = "● live";
     const mode = s.mode || ($("insp-mode") || {}).value;
@@ -1744,11 +1750,18 @@ function stopSpectrumPoll() {
 
 function smoothSpectrumTrace(p) {
   const n = p.length;
+  const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
   if (!App._specSmooth || App._specSmooth.length !== n) {
-    App._specSmooth = p.slice();
+    App._specSmooth = p.slice(); App._specSmoothT = now;
     return App._specSmooth;
   }
-  const decay = 0.18;
+  // instant attack, TIME-BASED fall (tau seconds): the trace tracks the radio at the
+  // same wall-clock speed regardless of frame rate, so falling signals don't linger
+  // for seconds when frames are slow (the old per-frame 0.18 decay did exactly that).
+  const dt = Math.max(0, (now - (App._specSmoothT || now)) / 1000);
+  App._specSmoothT = now;
+  const tau = 0.12;
+  const decay = dt > 0 ? (1 - Math.exp(-dt / tau)) : 0.5;
   for (let i = 0; i < n; i++) {
     const raw = p[i], prev = App._specSmooth[i];
     App._specSmooth[i] = raw > prev ? raw : prev - (prev - raw) * decay;
