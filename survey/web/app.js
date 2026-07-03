@@ -1380,7 +1380,8 @@ function freqLinkDelegate(e) {
   e.preventDefault();
   e.stopPropagation();
   if (a.dataset.huntIdx != null) { huntStep(parseInt(a.dataset.huntIdx, 10)); return; }
-  listenAt(parseFloat(a.dataset.center), a.dataset.label || "", a.dataset.mode || undefined);
+  const sid = a.dataset.sid ? parseInt(a.dataset.sid, 10) : null;
+  listenAt(parseFloat(a.dataset.center), a.dataset.label || "", a.dataset.mode || undefined, sid, a.dataset.attr || null);
 }
 ["tbl-anomalies", "tbl-signals", "tbl-wiki", "tbl-hunt", "tbl-triage", "tbl-live-ledger"].forEach(id => {
   const el = $(id);
@@ -1561,11 +1562,16 @@ function drawSignalHistory(cv) {
 // an optional demod override (WFM/NFM/AM/USB/LSB/CW); omit to let the backend
 // pick_mode / the <select> decide. The `tuneId` guards against a stale async
 // fallback stomping a newer tune (multiple lists can drive the same panel).
-function inspectByFreq(center, label, mode) {
+function inspectByFreq(center, label, mode, sid, attr) {
   const tuneId = (App.tuneId = (App.tuneId || 0) + 1);
   App.inspCenter = center; App.inspLabel = label;   // for mode <select> re-tune
   App.demodMhz = center;                             // demod tuner starts at band center (offset 0)
   App.demodBwHz = null;                              // new signal -> per-mode default channel width
+  if (arguments.length >= 4) {                       // opened from a detected signal (has an id)
+    App.inspSignalId = (sid != null && !isNaN(sid)) ? sid : null;
+    App.inspAttribution = attr || "unassessed";
+  }
+  renderInspAttribution();
   if ($("insp-bw")) $("insp-bw").value = "auto";
   App._lastSpecSeq = null;                           // new tune → first frame always draws
   $("inspect-panel").style.display = "";
@@ -1690,13 +1696,13 @@ function setInspNav(enabled) {
 
 // Entry point for the NON-baseline lists (Results / detected signals / Wiki).
 // Disables Next/Prev (no list to step) and tunes the given center+label.
-function listenAt(center, label, mode) {
+function listenAt(center, label, mode, sid, attr) {
   if (center == null || isNaN(center)) return;
   stopAuto();                       // a manual freq pick takes manual control
   App.inspContext = "freq";
   App.inspIdx = null;
   setInspNav(false);
-  inspectByFreq(center, label, mode);
+  inspectByFreq(center, label, mode, sid, attr);
 }
 
 /* ---------- signal hunt: step the not-in-baseline (unknown) emitters ---------- */
@@ -2201,14 +2207,14 @@ function triageRow(s) {
   const lbl = (s.matched_label || s.classification || "signal").replace(/'/g, "");
   return `<tr data-sid="${s.id}" class="${isThreat ? "threat-row" : ""}">` +
     `<td>${(s.anomaly_score || 0).toFixed(0)}${isThreat ? '<br><span class="threat-tag">● THREAT</span>' : ''}</td>` +
-    `<td><a href="#" class="freqlink" data-center="${s.center_mhz}" data-label="${esc(lbl)}">${fmtF(s.center_mhz)}</a></td>` +
+    `<td><a href="#" class="freqlink" data-center="${s.center_mhz}" data-sid="${s.id}" data-attr="${s.attribution_status || "unassessed"}" data-label="${esc(lbl)}">${fmtF(s.center_mhz)}</a></td>` +
     `<td class="note">${esc(s.room || "—")}</td>` +
     `<td><span class="pill ${s.classification}">${esc(statusLabel(s.classification))}</span>${s.caution ? " ⚠" : ""}</td>` +
     `<td>${novel}</td>` +
     `<td>${btns}<div class="note" style="margin-top:2px">${st === "unreviewed" ? "— unreviewed" : esc(TRIAGE_LABELS[st] || st)}</div></td>` +
     `<td>${attributionCell(s)}</td>` +
     `<td><input class="triage-note" data-sid="${s.id}" value="${esc(s.triage_notes || "")}" placeholder="notes…" style="width:150px"></td>` +
-    `<td><button class="btn" onclick="monitorFreq(${s.center_mhz},'${esc(lbl)}')">▶ monitor</button></td>` +
+    `<td><button class="btn" onclick="monitorFreq(${s.center_mhz},'${esc(lbl)}',${s.id},'${s.attribution_status || "unassessed"}')">▶ monitor</button></td>` +
     `</tr>`;
 }
 
@@ -2309,9 +2315,38 @@ async function maybeOpenTriageAfterSweep(sweepId) {
 
 // Open the monitor on a triaged signal and auto-run ANALYZE so the operator sees
 // WHAT it is (receive + identify), not just a power trace.
-function monitorFreq(center, label) {
-  listenAt(center, label);
+function monitorFreq(center, label, sid, attr) {
+  listenAt(center, label, undefined, sid != null ? sid : null, attr || null);
   setTimeout(analyzeSignal, 400);
+}
+
+// Attribution controls in the MONITOR panel — identify AND attribute a signal in
+// one place (only shown when the panel was opened from a detected signal w/ an id).
+function renderInspAttribution() {
+  const el = $("insp-attribution");
+  if (!el) return;
+  if (App.inspSignalId == null) { el.style.display = "none"; return; }
+  const cur = App.inspAttribution || "unassessed";
+  const btns = Object.keys(ATTRIBUTION_LABELS).map(k =>
+    `<button class="btn ${cur === k ? "primary" : ""}" style="padding:2px 6px;font-size:11px" ` +
+    `title="${esc(ATTRIBUTION_TITLES[k])}" onclick="setInspAttribution('${k}')">${ATTRIBUTION_LABELS[k]}</button>`).join(" ");
+  el.innerHTML = `<span class="note">About the client?</span> ${btns} ` +
+    `<button class="btn" style="padding:2px 6px;font-size:11px" ` +
+    `title="Decode this signal's CONTENT — lawful only for the client's own space/device; logs an ECPA acknowledgment" ` +
+    `onclick="ecpaOverride(${App.inspSignalId}, ${App.inspCenter})">⚖ decode…</button>` +
+    (cur !== "unassessed"
+      ? `<span class="note"${cur === "client_space" ? ' style="color:var(--red)"' : ''}> · ${esc(ATTRIBUTION_LABELS[cur])}</span>`
+      : "");
+  el.style.display = "";
+}
+
+async function setInspAttribution(status) {
+  if (App.inspSignalId == null) return;
+  try { await api(`/api/signals/${App.inspSignalId}/attribution`, { status }); }
+  catch (e) { alert("Attribution failed: " + (e.message || e)); return; }
+  App.inspAttribution = status;
+  renderInspAttribution();
+  if (App.triage && App.triage.signals) loadTriage();   // keep the triage tab in sync
 }
 if ($("btn-triage-load")) $("btn-triage-load").onclick = () => {
   const flash = $("triage-flash");
@@ -2925,7 +2960,8 @@ async function loadResults() {
       "<th>In/Out Δ</th><th>Strongest room</th><th>Class</th><th>Why not verified</th><th></th></tr>" +
       anomalies.map(s =>
         `<tr><td class="${s.anomaly_score >= 60 ? "score-hi" : "score-md"}">${(s.anomaly_score || 0).toFixed(0)}</td>` +
-        `<td><a href="#" class="freqlink" data-center="${s.center_mhz}" ` +
+        `<td><a href="#" class="freqlink" data-center="${s.center_mhz}" data-sid="${s.id}" ` +
+        `data-attr="${s.attribution_status || "unassessed"}" ` +
         `data-label="${esc(s.matched_label || s.match_reason || "anomaly")}">${fmtF(s.center_mhz)}</a></td>` +
         `<td>${s.peak_dbm}</td><td>${s.bw_khz}</td>` +
         `<td>${((s.persistence || 0) * 100).toFixed(0)}%</td>` +
