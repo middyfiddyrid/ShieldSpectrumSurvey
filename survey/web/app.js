@@ -2115,7 +2115,10 @@ function triageFilteredSignals(signals) {
   const f = triageFilters();
   return (signals || []).filter(s => {
     const st = s.triage_status || "unreviewed";
-    if (f.status && st !== f.status) return false;
+    // a confirmed threat is NEVER hidden by the review-state filter — flagging a
+    // bug must not make it vanish from the list (only room/score still narrow it)
+    const isThreat = st === "flagged" || s.attribution_status === "client_space";
+    if (f.status && st !== f.status && !isThreat) return false;
     if (f.novelOnly && !s.is_novel_to_address) return false;
     if (f.minScore != null && (s.anomaly_score || 0) < f.minScore) return false;
     if (f.room && (s.room || "") !== f.room) return false;
