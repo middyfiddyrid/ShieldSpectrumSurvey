@@ -2914,12 +2914,44 @@ async function loadResults() {
         `<td><span class="pill ${s.classification}">${esc(statusLabel(s.classification))}</span>${s.caution ? " ⚠" : ""}</td>` +
         `<td style="max-width:300px">${esc(s.match_reason)}</td>` +
         `<td><button class="btn" onclick="captureOne(${s.id})">CAPTURE</button></td></tr>`).join("");
+    renderFindingsSummary(anomalies);
   } catch (e) {}
   loadHunt();
   loadSignals();
   loadReports();
   loadExpected();
   loadReportOptions();
+}
+
+// One-glance verdict for the operator + client: unexplained anomalies, how many
+// were flagged as threats (decision=flagged or attribution=client_space), cleared,
+// and how many still need review. Threat count turns red when > 0.
+async function renderFindingsSummary(anomalies) {
+  const el = $("results-summary");
+  if (!el) return;
+  let sigs = [];
+  let remaining = null;
+  try {
+    const tri = await api("/api/triage/last");
+    sigs = tri.signals || [];
+    remaining = tri.remaining_unexplained;
+  } catch (e) { /* summary still shows anomaly count without triage detail */ }
+  const threats = sigs.filter(s => s.triage_status === "flagged" ||
+                                   s.attribution_status === "client_space").length;
+  const cleared = sigs.filter(s => s.triage_status === "cleared").length;
+  const chip = (val, label, style) =>
+    `<span style="display:inline-block;margin-right:22px">` +
+    `<b style="font-size:19px;${style || ""}">${val}</b> <span class="note">${label}</span></span>`;
+  el.innerHTML =
+    `<div style="display:flex;align-items:center;flex-wrap:wrap">` +
+    chip(anomalies.length, "unexplained anomalies", anomalies.length ? "color:var(--amber)" : "color:var(--green)") +
+    chip(threats, threats ? "flagged as THREATS ●" : "flagged as threats",
+         threats ? "color:var(--red)" : "color:var(--dim)") +
+    chip(cleared, "cleared", "color:var(--green)") +
+    (remaining != null ? chip(remaining, "still to review",
+         remaining ? "color:var(--amber)" : "color:var(--green)") : "") +
+    `</div>`;
+  el.style.display = "";
 }
 
 async function loadReportOptions() {
