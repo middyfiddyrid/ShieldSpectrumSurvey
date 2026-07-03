@@ -15,6 +15,11 @@ _LOCK = threading.Lock()
 # 'unreviewed' is the default state; the rest are operator decisions.
 TRIAGE_STATUSES = ("unreviewed", "cleared", "suspect", "flagged", "ask_client")
 TRIAGE_DECISIONS = ("cleared", "suspect", "flagged", "ask_client")
+# Attribution: is a detection capturing THE CLIENT'S OWN environment (their space,
+# their conversations)? That is the legal line for demodulating content (ECPA safe
+# harbor = premises-owner consent). third_party/infrastructure => do NOT decode content.
+ATTRIBUTION_STATUSES = ("unassessed", "client_space", "third_party",
+                        "infrastructure", "inconclusive")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -196,6 +201,20 @@ CREATE TABLE IF NOT EXISTS recordings (
     created_utc REAL,
     notes TEXT DEFAULT ''
 );
+-- ECPA force-decode audit log: every time the operator overrides the attribution
+-- gate to decode a signal NOT attributed to the client, it is recorded here with
+-- their acknowledgment + reason. This is the legal artifact; it is never deleted.
+CREATE TABLE IF NOT EXISTS decode_overrides (
+    id INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL,
+    signal_id INTEGER,
+    center_mhz REAL,
+    mode TEXT DEFAULT '',
+    operator TEXT DEFAULT '',
+    ecpa_ack INTEGER DEFAULT 0,        -- 1 = operator acknowledged the ECPA warning
+    reason TEXT DEFAULT '',
+    created_utc REAL
+);
 CREATE INDEX IF NOT EXISTS idx_baseline_session ON baseline(session_id);
 CREATE INDEX IF NOT EXISTS idx_signals_session ON signals(session_id);
 CREATE INDEX IF NOT EXISTS idx_segments_sweep ON segments(sweep_id);
@@ -259,6 +278,13 @@ class Database:
                 c.execute("ALTER TABLE signals ADD COLUMN group_key TEXT DEFAULT ''")
             if "group_label" not in cols:
                 c.execute("ALTER TABLE signals ADD COLUMN group_label TEXT DEFAULT ''")
+            if "attribution_status" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN "
+                          "attribution_status TEXT DEFAULT 'unassessed'")
+            if "attribution_notes" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN attribution_notes TEXT DEFAULT ''")
+            if "attribution_updated_utc" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN attribution_updated_utc REAL")
 
     def _conn(self):
         conn = sqlite3.connect(self.path, timeout=30)
@@ -330,6 +356,31 @@ class Database:
         return self.query_one(
             "SELECT id, triage_status, triage_notes, triage_updated_utc "
             "FROM signals WHERE id=? AND session_id=?", (signal_id, session_id))
+
+    def set_signal_attribution(self, signal_id, session_id, status, notes=""):
+        """Record whether a detection is capturing the CLIENT'S space (a threat) vs a
+        third party / infrastructure (move along). Session-scoped. Returns the row."""
+        self.execute(
+            "UPDATE signals SET attribution_status=?, attribution_notes=?, "
+            "attribution_updated_utc=? WHERE id=? AND session_id=?",
+            (status, notes, time.time(), signal_id, session_id))
+        return self.query_one(
+            "SELECT id, attribution_status, attribution_notes, attribution_updated_utc "
+            "FROM signals WHERE id=? AND session_id=?", (signal_id, session_id))
+
+    def add_decode_override(self, session_id, signal_id, center_mhz, mode,
+                            operator, reason):
+        """Append an ECPA force-decode acknowledgment to the immutable audit log."""
+        rid = self.execute(
+            "INSERT INTO decode_overrides (session_id, signal_id, center_mhz, mode, "
+            "operator, ecpa_ack, reason, created_utc) VALUES (?,?,?,?,?,1,?,?)",
+            (session_id, signal_id, center_mhz, mode, operator, reason, time.time()))
+        return self.query_one("SELECT * FROM decode_overrides WHERE id=?", (rid,))
+
+    def list_decode_overrides(self, session_id):
+        return self.query(
+            "SELECT * FROM decode_overrides WHERE session_id=? ORDER BY created_utc DESC",
+            (session_id,))
 
     def bulk_set_signal_triage(self, signal_ids, session_id, status, notes=""):
         """Apply the same triage decision to many signals in one session."""

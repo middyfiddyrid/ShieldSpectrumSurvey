@@ -11,7 +11,7 @@ from flask import (Flask, Response, jsonify, request, send_file,
 
 from .baseline.base import DiskCache
 from .baseline.manager import build_baseline
-from .db import TRIAGE_DECISIONS
+from .db import TRIAGE_DECISIONS, ATTRIBUTION_STATUSES
 from .correlation import compute_room_localization
 from .geocode import geocode
 from .report import export_csv, generate_report
@@ -95,7 +95,8 @@ def create_app(db, cfg, demo=False) -> Flask:
     # address-novelty history are operator-internal too.
     DEMO_BLOCKED = ("/api/poi", "/api/report/internal_memo",
                     "/api/analyze/threat_vectors", "/api/case_files", "/case_files",
-                    "/api/triage", "/api/novelty", "/api/record")
+                    "/api/triage", "/api/novelty", "/api/record",
+                    "/api/attribution", "/api/decode/override")
 
     @app.before_request
     def _demo_guard():
@@ -1338,7 +1339,8 @@ def create_app(db, cfg, demo=False) -> Flask:
         rows = db.query(
             "SELECT id, center_mhz, bw_khz, peak_dbm, persistence, classification, "
             "matched_label, match_reason, caution, anomaly_score, room, module, "
-            "is_novel_to_address, novelty_reason, triage_status, triage_notes "
+            "is_novel_to_address, novelty_reason, triage_status, triage_notes, "
+            "attribution_status, attribution_notes "
             "FROM signals WHERE sweep_id=? AND (classification!='VERIFIED' OR caution=1) "
             "ORDER BY anomaly_score DESC, center_mhz", (sweep["id"],))
         counts = {}
@@ -1367,6 +1369,56 @@ def create_app(db, cfg, demo=False) -> Flask:
         row = db.set_signal_triage(signal_id, session["id"], status,
                                    body.get("notes", ""))
         return jsonify(row)
+
+    @app.post("/api/signals/<int:signal_id>/attribution")
+    def signal_attribution(signal_id):
+        """Record whether this detection captures the CLIENT'S own environment.
+        client_space => a bug targeting the client (escalate + IQ evidence).
+        third_party / infrastructure => do NOT decode content — move along."""
+        session = st.session()
+        if not session:
+            return err("no session")
+        body = request.get_json(force=True)
+        status = (body.get("status") or "").strip()
+        if status not in ATTRIBUTION_STATUSES:
+            return err(f"status must be one of {', '.join(ATTRIBUTION_STATUSES)}")
+        exists = db.query_one("SELECT id FROM signals WHERE id=? AND session_id=?",
+                              (signal_id, session["id"]))
+        if not exists:
+            return err("signal not found in this session", 404)
+        row = db.set_signal_attribution(signal_id, session["id"], status,
+                                        body.get("notes", ""))
+        return jsonify(row)
+
+    @app.post("/api/decode/override")
+    def decode_override():
+        """Log an ECPA force-decode override. Decoding the CONTENT of a signal that
+        is NOT attributed to the client is potentially unlawful interception
+        (18 U.S.C. 2511); the operator may proceed at their own documented
+        discretion, but ONLY with an explicit acknowledgment recorded here. Requires
+        ecpa_ack=true + a reason. Returns the immutable audit row."""
+        session = st.session()
+        if not session:
+            return err("no session")
+        body = request.get_json(force=True)
+        if not body.get("ecpa_ack"):
+            return err("ecpa_ack (acknowledgment of the ECPA warning) is required", 400)
+        reason = (body.get("reason") or "").strip()
+        if not reason:
+            return err("a reason for the override is required for the audit log", 400)
+        row = db.add_decode_override(
+            session["id"], body.get("signal_id"), body.get("center_mhz"),
+            (body.get("mode") or "").strip(),
+            (body.get("operator") or session.get("operator") or "").strip(), reason)
+        return jsonify(row)
+
+    @app.get("/api/decode/overrides")
+    def decode_overrides_list():
+        """The ECPA override audit log for this session (internal only)."""
+        session = st.session()
+        if not session:
+            return err("no session")
+        return jsonify(db.list_decode_overrides(session["id"]))
 
     @app.post("/api/triage/bulk")
     def triage_bulk():

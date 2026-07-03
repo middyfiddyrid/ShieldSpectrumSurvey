@@ -2071,6 +2071,14 @@ if ($("insp-record-iq")) $("insp-record-iq").onclick = () => toggleRecord("iq");
 
 /* ---------- MANUAL gated triage (post-hoc, no radio) ---------- */
 const TRIAGE_LABELS = { cleared: "Cleared", suspect: "Suspect", flagged: "Flag", ask_client: "Ask client" };
+// Attribution: is this detection capturing THE CLIENT'S OWN space? (the legal line for decoding content)
+const ATTRIBUTION_LABELS = { client_space: "Client's space ⚠", third_party: "Third-party",
+                             infrastructure: "Infrastructure", inconclusive: "Inconclusive" };
+const ATTRIBUTION_TITLES = {
+  client_space: "Confirmed capturing the CLIENT's own environment — a bug targeting them. Escalate + capture IQ evidence.",
+  third_party: "Someone else's signal (neighbor, passer-by). Do NOT decode its content — move along.",
+  infrastructure: "External / expected infrastructure (tower, broadcast). Not about the client.",
+  inconclusive: "Can't yet tell — needs more assessment (location, demod of the client's own space)." };
 
 function triageFilters() {
   const minScore = parseFloat(($("triage-filter-score") || {}).value);
@@ -2123,7 +2131,7 @@ function renderTriageTable() {
   }
   tb.innerHTML =
     "<tr><th>Score</th><th>Frequency</th><th>Room</th><th>Class</th><th>Novel?</th>" +
-    "<th>Decision</th><th>Notes</th><th>Monitor</th></tr>" +
+    "<th>Decision</th><th>Attribution (about the client?)</th><th>Notes</th><th>Monitor</th></tr>" +
     visible.map(triageRow).join("");
 }
 
@@ -2172,6 +2180,7 @@ function triageRow(s) {
     `<td><span class="pill ${s.classification}">${esc(statusLabel(s.classification))}</span>${s.caution ? " ⚠" : ""}</td>` +
     `<td>${novel}</td>` +
     `<td>${btns}<div class="note" style="margin-top:2px">${st === "unreviewed" ? "— unreviewed" : esc(TRIAGE_LABELS[st] || st)}</div></td>` +
+    `<td>${attributionCell(s)}</td>` +
     `<td><input class="triage-note" data-sid="${s.id}" value="${esc(s.triage_notes || "")}" placeholder="notes…" style="width:150px"></td>` +
     `<td><button class="btn" onclick="monitorFreq(${s.center_mhz},'${esc(lbl)}')">▶ monitor</button></td>` +
     `</tr>`;
@@ -2183,6 +2192,45 @@ async function triageDecide(id, status) {
   try { await api(`/api/signals/${id}/triage`, { status, notes }); }
   catch (e) { alert("Triage failed: " + (e.message || e)); return; }
   loadTriage();
+}
+
+// Attribution buttons + the ECPA-gated force-decode override, per signal.
+function attributionCell(s) {
+  const ast = s.attribution_status || "unassessed";
+  const btns = Object.keys(ATTRIBUTION_LABELS).map(k =>
+    `<button class="btn ${ast === k ? "primary" : ""}" style="padding:2px 5px;font-size:11px" ` +
+    `title="${esc(ATTRIBUTION_TITLES[k])}" onclick="triageAttribute(${s.id},'${k}')">${ATTRIBUTION_LABELS[k]}</button>`).join(" ");
+  const decodeBtn = `<button class="btn" style="padding:2px 5px;font-size:11px" ` +
+    `title="Decode this signal's CONTENT. Lawful only for the client's own space/device — logs an ECPA acknowledgment." ` +
+    `onclick="ecpaOverride(${s.id},${s.center_mhz})">⚖ decode…</button>`;
+  const state = ast === "unassessed" ? "" :
+    `<div class="note" style="margin-top:2px${ast === "client_space" ? ";color:#ff6b6b" : ""}">${esc(ATTRIBUTION_LABELS[ast])}</div>`;
+  return btns + " " + decodeBtn + state;
+}
+
+async function triageAttribute(id, status) {
+  const noteEl = document.querySelector(`.triage-note[data-sid="${id}"]`);
+  const notes = noteEl ? noteEl.value : "";
+  try { await api(`/api/signals/${id}/attribution`, { status, notes }); }
+  catch (e) { alert("Attribution failed: " + (e.message || e)); return; }
+  loadTriage();
+}
+
+async function ecpaOverride(id, center) {
+  const ok = confirm(
+`ECPA / Wiretap Act warning (18 U.S.C. §2511)
+
+Decoding the CONTENT of a communication that is NOT your client's own may be unlawful interception. Proceed ONLY for a signal you have a lawful basis to decode — the client's own space or device.
+
+This override will be LOGGED with your acknowledgment. Continue?`);
+  if (!ok) return;
+  const reason = prompt("Reason / lawful basis for decoding this signal (recorded in the audit log):", "");
+  if (!reason) { alert("A reason is required — override NOT logged."); return; }
+  try {
+    const row = await api("/api/decode/override",
+      { ecpa_ack: true, reason, signal_id: id, center_mhz: center });
+    alert("Override logged (audit id " + row.id + "). You may now decode this signal in the monitor.");
+  } catch (e) { alert("Override failed: " + (e.message || e)); }
 }
 
 async function triageBulk(status, notes, predicate) {
