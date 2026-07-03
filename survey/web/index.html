@@ -32,6 +32,8 @@ a.report-ready { color:var(--green); background:#103c2c; border:1px solid var(--
 a.report-ready:hover { background:var(--green); color:#0b0f14; }
 #report-msg { white-space:nowrap; }
 a.freqlink { color:var(--cyan); text-decoration:none; font-weight:bold; cursor:pointer; }
+.ctl-sep { width:1px; align-self:stretch; min-height:20px; background:var(--line); margin:0 3px; }
+.ctl-push { margin-left:auto; }
 a.freqlink:hover { color:#fff; text-decoration:underline; }
 
 main { display:flex; flex:1; min-height:0; }
@@ -400,14 +402,18 @@ body.demo #card-casefiles { display:none !important; }
       <select id="insp-mode">
         <option value="nfm">NFM</option><option value="wfm">WFM</option><option value="am">AM</option><option value="usb">USB</option><option value="lsb">LSB</option><option value="cw">CW</option><option value="pocsag">POCSAG (decode)</option><option value="flex">FLEX (decode)</option><option value="ook">OOK/FSK device (decode)</option><option value="dtmf">DTMF (decode)</option>
       </select>
+      <span class="ctl-sep"></span>
+      <label class="note" title="step through the hunt list of unknown signals">hunt</label>
       <button class="btn" id="insp-prev" title="previous signal">◂</button>
       <button class="btn" id="insp-next" title="next signal">▸</button>
       <button class="btn" id="insp-auto" title="auto-advance through the hunt list">AUTO ▸▸</button>
       <label class="note">dwell <input id="insp-dwell" type="number" value="6" min="3" step="1" style="width:44px"></label>
+      <span class="ctl-sep"></span>
+      <label class="note" title="actions on THIS signal">act</label>
       <button class="btn primary" id="insp-analyze" title="receive & identify — what IS this signal & what's it transmitting?">◎ ANALYZE</button>
       <button class="btn" id="insp-record" title="record demodulated audio of this signal">● REC</button>
       <button class="btn" id="insp-record-iq" title="capture RAW IQ as forensic evidence (encrypted / unknown intruder — for authorities)">⦿ IQ</button>
-      <button class="btn" id="insp-close">Close ✕</button>
+      <button class="btn ctl-push" id="insp-close">Close ✕</button>
       <span id="insp-msg" class="note"></span>
     </div>
     <p id="insp-note" class="note"></p>
