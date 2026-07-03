@@ -121,6 +121,7 @@ function show(view) {
   if (view === "poi") loadPoi();
   if (view === "cases") loadCases();
   if (view === "triage") loadTriage();
+  if (view === "sweep") renderDeviceRoles();
 }
 
 /* ---------- engagement / pre-sweep ---------- */
@@ -1040,23 +1041,39 @@ $("btn-create").onclick = async () => {
 /* DEVICE card: plain-language "who is doing what" line so the operator can SEE
    dual-radio mode working (connections reset on every app restart). */
 async function renderDeviceRoles() {
-  const el = $("device-roles");
-  if (!el) return;
-  try {
-    const r = await api("/api/device/roles");
-    if (!r.roles || !r.roles.length) { el.style.display = "none"; return; }
-    const name = s => s === "pluto" ? "Pluto" : "RF Explorer";
-    const job  = x => x.role === "sweeper" ? "runs the sweep"
-                    : x.role === "monitor" ? "listens/analyzes signals"
-                    : "connected (idle)";
-    el.innerHTML = r.roles.map(x =>
-      `<b>${name(x.source)}</b> — ${job(x)}${x.busy ? " (busy)" : ""}`).join(" &nbsp;·&nbsp; ");
-    if (r.concurrent_enabled && r.roles.length >= 2)
-      el.innerHTML += ` &nbsp;·&nbsp; <b style="color:var(--ok,#4c8)">BOTH RADIOS ACTIVE</b> — you can inspect signals while a sweep runs`;
-    else if (r.concurrent_enabled && r.roles.length === 1)
-      el.innerHTML += ` &nbsp;·&nbsp; connect the other radio too to inspect during sweeps`;
-    el.style.display = "";
-  } catch (_) { el.style.display = "none"; }
+  const el = $("device-roles");     // DEVICE card (Session tab)
+  const sw = $("sweep-radio-ready"); // readiness line on the Sweep screen
+  if (!el && !sw) return;
+  let r;
+  try { r = await api("/api/device/roles"); }
+  catch (_) { if (el) el.style.display = "none"; if (sw) sw.textContent = ""; return; }
+  const name = s => s === "pluto" ? "Pluto" : "RF Explorer";
+  const roles = r.roles || [];
+  if (el) {
+    if (!roles.length) { el.style.display = "none"; }
+    else {
+      const job = x => x.role === "sweeper" ? "runs the sweep"
+                     : x.role === "monitor" ? "listens/analyzes signals" : "connected (idle)";
+      el.innerHTML = roles.map(x =>
+        `<b>${name(x.source)}</b> — ${job(x)}${x.busy ? " (busy)" : ""}`).join(" &nbsp;·&nbsp; ");
+      if (r.concurrent_enabled && roles.length >= 2)
+        el.innerHTML += ` &nbsp;·&nbsp; <b style="color:var(--green)">BOTH RADIOS ACTIVE</b> — you can inspect signals while a sweep runs`;
+      else if (r.concurrent_enabled && roles.length === 1)
+        el.innerHTML += ` &nbsp;·&nbsp; connect the other radio too to inspect during sweeps`;
+      el.style.display = "";
+    }
+  }
+  if (sw) {
+    const have = new Set(roles.map(x => x.source));
+    if (!roles.length)
+      sw.innerHTML = `<span style="color:var(--dim)">No radio connected — connect one on the Session tab (DEVICE) before sweeping.</span>`;
+    else if (r.concurrent_enabled && have.has("rfexplorer") && have.has("pluto"))
+      sw.innerHTML = `<span style="color:var(--green)">✓ Both radios ready</span> — the Pluto monitors while the RF Explorer sweeps, so you can inspect signals live mid-sweep.`;
+    else if (r.concurrent_enabled)
+      sw.innerHTML = `<span style="color:var(--amber)">⚠ Only ${name(roles[0].source)} connected.</span> Connect the Pluto too (Session tab › DEVICE) to inspect signals live during the sweep — the sweep still runs either way.`;
+    else
+      sw.innerHTML = `<b>${name(roles[0].source)}</b> connected — ready to sweep.`;
+  }
 }
 
 $("btn-connect").onclick = async () => {
