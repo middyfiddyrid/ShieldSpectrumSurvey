@@ -34,6 +34,11 @@ a.report-ready:hover { background:var(--green); color:#0b0f14; }
 a.freqlink { color:var(--cyan); text-decoration:none; font-weight:bold; cursor:pointer; }
 .ctl-sep { width:1px; align-self:stretch; min-height:20px; background:var(--line); margin:0 3px; }
 .ctl-push { margin-left:auto; }
+/* a detection that is FLAGGED or attributed to the client's own space is the
+   real threat — make the operator's eye jump straight to it */
+.threat-row td { background:rgba(231,76,60,.07) !important; }
+.threat-row td:first-child { box-shadow:inset 3px 0 0 var(--red); }
+.threat-tag { color:var(--red); font-weight:bold; font-size:10px; letter-spacing:.05em; }
 a.freqlink:hover { color:#fff; text-decoration:underline; }
 
 main { display:flex; flex:1; min-height:0; }

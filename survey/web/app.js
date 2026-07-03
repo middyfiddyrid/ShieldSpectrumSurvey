@@ -2172,13 +2172,15 @@ async function loadTriage() {
 function triageRow(s) {
   const st = s.triage_status || "unreviewed";
   const btns = Object.keys(TRIAGE_LABELS).map(k =>
-    `<button class="btn ${st === k ? "primary" : ""}" style="padding:2px 6px" ` +
+    `<button class="btn ${st === k ? "primary" : ""}" style="padding:2px 5px;font-size:11px" ` +
     `onclick="triageDecide(${s.id},'${k}')">${TRIAGE_LABELS[k]}</button>`).join(" ");
+  // the real threat: flagged, or confirmed capturing the client's own space
+  const isThreat = st === "flagged" || s.attribution_status === "client_space";
   const novel = s.is_novel_to_address
     ? `<span class="pill" style="color:#ffd24a" title="${esc(s.novelty_reason || "")}">▲ NEW</span>` : "";
   const lbl = (s.matched_label || s.classification || "signal").replace(/'/g, "");
-  return `<tr data-sid="${s.id}">` +
-    `<td>${(s.anomaly_score || 0).toFixed(0)}</td>` +
+  return `<tr data-sid="${s.id}" class="${isThreat ? "threat-row" : ""}">` +
+    `<td>${(s.anomaly_score || 0).toFixed(0)}${isThreat ? '<br><span class="threat-tag">● THREAT</span>' : ''}</td>` +
     `<td><a href="#" class="freqlink" data-center="${s.center_mhz}" data-label="${esc(lbl)}">${fmtF(s.center_mhz)}</a></td>` +
     `<td class="note">${esc(s.room || "—")}</td>` +
     `<td><span class="pill ${s.classification}">${esc(statusLabel(s.classification))}</span>${s.caution ? " ⚠" : ""}</td>` +
