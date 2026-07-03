@@ -2007,12 +2007,16 @@ function renderAnalyze(j) {
         `</div>`);
   }
   if (cands.length) {
-    rows.push("<div class='note' style='margin-top:4px'>CANDIDATES (sigidwiki — feature match, confirm by ear/eye):</div>");
+    rows.push("<div class='note' style='margin-top:4px'>CANDIDATES (device catalog + sigidwiki — feature match, confirm by ear/eye):</div>");
     rows.push("<table><tr><th>Signal</th><th>Class</th><th>BW</th><th>TSCM note</th><th></th></tr>" +
-      cands.map(c => `<tr><td>${esc(c.name)}</td><td>${esc(c.class)}</td><td>${c.bandwidth_khz} kHz</td>` +
+      cands.map(c => `<tr><td>${esc(c.name)}` +
+        (c.device_class ? `<br><span class="note">${esc(c.device_class)}</span>` : "") + `</td>` +
+        `<td>${esc(c.class)}</td><td>${c.bandwidth_khz} kHz</td>` +
         `<td class="note" style="max-width:240px">${esc(c.tscm || "")}</td>` +
         `<td><a href="${esc(c.url)}" target="_blank" rel="noopener" class="note">ref ↗</a></td></tr>`).join("") +
       "</table>");
+    const topCat = cands.find(c => c.device_class);
+    if (topCat) rows.push(catalogDetail(topCat));
   }
   out.innerHTML = rows.join("");
   out.style.display = "";
@@ -2605,6 +2609,22 @@ function renderSegPanel(st) {
 }
 
 /* ---------- sigidwiki signal identification ---------- */
+// A matched catalog signature carries its parent device class + how to confirm it
+// + what it might innocently be. Render that as a compact profile card (empty for
+// plain sigidwiki entries, which have no device_class).
+function catalogDetail(c) {
+  if (!c || !c.device_class) return "";
+  const steps = (c.confirm_steps || []).length
+    ? `<div style="margin-top:5px"><b>How to confirm:</b><ul style="margin:3px 0 0 16px;padding:0">`
+      + c.confirm_steps.map(x => `<li>${esc(x)}</li>`).join("") + `</ul></div>` : "";
+  const fps = (c.false_positive_overlap || []).length
+    ? `<div style="margin-top:5px"><b>Might innocently be:</b> <span class="note">`
+      + c.false_positive_overlap.map(esc).join("; ") + `</span></div>` : "";
+  return `<div class="card" style="margin-top:8px;padding:10px;background:var(--panel2)">`
+    + `<div><span class="pill ANOMALY">DEVICE</span> <b>${esc(c.device_class)}</b></div>`
+    + steps + fps + `</div>`;
+}
+
 function renderIdentify(r) {
   let html = "";
   const f = r.features;
@@ -2625,12 +2645,15 @@ function renderIdentify(r) {
   }
   html += "<table><tr><th>Candidate</th><th>Score</th><th>Mode</th><th>Why it matched</th><th></th></tr>";
   for (const c of r.candidates) {
-    html += `<tr><td>${esc(c.name)}</td><td>${c.score}</td><td>${esc(c.mode)}</td>`
+    html += `<tr><td>${esc(c.name)}`
+      + (c.device_class ? `<br><span class="note">${esc(c.device_class)}</span>` : "")
+      + `</td><td>${c.score}</td><td>${esc(c.mode)}</td>`
       + `<td class="note">${c.reasons.map(esc).join("; ")}`
       + (c.tscm ? `<br><b>TSCM:</b> ${esc(c.tscm)}` : "") + "</td>"
-      + `<td><a href="${esc(c.url)}" target="_blank" rel="noopener">sigidwiki ↗</a></td></tr>`;
+      + `<td><a href="${esc(c.url)}" target="_blank" rel="noopener">ref ↗</a></td></tr>`;
   }
-  $("id-results").innerHTML = html + "</table>";
+  const topCat = r.candidates.find(c => c.device_class);
+  $("id-results").innerHTML = html + "</table>" + (topCat ? catalogDetail(topCat) : "");
 }
 
 $("btn-identify").onclick = async () => {
