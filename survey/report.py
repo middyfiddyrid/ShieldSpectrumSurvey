@@ -144,6 +144,16 @@ def _fmt_freq(mhz):
     return f"{mhz:.4f} MHz"
 
 
+def _why_cell(s):
+    """The 'why it didn't verify' cell: the classification reason plus, on its own
+    line, the plain-language explanation of how the anomaly score was reached."""
+    why = (s["match_reason"] or "")
+    reason = s.get("score_reason") or ""
+    if reason:
+        why = (why + "<br/>" + reason).lstrip("<br/>")
+    return why[:400]
+
+
 def _table(data, col_widths, header_bg=C_BG, font_size=7.5):
     t = Table(data, colWidths=col_widths, repeatRows=1)
     t.setStyle(TableStyle([
@@ -712,7 +722,7 @@ def generate_report(db, cfg, session_id: int, reports_dir: str) -> dict:
                 (s["strongest_room"] or "—") +
                 (f" (+{s['localization_score']:.0f} dB)" if s["localization_score"] else ""),
                 _class_label(s["classification"]),
-                Paragraph((s["match_reason"] or "")[:240], ss["Cell"])])
+                Paragraph(_why_cell(s), ss["Cell"])])
         el.append(_table(rows, [0.45 * inch, 0.95 * inch, 0.45 * inch, 0.5 * inch,
                                 0.6 * inch, 1.15 * inch, 0.75 * inch, 2.15 * inch]))
     else:
@@ -1127,8 +1137,8 @@ def export_csv(db, session_id: int, out_dir: str) -> str:
                        (session_id,))
     cols = ["center_mhz", "bw_khz", "peak_dbm", "avg_dbm", "floor_dbm", "persistence",
             "phase", "module", "room", "classification", "matched_label", "match_reason",
-            "caution", "anomaly_score", "interior_delta_db", "localization_score",
-            "strongest_room"]
+            "caution", "anomaly_score", "score_reason", "interior_delta_db",
+            "localization_score", "strongest_room"]
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = _csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         w.writeheader()

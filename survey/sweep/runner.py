@@ -23,8 +23,8 @@ import os
 import threading
 import time
 
-from ..correlation import (_matches, anomaly_score, classify_signal,
-                           compute_interior_delta, compute_room_localization)
+from ..correlation import (_matches, classify_signal, compute_interior_delta,
+                           compute_room_localization, explain_anomaly_score)
 from ..expected import expected_for_range
 from .detector import Accumulator, detect_signals
 from .device import DeviceError
@@ -795,27 +795,27 @@ def postprocess_session(db, cfg, session_id: int):
                 break
         cls = classify_signal(s["center_mhz"], baseline_rows)
         gps_band = any(lo <= s["center_mhz"] <= hi for lo, hi in gps_bands)
-        score = anomaly_score(cls, s["persistence"], delta, loc_delta,
-                              interior_flag, room_flag, gps_band)
+        expl = explain_anomaly_score(cls, s["persistence"], delta, loc_delta,
+                                     interior_flag, room_flag, gps_band)
         db.execute(
             "UPDATE signals SET interior_delta_db=?, localization_score=?, "
-            "strongest_room=?, anomaly_score=?, classification=?, matched_label=?, "
-            "match_reason=?, caution=?, identity_tier=?, display_label=?, "
-            "group_key=?, group_label=? WHERE id=?",
+            "strongest_room=?, anomaly_score=?, score_reason=?, classification=?, "
+            "matched_label=?, match_reason=?, caution=?, identity_tier=?, "
+            "display_label=?, group_key=?, group_label=? WHERE id=?",
             (round(delta, 1) if delta is not None else None,
-             loc_delta, strongest, score, cls.classification, cls.matched_label,
-             cls.match_reason, int(cls.caution), cls.identity_tier,
+             loc_delta, strongest, expl.score, expl.summary, cls.classification,
+             cls.matched_label, cls.match_reason, int(cls.caution), cls.identity_tier,
              cls.display_label, cls.group_key, cls.group_label, s["id"]))
 
     # ambient signals get classified too (no localization boosts)
     for s in ambient:
         cls = classify_signal(s["center_mhz"], baseline_rows)
-        score = anomaly_score(cls, s["persistence"], None, None,
-                              interior_flag, room_flag)
+        expl = explain_anomaly_score(cls, s["persistence"], None, None,
+                                     interior_flag, room_flag)
         db.execute(
-            "UPDATE signals SET anomaly_score=?, classification=?, matched_label=?, "
-            "match_reason=?, caution=?, identity_tier=?, display_label=?, "
-            "group_key=?, group_label=? WHERE id=?",
-            (score, cls.classification, cls.matched_label, cls.match_reason,
-             int(cls.caution), cls.identity_tier, cls.display_label,
+            "UPDATE signals SET anomaly_score=?, score_reason=?, classification=?, "
+            "matched_label=?, match_reason=?, caution=?, identity_tier=?, "
+            "display_label=?, group_key=?, group_label=? WHERE id=?",
+            (expl.score, expl.summary, cls.classification, cls.matched_label,
+             cls.match_reason, int(cls.caution), cls.identity_tier, cls.display_label,
              cls.group_key, cls.group_label, s["id"]))

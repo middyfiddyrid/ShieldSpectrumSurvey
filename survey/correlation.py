@@ -255,28 +255,114 @@ def compute_room_localization(signals_by_room: dict[str, list[dict]]) -> dict:
     return out
 
 
+@dataclass
+class ScoreExplanation:
+    """The anomaly score AND why it landed where it did.
+
+    ``factors`` is an ordered list of {label, points, detail} — the first entry is
+    always the identification starting point; the rest are the behaviours that
+    raised it. ``summary`` is one plain-language sentence for the operator/client
+    (per Matt's plain-language-UI rule — no bare numbers with no explanation)."""
+    score: float
+    factors: list           # [{"label": str, "points": float, "detail": str}, ...]
+    summary: str
+
+
+def _score_summary(score: float, factors: list, capped: bool) -> str:
+    band = ("HIGH — investigate" if score >= 60 else
+            "MEDIUM — worth a look" if score >= 30 else
+            "LOW — likely normal")
+    raisers = [f for f in factors[1:] if f["points"] > 0]
+    if raisers:
+        why = "; ".join(f["label"].lower() for f in raisers)
+        s = f"Score {score:.0f}/100 — {band}. Raised by: {why}."
+    else:
+        s = (f"Score {score:.0f}/100 — {band}. From identification status alone — "
+             "nothing about how this signal behaved added to it.")
+    if capped:
+        s += " (Capped at 100.)"
+    return s
+
+
+def explain_anomaly_score(classification: Classification, persistence: Optional[float],
+                          interior_delta_db: Optional[float],
+                          localization_delta_db: Optional[float],
+                          interior_flag_db: float = 10.0, room_flag_db: float = 12.0,
+                          gps_band: bool = False) -> ScoreExplanation:
+    """Compute the 0-100 anomaly score AND a per-factor, plain-language breakdown.
+
+    The arithmetic is identical to the historical ``anomaly_score`` (which now just
+    returns ``.score``); this only ADDS the explanation so the UI/report never show
+    a naked number. Each factor states the threshold it cleared and the observed
+    value, so a client can read exactly why a signal is or isn't flagged."""
+    tier = classification.identity_tier or LEGACY_FROM_TIER.get(classification.classification, "ANOMALY")
+    factors: list = []
+    if tier == "IDENTIFIED":
+        base = BASE_SCORE["VERIFIED"]
+        base_detail = ("Identified — matches a known licensed signal or carrier "
+                       f"({classification.display_label or classification.matched_label or 'known source'}). "
+                       "Known sources start at the bottom of the scale.")
+    elif tier == "ANOMALY":
+        base = BASE_SCORE["UNVERIFIED"]
+        base_detail = ("Anomaly — no match in the licensed-signal database or any known "
+                       "allocation. Unexplained emitters start high on the scale.")
+    elif classification.caution:
+        base = BASE_SCORE["PLAUSIBLE_CAUTION"]
+        base_detail = ("In a known band, but one that surveillance devices commonly hide "
+                       "in — treated as suspect until it is located.")
+    else:
+        base = BASE_SCORE["PLAUSIBLE"]
+        base_detail = ("Inside a known allocation (correct band, no specific licensee "
+                       "matched) — most likely normal.")
+    factors.append({"label": "Starting point (identification)",
+                    "points": round(base, 1), "detail": base_detail})
+
+    score = base
+    if interior_delta_db is not None and interior_delta_db >= interior_flag_db:
+        pts = min(25.0, 10.0 + (interior_delta_db - interior_flag_db) * 1.5)
+        score += pts
+        factors.append({"label": "Louder inside than outside", "points": round(pts, 1),
+                        "detail": (f"{interior_delta_db:.0f} dB stronger inside the room than in the "
+                                   f"ambient/exterior reading (flags at ≥ {interior_flag_db:.0f} dB) — "
+                                   "points to a transmitter inside the space rather than a signal "
+                                   "coming from outside.")})
+    if localization_delta_db is not None and localization_delta_db >= room_flag_db:
+        pts = min(20.0, 8.0 + (localization_delta_db - room_flag_db) * 1.2)
+        score += pts
+        factors.append({"label": "Localizes to one room", "points": round(pts, 1),
+                        "detail": (f"Loudest in a single room by {localization_delta_db:.0f} dB "
+                                   f"(flags at ≥ {room_flag_db:.0f} dB) — consistent with the "
+                                   "source being physically in that room.")})
+    if persistence is not None:
+        if persistence >= 0.8:
+            score += 5.0
+            factors.append({"label": "Always on", "points": 5.0,
+                            "detail": (f"Present on {persistence * 100:.0f}% of sweep passes — a steady, "
+                                       "continuous transmitter, not a fleeting one-off hit.")})
+        elif persistence <= 0.2 and classification.caution:
+            score += 8.0
+            factors.append({"label": "Intermittent, in a suspect band", "points": 8.0,
+                            "detail": (f"Only on {persistence * 100:.0f}% of passes and sitting in a "
+                                       "suspect band — the bursty, duty-cycled behaviour of a device "
+                                       "that transmits occasionally.")})
+    if gps_band:
+        score += 15.0
+        factors.append({"label": "Energy in the GPS band", "points": 15.0,
+                        "detail": ("Real GPS sits below the noise floor, so a detectable carrier here "
+                                   "suggests a repeater, jammer, or spoofer.")})
+
+    capped = score > 100.0
+    score = round(min(score, 100.0), 1)
+    return ScoreExplanation(score=score, factors=factors,
+                            summary=_score_summary(score, factors, capped))
+
+
 def anomaly_score(classification: Classification, persistence: Optional[float],
                   interior_delta_db: Optional[float], localization_delta_db: Optional[float],
                   interior_flag_db: float = 10.0, room_flag_db: float = 12.0,
                   gps_band: bool = False) -> float:
-    tier = classification.identity_tier or LEGACY_FROM_TIER.get(classification.classification, "ANOMALY")
-    if tier == "IDENTIFIED":
-        base = BASE_SCORE["VERIFIED"]
-    elif tier == "ANOMALY":
-        base = BASE_SCORE["UNVERIFIED"]
-    else:
-        base = BASE_SCORE["PLAUSIBLE_CAUTION" if classification.caution else "PLAUSIBLE"]
-
-    score = base
-    if interior_delta_db is not None and interior_delta_db >= interior_flag_db:
-        score += min(25.0, 10.0 + (interior_delta_db - interior_flag_db) * 1.5)
-    if localization_delta_db is not None and localization_delta_db >= room_flag_db:
-        score += min(20.0, 8.0 + (localization_delta_db - room_flag_db) * 1.2)
-    if persistence is not None:
-        if persistence >= 0.8:
-            score += 5.0
-        elif persistence <= 0.2 and classification.caution:
-            score += 8.0
-    if gps_band:
-        score += 15.0
-    return round(min(score, 100.0), 1)
+    """Backward-compatible scalar entry point. See ``explain_anomaly_score`` for the
+    factor-by-factor breakdown that now backs it (identical arithmetic)."""
+    return explain_anomaly_score(
+        classification, persistence, interior_delta_db, localization_delta_db,
+        interior_flag_db, room_flag_db, gps_band).score

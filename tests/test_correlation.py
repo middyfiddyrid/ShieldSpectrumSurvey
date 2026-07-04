@@ -5,7 +5,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from survey.correlation import (  # noqa: E402
-    anomaly_score, classify_signal, compute_interior_delta, compute_room_localization)
+    anomaly_score, classify_signal, compute_interior_delta, compute_room_localization,
+    explain_anomaly_score)
 
 
 def rec(lo, hi, **kw):
@@ -145,6 +146,54 @@ class TestScoring(unittest.TestCase):
         c = classify_signal(412.0, BASELINE)
         s = anomaly_score(c, 0.05, interior_delta_db=60.0, localization_delta_db=40.0, gps_band=True)
         self.assertLessEqual(s, 100.0)
+
+
+class TestScoreExplanation(unittest.TestCase):
+    def test_score_matches_scalar_entrypoint(self):
+        # the explanation must carry the SAME number the legacy scalar returns
+        c = classify_signal(412.0, BASELINE)
+        for pers, idb, ldb, gps in [(0.95, 30.0, 20.0, False), (1.0, 0.0, 1.0, False),
+                                    (0.05, 60.0, 40.0, True), (0.9, None, None, False)]:
+            expl = explain_anomaly_score(c, pers, idb, ldb, gps_band=gps)
+            self.assertAlmostEqual(expl.score, anomaly_score(c, pers, idb, ldb, gps_band=gps))
+
+    def test_factors_sum_to_score_when_uncapped(self):
+        c = classify_signal(412.0, BASELINE)          # anomaly, base 60
+        expl = explain_anomaly_score(c, 0.95, 15.0, 14.0)   # 60 + 17.5 + 10.4 + 5 = 92.9
+        self.assertLess(expl.score, 100.0)
+        self.assertAlmostEqual(sum(f["points"] for f in expl.factors), expl.score, places=1)
+        # first factor is always the identification starting point
+        self.assertIn("identification", expl.factors[0]["label"].lower())
+
+    def test_every_raising_factor_is_explained(self):
+        c = classify_signal(412.0, BASELINE)
+        expl = explain_anomaly_score(c, 0.95, 30.0, 20.0)
+        labels = " ".join(f["label"].lower() for f in expl.factors)
+        for token in ("louder inside", "localizes", "always on"):
+            self.assertIn(token, labels)
+        # each factor has human-readable detail text
+        for f in expl.factors:
+            self.assertTrue(f["detail"] and len(f["detail"]) > 10)
+
+    def test_summary_is_plain_language_with_band(self):
+        c = classify_signal(412.0, BASELINE)
+        hi = explain_anomaly_score(c, 0.95, 30.0, 20.0).summary
+        self.assertIn("HIGH", hi)
+        self.assertIn("/100", hi)
+        lo = explain_anomaly_score(classify_signal(98.5, BASELINE), 1.0, 0.0, 1.0).summary
+        self.assertIn("LOW", lo)
+
+    def test_capped_score_is_flagged_in_summary(self):
+        c = classify_signal(412.0, BASELINE)
+        expl = explain_anomaly_score(c, 0.05, 60.0, 40.0, gps_band=True)
+        self.assertEqual(expl.score, 100.0)
+        self.assertIn("Capped", expl.summary)
+
+    def test_identified_signal_has_no_behaviour_raisers(self):
+        # persistence 0.5 (not "always on"), no interior/localization deltas
+        expl = explain_anomaly_score(classify_signal(98.5, BASELINE), 0.5, None, None)
+        self.assertEqual(len(expl.factors), 1)       # identification only
+        self.assertIn("identification status alone", expl.summary)
 
 
 if __name__ == "__main__":

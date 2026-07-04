@@ -2206,7 +2206,7 @@ function triageRow(s) {
     ? `<span class="pill" style="color:#ffd24a" title="${esc(s.novelty_reason || "")}">▲ NEW</span>` : "";
   const lbl = (s.matched_label || s.classification || "signal").replace(/'/g, "");
   return `<tr data-sid="${s.id}" class="${isThreat ? "threat-row" : ""}">` +
-    `<td>${(s.anomaly_score || 0).toFixed(0)}${isThreat ? '<br><span class="threat-tag">● THREAT</span>' : ''}</td>` +
+    `<td title="${esc(s.score_reason || "")}">${(s.anomaly_score || 0).toFixed(0)}${isThreat ? '<br><span class="threat-tag">● THREAT</span>' : ''}</td>` +
     `<td><a href="#" class="freqlink" data-center="${s.center_mhz}" data-sid="${s.id}" data-attr="${s.attribution_status || "unassessed"}" data-label="${esc(lbl)}">${fmtF(s.center_mhz)}</a></td>` +
     `<td class="note">${esc(s.room || "—")}</td>` +
     `<td><span class="pill ${s.classification}">${esc(statusLabel(s.classification))}</span>${s.caution ? " ⚠" : ""}</td>` +
@@ -2959,7 +2959,7 @@ async function loadResults() {
       "<tr><th>Score</th><th>Frequency</th><th>Peak dBm</th><th>BW kHz</th><th>Persist</th>" +
       "<th>In/Out Δ</th><th>Strongest room</th><th>Class</th><th>Why not verified</th><th></th></tr>" +
       anomalies.map(s =>
-        `<tr><td class="${s.anomaly_score >= 60 ? "score-hi" : "score-md"}">${(s.anomaly_score || 0).toFixed(0)}</td>` +
+        `<tr><td class="${s.anomaly_score >= 60 ? "score-hi" : "score-md"}" title="${esc(s.score_reason || "")}">${(s.anomaly_score || 0).toFixed(0)}</td>` +
         `<td><a href="#" class="freqlink" data-center="${s.center_mhz}" data-sid="${s.id}" ` +
         `data-attr="${s.attribution_status || "unassessed"}" ` +
         `data-label="${esc(s.matched_label || s.match_reason || "anomaly")}">${fmtF(s.center_mhz)}</a></td>` +
@@ -2968,7 +2968,9 @@ async function loadResults() {
         `<td>${s.interior_delta_db != null ? "+" + s.interior_delta_db + " dB" : "—"}</td>` +
         `<td>${esc(s.strongest_room || "")}${s.localization_score ? ` (+${s.localization_score} dB)` : ""}</td>` +
         `<td><span class="pill ${s.classification}">${esc(statusLabel(s.classification))}</span>${s.caution ? " ⚠" : ""}</td>` +
-        `<td style="max-width:300px">${esc(s.match_reason)}</td>` +
+        `<td style="max-width:300px">${esc(s.match_reason)}` +
+        (s.score_reason ? `<div class="note" style="margin-top:2px;color:#9fb2c9">${esc(s.score_reason)}</div>` : "") +
+        `</td>` +
         `<td><button class="btn" onclick="captureOne(${s.id})">CAPTURE</button></td></tr>`).join("");
     renderFindingsSummary(anomalies);
   } catch (e) {}

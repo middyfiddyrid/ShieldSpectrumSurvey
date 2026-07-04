@@ -285,6 +285,9 @@ class Database:
                 c.execute("ALTER TABLE signals ADD COLUMN attribution_notes TEXT DEFAULT ''")
             if "attribution_updated_utc" not in cols:
                 c.execute("ALTER TABLE signals ADD COLUMN attribution_updated_utc REAL")
+            # Plain-language explanation of how anomaly_score was reached.
+            if "score_reason" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN score_reason TEXT DEFAULT ''")
 
     def _conn(self):
         conn = sqlite3.connect(self.path, timeout=30)
