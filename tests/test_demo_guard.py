@@ -64,6 +64,10 @@ class TestDemoGuard(unittest.TestCase):
         self.assertEqual(
             self.c.post("/api/record/start", json={"center_mhz": 433.0}).status_code, 403)
 
+    def test_ble_detail_scan_blocked_in_demo(self):
+        # standalone BLE scan harvests third-party MAC addresses -> internal only
+        self.assertEqual(self.c.post("/api/ble/scan", json={}).status_code, 403)
+
     def _analyze_decode(self, demo):
         d = tempfile.mkdtemp()
         db = Database(os.path.join(d, "t.db"))

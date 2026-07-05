@@ -91,9 +91,11 @@ def scan_wifi() -> tuple[list[dict], str]:
     return devices, f"{len(devices)} access points seen"
 
 
-def scan_ble(seconds: float = 8.0) -> tuple[list[dict], str]:
+def _ble_raw(seconds: float = 8.0) -> tuple[list[dict], str]:
+    """Collect one advertisement dict per BLE device (strongest RSSI seen). Shared
+    by scan_ble (inventory rows) and scan_ble_details (full enrichment)."""
     try:
-        import asyncio
+        import asyncio  # noqa: F401
 
         from bleak import BleakScanner
     except ImportError:
@@ -106,16 +108,25 @@ def scan_ble(seconds: float = 8.0) -> tuple[list[dict], str]:
         def cb(device, adv):
             rssi = getattr(adv, "rssi", None)
             cur = found.get(device.address)
-            if cur is None or (rssi or -200) > (cur["rssi_dbm"] or -200):
-                name = device.name or adv.local_name or ""
-                mfg = ""
-                if adv.manufacturer_data:
-                    mfg = "mfg:" + ",".join(f"0x{k:04x}" for k in adv.manufacturer_data)
-                found[device.address] = {
-                    "kind": "ble", "identifier": device.address.lower(),
-                    "name": name, "rssi_dbm": float(rssi) if rssi is not None else None,
-                    "channel": "", "freq_mhz": 2440.0,   # BLE hops 2402-2480
-                    "extra": mfg}
+            if cur is not None and (rssi or -200) <= (cur["rssi_dbm"] or -200):
+                return
+            # bleak may report the platform address type on WinRT via details
+            addr_type = None
+            details = getattr(device, "details", None)
+            if isinstance(details, dict):
+                bt = details.get("props", {}).get("AddressType") or details.get("AddressType")
+                if isinstance(bt, str):
+                    addr_type = "random" if "random" in bt.lower() else (
+                        "public" if "public" in bt.lower() else None)
+            found[device.address] = {
+                "mac": device.address.lower(),
+                "name": device.name or getattr(adv, "local_name", "") or "",
+                "rssi_dbm": float(rssi) if rssi is not None else None,
+                "address_type": addr_type,
+                "tx_power": getattr(adv, "tx_power", None),
+                "manufacturer_data": dict(getattr(adv, "manufacturer_data", {}) or {}),
+                "service_uuids": list(getattr(adv, "service_uuids", []) or []),
+            }
 
         scanner = BleakScanner(detection_callback=cb)
         await scanner.start()
@@ -125,10 +136,36 @@ def scan_ble(seconds: float = 8.0) -> tuple[list[dict], str]:
 
     try:
         import asyncio
-        devices = asyncio.run(run())
+        advs = asyncio.run(run())
     except Exception as e:  # noqa: BLE001 - adapter off, WinRT errors, etc.
         return [], f"BLE scan failed: {e}"
-    return devices, f"{len(devices)} BLE advertisers seen"
+    return advs, f"{len(advs)} BLE advertisers seen"
+
+
+def scan_ble(seconds: float = 8.0) -> tuple[list[dict], str]:
+    """Inventory rows (deduped, stored). Each row's `extra` carries the enriched
+    one-line dossier (vendor, address type, tracker flag, services) from survey.ble."""
+    from . import ble
+    advs, message = _ble_raw(seconds)
+    devices = []
+    for a in advs:
+        summ = ble.summarize_advertisement(a)
+        devices.append({
+            "kind": "ble", "identifier": a["mac"],
+            "name": a["name"] or (summ["vendor"] or ""),
+            "rssi_dbm": a["rssi_dbm"], "channel": "", "freq_mhz": 2440.0,
+            "extra": summ["info"]})
+    return devices, message
+
+
+def scan_ble_details(seconds: float = 8.0) -> tuple[list[dict], str]:
+    """Full per-advertiser dossiers for the standalone BLE sweep view — every field
+    survey.ble can extract, sorted trackers-first then loudest. Not stored."""
+    from . import ble
+    advs, message = _ble_raw(seconds)
+    records = [ble.summarize_advertisement(a) for a in advs]
+    records.sort(key=lambda r: (not r["is_tracker"], -(r["rssi_dbm"] or -200)))
+    return records, message
 
 
 def upsert_inventory(db, session_id: int, devices: list[dict]):

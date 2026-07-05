@@ -96,7 +96,7 @@ def create_app(db, cfg, demo=False) -> Flask:
     DEMO_BLOCKED = ("/api/poi", "/api/report/internal_memo",
                     "/api/analyze/threat_vectors", "/api/case_files", "/case_files",
                     "/api/triage", "/api/novelty", "/api/record",
-                    "/api/attribution", "/api/decode/override")
+                    "/api/attribution", "/api/decode/override", "/api/ble/scan")
 
     @app.before_request
     def _demo_guard():
@@ -1630,6 +1630,19 @@ def create_app(db, cfg, demo=False) -> Flask:
         db.execute("UPDATE inventory SET owned=? WHERE id=?",
                    (int(bool(body.get("owned"))), body.get("id")))
         return jsonify({"saved": True})
+
+    @app.post("/api/ble/scan")
+    def ble_scan_detail():
+        """Standalone BLE sweep: every advertiser with the full survey.ble dossier
+        (MAC address type, vendor, decoded manufacturer/service data, tracker flag,
+        plain-language summary). Trackers first, then loudest. Not stored — a live
+        look; use /api/inventory/scan kind=ble to persist + mark ownership."""
+        seconds = float((request.get_json(silent=True) or {}).get("seconds") or 8.0)
+        from .inventory import scan_ble_details
+        records, message = scan_ble_details(min(max(seconds, 2.0), 30.0))
+        return jsonify({"count": len(records), "message": message,
+                        "trackers": sum(1 for r in records if r["is_tracker"]),
+                        "devices": records})
 
     # ---------- signal wiki (captures) ----------
 

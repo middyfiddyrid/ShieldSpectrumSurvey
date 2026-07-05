@@ -942,9 +942,19 @@ body.demo #card-casefiles { display:none !important; }
     <div class="row">
       <button class="btn primary" id="btn-scan-wifi">SCAN WiFi (netsh)</button>
       <button class="btn primary" id="btn-scan-ble">SCAN BLUETOOTH LE</button>
+      <button class="btn" id="btn-scan-ble-detail">BLUETOOTH DETAIL SWEEP</button>
       <span class="note" id="inv-msg"></span>
     </div>
     <div class="scroll" style="max-height:480px"><table id="tbl-inventory"></table></div>
+  </div>
+  <div class="card" id="ble-detail-card" style="display:none">
+    <h3 style="margin-top:0">BLUETOOTH DETAIL SWEEP <span class="tag">every advertiser, fully identified — trackers first</span></h3>
+    <p class="note">Standalone read (not saved to the inventory). Every device's MAC
+    address type, vendor, decoded advertisement, and any <b>location tracker</b>
+    (AirTag / Tile / SmartTag) it looks like. Use SCAN BLUETOOTH LE above to persist a
+    device and mark it client-owned.</p>
+    <div id="ble-detail-msg" class="note"></div>
+    <div class="scroll" style="max-height:520px"><div id="ble-detail-list"></div></div>
   </div>
 </section>
 

@@ -3254,6 +3254,49 @@ async function invScan(kind) {
 $("btn-scan-wifi").onclick = () => invScan("wifi");
 $("btn-scan-ble").onclick = () => invScan("ble");
 
+async function bleDetailScan() {
+  const card = $("ble-detail-card");
+  card.style.display = "";
+  $("ble-detail-msg").textContent = "scanning BLE (~8s)…";
+  $("ble-detail-list").innerHTML = "";
+  try {
+    const r = await api("/api/ble/scan", { seconds: 8 });
+    $("ble-detail-msg").innerHTML = esc(r.message) +
+      (r.trackers ? ` — <span class="score-hi">⚑ ${r.trackers} possible tracker(s)</span>` : "");
+    $("ble-detail-list").innerHTML = r.devices.map(bleCard).join("") ||
+      "<p class='note'>no advertisers heard — is the Bluetooth adapter on?</p>";
+  } catch (e) { $("ble-detail-msg").textContent = "FAILED: " + e.message; }
+}
+$("btn-scan-ble-detail").onclick = bleDetailScan;
+
+function bleCard(d) {
+  const mfr = d.manufacturers.map(m => esc(m.company) +
+    (m.hints.length ? " (" + m.hints.map(esc).join(", ") + ")" : "")).join("; ");
+  const svc = d.services.filter(s => s.name).map(s =>
+    `<span class="pill${s.tracker ? " failed" : ""}">${esc(s.name)}</span>`).join(" ");
+  const rows = [
+    ["MAC", esc(d.mac) + (d.address_inferred ? ' <span class="note">(type inferred from address)</span>' : "")],
+    ["Address type", esc(d.address_kind_label)],
+    ["Vendor", esc(d.vendor || "—")],
+    ["Name", esc(d.name) || "<i>(none advertised)</i>"],
+    ["Signal", d.rssi_dbm != null ? `${d.rssi_dbm} dBm — ${esc(d.proximity)}` : "—"],
+    ["Mfr data", mfr || "—"],
+    ["Services", svc || "—"],
+    ["Appearance", esc(d.appearance || "—")],
+    ["TX power", d.tx_power != null ? d.tx_power + " dBm" : "—"],
+  ];
+  const body = rows.map(([k, v]) =>
+    `<tr><td class="note" style="width:110px;vertical-align:top">${k}</td><td>${v}</td></tr>`).join("");
+  const flag = d.is_tracker
+    ? '<span class="threat-tag">⚑ POSSIBLE TRACKER</span>'
+    : (d.rotating ? '<span class="pill">rotating identity</span>' : "");
+  return `<div class="card" style="margin:6px 0;${d.is_tracker ? "background:#1f1212" : ""}">` +
+    `<div class="row" style="justify-content:space-between"><b>${esc(d.vendor || d.name || d.mac)}</b>${flag}</div>` +
+    `<table style="margin-top:4px">${body}</table>` +
+    (d.tscm_note ? `<p class="note" style="color:#ffd24a;margin:4px 0 0">${esc(d.tscm_note)}</p>` : "") +
+    `<p class="note" style="margin:2px 0 0">${esc(d.address_note)}</p></div>`;
+}
+
 async function loadInventory() {
   try {
     const rows = await api("/api/inventory");
