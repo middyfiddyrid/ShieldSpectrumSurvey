@@ -156,5 +156,98 @@ class TestChannelFilter(unittest.TestCase):
         self.assertGreater(np.mean(np.abs(y[mid])), 0.7)
 
 
+class TestDemodStrengthening(unittest.TestCase):
+    """P1 live-path strengthening (DEMOD_ANALYZE_DISSEMINATE_DESIGN.md §4a):
+    squelch, RMS AGC, FM de-emphasis and cross-block continuity — all gated on a
+    DemodState so the one-shot path (state=None) stays byte-for-byte unchanged."""
+
+    def setUp(self):
+        self.fs = 2_400_000.0
+        self.n = 48_000
+        self.rng = np.random.default_rng(0)
+
+    def noise_iq(self):
+        z = (self.rng.standard_normal(self.n) + 1j * self.rng.standard_normal(self.n))
+        return (0.05 * z).astype(np.complex64)
+
+    def test_state_none_is_unchanged(self):
+        # the legacy path must be identical whether or not the new kwargs exist
+        iq = fm_iq(self.fs, self.n)
+        a, ra = demodulate(iq, self.fs, "nfm")
+        b, rb = demodulate(iq, self.fs, "nfm", 0.0, None, state=None, squelch_snr_db=None)
+        self.assertEqual(ra, rb)
+        self.assertTrue(np.array_equal(a, b))
+
+    def test_squelch_mutes_noise_after_hang(self):
+        from survey.demod import DemodState
+        st = DemodState()
+        first_peak = None
+        last = None
+        for i in range(8):
+            pcm, _ = demodulate(self.noise_iq(), self.fs, "nfm", state=st, squelch_snr_db=8.0)
+            if i == 0:
+                first_peak = int(np.max(np.abs(pcm)))
+            last = pcm
+        self.assertTrue(st.gated, "squelch should be closed on sustained noise")
+        # after the hang the muted block is far quieter than the first (ungated) one
+        self.assertLess(int(np.max(np.abs(last))), max(1, first_peak) * 0.1)
+
+    def test_squelch_opens_on_carrier(self):
+        from survey.demod import DemodState
+        st = DemodState()
+        pcm, _ = demodulate(cw_iq(self.fs, self.n, offset_hz=5_000.0), self.fs, "nfm",
+                            state=st, squelch_snr_db=8.0)
+        self.assertFalse(st.gated, "a strong carrier must open the squelch")
+        self.assertGreater(st.last_snr_db, 8.0)
+        self.assertGreater(int(np.max(np.abs(pcm))), 0)
+
+    def test_agc_respects_brickwall(self):
+        # the AGC never exceeds the ±0.95 full-scale safety clip, even on
+        # impulsive empty-channel noise (squelch OFF).
+        from survey.demod import DemodState
+        st = DemodState()
+        agc, _ = demodulate(self.noise_iq(), self.fs, "nfm", state=st, squelch_snr_db=None)
+        self.assertLessEqual(int(np.max(np.abs(agc))), int(0.95 * 32767) + 1)
+
+    def test_agc_holds_target_loudness(self):
+        # the AGC drives output loudness toward the RMS target (not the per-block
+        # peak), so a steady tone lands near target*full_scale within a factor.
+        from survey.demod import DemodState
+        st = DemodState(agc_target_rms=0.18)
+        pcm = None
+        for _ in range(4):                       # let the AGC converge
+            pcm, _ = demodulate(am_iq(self.fs, self.n), self.fs, "am", state=st)
+        rms = float(np.sqrt(np.mean((pcm.astype(np.float64)) ** 2)))
+        target = 0.18 * 32767.0
+        self.assertGreater(rms, target / 3.0)
+        self.assertLess(rms, target * 3.0)
+        self.assertLessEqual(int(np.max(np.abs(pcm))), int(0.95 * 32767) + 1)
+
+    def test_deemphasis_rolls_off_highs(self):
+        from survey.demod import DemodState, _deemphasis
+        rate = 24_000.0
+        m = 24_000
+        t = np.arange(m) / rate
+
+        def ratio(f):
+            x = np.sin(2 * np.pi * f * t)
+            y = _deemphasis(x, rate, 75.0, DemodState())
+            return float(np.sqrt(np.mean(y ** 2)) / np.sqrt(np.mean(x ** 2)))
+
+        low, high = ratio(300.0), ratio(8000.0)
+        self.assertLess(high, low)               # 8 kHz attenuated more than 300 Hz
+        self.assertLess(high, low * 0.6)         # a clear de-emphasis slope
+
+    def test_state_continuity_carries_across_blocks(self):
+        from survey.demod import DemodState
+        st = DemodState()
+        demodulate(fm_iq(self.fs, self.n), self.fs, "nfm", state=st)
+        g1 = st.agc_gain
+        self.assertIsNotNone(st.deemph_tail)     # de-emphasis memory seeded (FM)
+        demodulate(fm_iq(self.fs, self.n), self.fs, "nfm", state=st)
+        self.assertNotEqual(st.agc_gain, 1.0)    # AGC evolved from its initial anchor
+        self.assertIsNotNone(g1)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -914,6 +914,18 @@ def create_app(db, cfg, demo=False) -> Flask:
         span_hi = float(cfg.get("pluto", "listen_wf_span_hi_db", default=40.0))
         psd_ema = nf_ema = None
         wf_seq = 0
+        # live demod strengthening (DEMOD_ANALYZE_DISSEMINATE_DESIGN.md §4a): ONE
+        # DemodState per stream so squelch/AGC/de-emphasis carry across blocks.
+        from .demod import DemodState
+        dstate = DemodState(
+            agc_target_rms=float(cfg.get("demod", "agc_target_rms", default=0.18)),
+            agc_attack_ms=float(cfg.get("demod", "agc_attack_ms", default=8.0)),
+            agc_release_ms=float(cfg.get("demod", "agc_release_ms", default=300.0)),
+            agc_max_gain=float(cfg.get("demod", "agc_max_gain", default=40.0)),
+            squelch_hang_blocks=int(cfg.get("demod", "squelch_hang_blocks", default=3)),
+            deemphasis_us=float(cfg.get("demod", "deemphasis_us", default=75.0)))
+        sq_default = cfg.get("pluto", "listen_squelch_snr_db", default=None)
+        last_off, last_bw = 0.0, None
         _mdev, mlock, mstop, _msrc = st.controller.monitor_target()
         mstop.set()                           # preempt whatever stream is running now
         with mlock:                           # wait for the previous user of THIS radio to release
@@ -921,6 +933,7 @@ def create_app(db, cfg, demo=False) -> Flask:
             st.controller.listening = True
             st.controller.listen_offset_hz = 0.0   # new tune -> demod band center until clicked
             st.controller.listen_chan_bw_hz = None # new tune -> per-mode default channel width
+            st.controller.listen_squelch_snr_db = sq_default  # OFF by default (config)
             st.controller.listen_spectrum = None
             stop = mstop
             try:
@@ -928,7 +941,12 @@ def create_app(db, cfg, demo=False) -> Flask:
                     try:
                         off = float(getattr(st.controller, "listen_offset_hz", 0.0) or 0.0)
                         bw = getattr(st.controller, "listen_chan_bw_hz", None)
-                        pcm, arate = demodulate(iq, fs, mode, off, bw)
+                        if off != last_off or bw != last_bw:
+                            dstate.reset_continuity()      # passband moved -> don't click
+                            last_off, last_bw = off, bw
+                        sq = getattr(st.controller, "listen_squelch_snr_db", None)
+                        pcm, arate = demodulate(iq, fs, mode, off, bw,
+                                                state=dstate, squelch_snr_db=sq)
                     except Exception:  # noqa: BLE001
                         continue
                     yield pcm, arate
@@ -964,6 +982,14 @@ def create_app(db, cfg, demo=False) -> Flask:
                             "center_mhz": center_mhz, "mode": mode,
                             "ts": _time.time(), "seq": wf_seq,
                             "analyzer": {"freqs_mhz": af, "power_dbm": ap},
+                            "demod": {
+                                "snr_db": (round(dstate.last_snr_db, 1)
+                                           if dstate.last_snr_db is not None else None),
+                                "gated": bool(dstate.gated),
+                                "agc_gain_db": round(20.0 * _np.log10(
+                                    max(dstate.last_out_gain, 1e-6)), 1),
+                                "squelch_db": getattr(st.controller,
+                                                      "listen_squelch_snr_db", None)},
                             "waterfall": {
                                 "freqs_mhz": [round((center_mhz * 1e6 + f) / 1e6, 4)
                                               for f in wf["freqs_hz"]],

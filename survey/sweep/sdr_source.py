@@ -417,6 +417,14 @@ class AD936xSource(BaseDevice):
         self._set_sample_rate(int(sample_rate))
         self._set_rf_bandwidth(int(sample_rate))
         self._set_lo(int(center_hz))
+        # Re-assert RX gain at stream start: connect() set gain at the power-on LO,
+        # but the AD936x manual-gain valid range is FREQUENCY-DEPENDENT, so a live
+        # tune to a new band can leave a stale/invalid gain -> weak or dead audio.
+        # The safe manual-range fallback chain lives in _set_gain (never fatal).
+        try:
+            self._set_gain(self._gain_mode, self._gain_db)
+        except Exception:  # noqa: BLE001
+            pass
         # Re-assert gapless DMA HERE: a prior capture/sweep destroys+recreates the
         # rx buffer, which resets the kernel-buffer count to 1 (single-buffer
         # refill gap => ~0.6x). Destroy, set count, THEN build the buffer and
@@ -557,6 +565,18 @@ class PlutoSource(AD936xSource):
             self.sdr.gain_control_mode_chan0 = "slow_attack"
         except Exception:  # noqa: BLE001
             pass
+
+    def set_gain(self, mode: str = None, db: float = None):
+        """Live RX gain change (for the future /api/listen/gain endpoint). Updates
+        the persisted gain state and applies it now; the safe manual-range fallback
+        chain lives in _set_gain so a bad value can't take the radio down. NOTE:
+        changing gain invalidates the cal_offset_db baseline until re-swept — the
+        caller/UI must warn that power/RSSI no longer matches the baseline."""
+        if mode is not None:
+            self._gain_mode = str(mode)
+        if db is not None:
+            self._gain_db = float(db)
+        self._set_gain(self._gain_mode, self._gain_db)
 
     def _flush_buffer(self):
         try:
