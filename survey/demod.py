@@ -155,15 +155,17 @@ class DemodState:
 
 
 def _periodogram_snr_db(iq: np.ndarray, nperseg: int = 1024,
-                        max_segs: int = 64) -> float:
+                        max_segs: int = 64, mask_dc: bool = True) -> float:
     """Cheap in-band SNR for the squelch gate + S-meter: peak-over-median of an
-    AVERAGED (Welch) periodogram, DC/LO bins masked. Averaging is essential — a
-    SINGLE periodogram of white noise is chi-square-spiky (peak/median ~10 dB),
-    which would read as 'signal present' on an empty channel and defeat the
-    squelch; averaging flattens noise to ~1-2 dB while a real carrier still
-    spikes. Same peak-minus-median definition the analyzer/identify use, so the
-    diagnostic number matches the on-screen trace. Masks the ±guard bins around
-    DC (the Pluto LO-leakage spike)."""
+    AVERAGED (Welch) periodogram. Averaging is essential — a SINGLE periodogram of
+    white noise is chi-square-spiky (peak/median ~10 dB), which would read as
+    'signal present' on an empty channel and defeat the squelch; averaging
+    flattens noise to ~1-2 dB while a real carrier still spikes.
+
+    mask_dc=True masks ±guard bins around DC (the band-center Pluto LO spike) — use
+    on a RAW wide capture. mask_dc=False keeps DC — use on a CHANNEL-ISOLATED
+    baseband where the tuned signal legitimately sits at DC (masking it there would
+    hide the very signal we are gating on)."""
     iq = np.asarray(iq)
     npg = int(min(nperseg, iq.size))
     if npg < 32:
@@ -173,14 +175,15 @@ def _periodogram_snr_db(iq: np.ndarray, nperseg: int = 1024,
     frames = iq[:segs * npg].reshape(segs, npg) * w
     spec = np.fft.fftshift(np.fft.fft(frames, axis=1), axes=1)
     p = np.mean(np.abs(spec) ** 2, axis=0)       # Welch average over segments
-    c = p.size // 2
-    guard = max(1, p.size // 64)                 # mask ± a small band around DC/LO
-    lo, hi = max(0, c - guard), min(p.size, c + guard + 1)
-    masked = np.delete(p, np.s_[lo:hi])
-    if masked.size == 0:
+    if mask_dc:
+        c = p.size // 2
+        guard = max(1, p.size // 64)             # mask ± a small band around DC/LO
+        lo, hi = max(0, c - guard), min(p.size, c + guard + 1)
+        p = np.delete(p, np.s_[lo:hi])
+    if p.size == 0:
         return 0.0
-    med = float(np.median(masked))
-    peak = float(np.max(masked))
+    med = float(np.median(p))
+    peak = float(np.max(p))
     if med <= 0 or peak <= 0:
         return 0.0
     return float(10.0 * np.log10(peak / med))
@@ -257,13 +260,11 @@ def demodulate(iq, fs: float, mode: str = "nfm", offset_hz: float = 0.0,
         t = np.arange(iq.size, dtype=np.float64) / fs
         iq = (iq * np.exp(-1j * 2 * np.pi * offset_hz * t)).astype(np.complex64)
 
-    # in-band SNR (live path only): squelch decision + the S-meter/diagnostic.
-    snr_db = _periodogram_snr_db(iq) if state is not None else None
-
     if mode == "am":
         if chan_bw_hz:                                 # adjustable channel width (AM audio ~bw/2)
             iq = _lowpass(iq, fs, max(2000.0, min(float(chan_bw_hz) / 2.0, fs * 0.45)))
         audio = np.abs(iq).astype(np.float64)
+        chan_sig = iq                                  # channel-isolated baseband for the squelch SNR
         arate = fs
     elif mode in ("usb", "lsb"):
         # IQ is complex baseband on the tuned carrier; one sideband sits above
@@ -276,6 +277,7 @@ def demodulate(iq, fs: float, mode: str = "nfm", offset_hz: float = 0.0,
         x = iq * np.exp(-1j * 2 * np.pi * shift * t).astype(np.complex64)
         x = _lowpass(x, fs, SSB_BW)
         audio = np.real(x).astype(np.float64)
+        chan_sig = x
         arate = fs
     elif mode == "cw":
         # Narrow-filter the carrier, then beat it against a BFO offset so a
@@ -285,6 +287,7 @@ def demodulate(iq, fs: float, mode: str = "nfm", offset_hz: float = 0.0,
         t = np.arange(x.size, dtype=np.float64) / fs
         x = x * np.exp(1j * 2 * np.pi * CW_BFO * t).astype(np.complex64)
         audio = np.real(x).astype(np.float64)
+        chan_sig = x
         arate = fs
     else:
         # FIR channel-filter + decimate toward the channel bandwidth before the
@@ -301,7 +304,14 @@ def demodulate(iq, fs: float, mode: str = "nfm", offset_hz: float = 0.0,
         if x.size < 4:
             raise ValueError("capture too short for this mode")
         audio = _fm_discriminator(x)                   # FM discriminator (unchanged: POCSAG shares it)
+        chan_sig = x
 
+    # in-band SNR (live path only) measured on the CHANNEL-ISOLATED baseband, NOT
+    # the raw wide capture: the offset shift moved the tuned signal to DC and the
+    # per-mode filter rejected out-of-channel energy, so the squelch/S-meter track
+    # THIS signal — they don't mute the clicked one or open on a neighbour.
+    snr_db = (_periodogram_snr_db(chan_sig, nperseg=256, mask_dc=False)
+              if state is not None else None)
     dec2 = max(1, int(round(arate / AUDIO_RATE)))
 
     if state is None:

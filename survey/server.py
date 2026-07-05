@@ -917,13 +917,17 @@ def create_app(db, cfg, demo=False) -> Flask:
         # live demod strengthening (DEMOD_ANALYZE_DISSEMINATE_DESIGN.md §4a): ONE
         # DemodState per stream so squelch/AGC/de-emphasis carry across blocks.
         from .demod import DemodState
+
+        def _dnum(key, d):                    # null-safe: an explicit YAML null -> default
+            v = cfg.get("demod", key, default=d)
+            return d if v is None else v
         dstate = DemodState(
-            agc_target_rms=float(cfg.get("demod", "agc_target_rms", default=0.18)),
-            agc_attack_ms=float(cfg.get("demod", "agc_attack_ms", default=8.0)),
-            agc_release_ms=float(cfg.get("demod", "agc_release_ms", default=300.0)),
-            agc_max_gain=float(cfg.get("demod", "agc_max_gain", default=40.0)),
-            squelch_hang_blocks=int(cfg.get("demod", "squelch_hang_blocks", default=3)),
-            deemphasis_us=float(cfg.get("demod", "deemphasis_us", default=75.0)))
+            agc_target_rms=float(_dnum("agc_target_rms", 0.18)),
+            agc_attack_ms=float(_dnum("agc_attack_ms", 8.0)),
+            agc_release_ms=float(_dnum("agc_release_ms", 300.0)),
+            agc_max_gain=float(_dnum("agc_max_gain", 40.0)),
+            squelch_hang_blocks=int(_dnum("squelch_hang_blocks", 3)),
+            deemphasis_us=float(_dnum("deemphasis_us", 75.0)))
         sq_default = cfg.get("pluto", "listen_squelch_snr_db", default=None)
         last_off, last_bw = 0.0, None
         _mdev, mlock, mstop, _msrc = st.controller.monitor_target()

@@ -34,6 +34,14 @@ def cw_iq(fs, n, offset_hz=120.0):
     return np.exp(1j * 2 * np.pi * offset_hz * t).astype(np.complex64)
 
 
+def fm_at(fs, n, off_hz, audio_hz=1000.0, deviation=5000.0):
+    """An FM signal placed at +off_hz within the captured band (as if the operator
+    clicked a signal off-center); demodulate(offset_hz=off_hz) tunes to it."""
+    base = fm_iq(fs, n, audio_hz, deviation)
+    t = np.arange(n) / fs
+    return (base * np.exp(1j * 2 * np.pi * off_hz * t)).astype(np.complex64)
+
+
 def peak_hz(audio, rate):
     spec = np.abs(np.fft.rfft(audio.astype(float) * np.hanning(len(audio))))
     freqs = np.fft.rfftfreq(len(audio), 1.0 / rate)
@@ -163,7 +171,7 @@ class TestDemodStrengthening(unittest.TestCase):
 
     def setUp(self):
         self.fs = 2_400_000.0
-        self.n = 48_000
+        self.n = 240_000
         self.rng = np.random.default_rng(0)
 
     def noise_iq(self):
@@ -200,6 +208,19 @@ class TestDemodStrengthening(unittest.TestCase):
         self.assertFalse(st.gated, "a strong carrier must open the squelch")
         self.assertGreater(st.last_snr_db, 8.0)
         self.assertGreater(int(np.max(np.abs(pcm))), 0)
+
+    def test_squelch_does_not_mute_clicked_offset_signal(self):
+        # REGRESSION: the squelch must measure the CHANNEL the operator tuned to.
+        # A signal clicked off-center (offset_hz != 0) must keep the gate OPEN, not
+        # read the DC-masked wide band and mute the very signal that was selected.
+        from survey.demod import DemodState
+        st = DemodState()
+        iq = fm_at(self.fs, self.n, 300_000.0)
+        for _ in range(6):                       # past the hang, to be sure
+            demodulate(iq, self.fs, "nfm", offset_hz=300_000.0,
+                       state=st, squelch_snr_db=8.0)
+        self.assertFalse(st.gated, "clicked (offset) signal must not be muted")
+        self.assertGreater(st.last_snr_db, 8.0)
 
     def test_agc_respects_brickwall(self):
         # the AGC never exceeds the ±0.95 full-scale safety clip, even on
