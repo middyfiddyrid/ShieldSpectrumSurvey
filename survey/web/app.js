@@ -1428,6 +1428,7 @@ function resetMonitorMetrics() {
   App._sigHistory = [];
   App._sigHistoryT0 = 0;
   ["sm-peak", "sm-mean", "sm-snr", "sm-floor"].forEach(id => { if ($(id)) $(id).textContent = "—"; });
+  const dm = $("sm-demod"); if (dm) dm.textContent = "";
   const fill = $("sm-bar-fill"); if (fill) fill.style.width = "0%";
   const dot = $("sm-peak-dot"); if (dot) dot.style.display = "none";
   const hc = $("insp-history");
@@ -1488,6 +1489,23 @@ function computeMeterStats(analyzer, centerMhz, demodMhz, mode) {
     for (let i = 0; i < n; i++) if (p[i] > peakVal) { peakVal = p[i]; peakIdx = i; }
   }
   return { peak: peakHold, mean, floor, snr, peakIdx, peakFreq: fr[peakIdx], rawPeak: peak };
+}
+
+function updateDemodDiag(d) {
+  // live demod-chain readout (from the backend `demod` telemetry): the channel-
+  // isolated SNR, how hard the AGC is working, and a plain "why is it weak"
+  // verdict — front-end/antenna vs genuinely weak signal vs OK.
+  const el = $("sm-demod");
+  if (!el) return;
+  if (!d || d.snr_db == null) { el.textContent = ""; return; }
+  const agc = (d.agc_gain_db >= 0 ? "+" : "") + Math.round(d.agc_gain_db);
+  let verdict;
+  if (d.gated) verdict = "muted — squelch closed (nothing in the channel)";
+  else if (d.snr_db < 6 && d.agc_gain_db > 18) verdict = "weak — AGC boosting hard; likely front-end/antenna/range, not DSP";
+  else if (d.snr_db < 6) verdict = "weak signal in channel";
+  else verdict = "OK";
+  const sq = (d.squelch_db != null) ? " · squelch " + d.squelch_db + " dB" : "";
+  el.textContent = "DEMOD  SNR " + d.snr_db.toFixed(1) + " dB · AGC " + agc + " dB" + sq + "  —  " + verdict;
 }
 
 function updateSmeterDisplay(m) {
@@ -1797,6 +1815,7 @@ function startSpectrumPoll() {
       drawAnalyzer($("insp-analyzer"), s.analyzer, meter);
       drawSignalHistory($("insp-history"));
     }
+    updateDemodDiag(s.demod);              // live demod chain: SNR/AGC/squelch + "why weak" verdict
     if (s.waterfall) drawWaterfall($("insp-waterfall"), s.waterfall);
   }, specPollMs());
 }
