@@ -4,6 +4,24 @@ Continuation brief for a fresh Fable/Claude Code session. Read this first, then 
 
 ---
 
+# ⚡⚡ 2026-07-06 (covert-device-detection stream) — active-ping TX + PASSIVE EMANATION detector
+
+On `b220-mini-source` (shared tree w/ the B220 + BeenVerified sessions — commit tight).
+Full suite **309 green**. Three detection modes now cover the three device classes:
+- **Transmits deliberately** → the interior sweep (existing).
+- **Reacts to a ping** → `survey/stimulate.py` + `POST /api/stimulate/probe` + ACTIVE PROBE
+  card. Concurrent B220 TX path WIRED (`uhd_source` `start_tx/stop_tx`, `B220Source.stim_*`),
+  HARDWARE-UNTESTED — bench per `STIMULATE_HARDWARE_TODO.md` (B220 blocked at FX3, replug).
+- **Silent (SD-card recorder, never transmits)** → **`survey/emanations.py`** (NEW, committed
+  `5c03ae9`/`d9d90d3`): non-coherent averaging + median floor + baseline subtraction +
+  harmonic-comb detection (order-density test defeats the GCD trap; estimates the device
+  clock → camera-sensor hint). `POST /api/emanations/scan` (receive-only, any SDR) + PASSIVE
+  EMANATION SCAN card. 12 tests. This is the passive core of the cited RFScan paper.
+- Also this stream earlier: scoring explanations (`b71038d`) + BLE enrichment (`6eb3f4b`).
+STILL NEXT: bench the B220 TX; Pluto interleaved stimulate variant; emanation baseline-capture UI.
+
+---
+
 # ⚡⚡ NEXT-SESSION HANDOFF — 2026-07-06 — B220 Mini arrived + integrated (READ FIRST)
 
 The **SUOGOEST B220 Mini** (USRP B210-compatible, AD9361, 70 MHz–6 GHz, **2R2T**,
