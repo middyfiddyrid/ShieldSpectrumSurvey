@@ -1,21 +1,42 @@
 # Active stimulation ("ping") — hardware binding TODO
 
-**STATUS 2026-07-06:** the **simultaneous (B220) path is now WIRED end-to-end** but is
-**HARDWARE-UNTESTED** — do not trust it in the field until the bench checklist below
-passes. What exists:
-- `survey/stimulate.py` — engine + decision logic + `make_chirp()` stimulus, unit-tested
-  against a synthetic radio (`tests/test_stimulate.py`, incl. the concurrent TX-lifecycle).
-- `survey/sweep/uhd_source.py` — `UHDRadio.start_tx/stop_tx` (ctypes UHD TX streamer on a
-  background thread) + `B220Source.stim_*` (concurrent: TX-A on TX/RX port, RX-A on RX2).
-- `POST /api/stimulate/probe` (demo-blocked) + the **ACTIVE PROBE** UI card (Results tab)
-  with the band-authorization + honesty caveats up front.
+**STATUS 2026-07-06:** the TX path is **WIRED end-to-end** but **HARDWARE-UNTESTED** — do
+not trust it in the field until the bench checklist below passes. The B220 receive side is
+now live-bench verified (the `fx3 state 5` blocker was a LibreSDR-clone FPGA-image issue,
+solved — see the main HANDOFF), so the TX bench can proceed.
 
-**BLOCKER:** the physical B220 is currently stuck at FPGA load (`fx3 is in state 5`) — it
-needs a physical USB unplug/replug before ANY B220 work (RX or TX) can be bench-verified
-(see the main HANDOFF). Until the radio comes up, the TX path cannot be validated.
+### The B220 has FOUR SMA ports (not two)
+Two are transmit-capable, two are receive-only:
 
-Remaining before field use = the bench checklist. The Pluto interleaved variant
-(burst-then-listen on a single radio) is still unbuilt — only the B220 concurrent path is wired.
+| Port | Channel | Role |
+|------|---------|------|
+| **TX/RX A** | A | transmit **or** receive |
+| **RX2 A**   | A | receive only |
+| **TX/RX B** | B | transmit **or** receive |
+| **RX2 B**   | B | receive only |
+
+The receive-only dual sweep uses the two **RX2** ports (RX2-A = "right" module, RX2-B =
+"left"). Active stimulation uses a **TX/RX** port to transmit.
+
+### Two rigs (config `stimulate.setup`)
+1. **`single`** (default) — one B220: transmit on **TX/RX-A**, listen on **RX2-A**
+   (AD9361 full-duplex, same board). Simplest, but the transmitter leaks into its own
+   receiver. Set `stimulate.rx_channel = 1` to listen on **RX2-B** (the other channel)
+   instead — more isolation for the cost of using the second frontend.
+2. **`split`** — transmit on ONE radio, listen on ANOTHER (`stimulate.tx_source` /
+   `stimulate.rx_source`, e.g. **Pluto TX + B220 RX**). Two physically separate boxes =
+   the best TX/RX isolation. Both radios must be connected (DEVICE card, keep-other).
+
+### What exists
+- `survey/stimulate.py` — engine + `make_chirp()` + `SplitStimRadio`, unit-tested against
+  synthetic radios (`tests/test_stimulate.py`: concurrent lifecycle + split rig).
+- `survey/sweep/uhd_source.py` — `UHDRadio.start_tx/stop_tx` (ctypes UHD TX streamer) +
+  `B220Source.start_tx/stop_tx` + `stim_*` (configurable TX/RX channel).
+- `survey/sweep/sdr_source.py` — `PlutoSource.start_tx/stop_tx` (pyadi cyclic buffer) so the
+  Pluto can be the split transmitter.
+- `POST /api/stimulate/probe` (demo-blocked, single + split) + the **ACTIVE PROBE** UI card.
+
+The Pluto **interleaved** single-radio variant (burst-then-listen) is still unbuilt.
 
 ## Why it's gated
 - **Physics:** the ADALM-Pluto is single TX/RX and cannot cleanly transmit and
@@ -62,11 +83,14 @@ Clear the FX3 blocker first (physical USB replug), then:
    including on error paths.
 
 ## Config keys (survey/config.py defaults; override in config.yaml)
+Rig: `stimulate.setup` ("single" | "split"), `.tx_source` ("pluto"), `.rx_source` ("b220"),
+`.rx_channel` (0 = RX2-A; 1 = RX2-B), `.tx_channel` (0), `.tx_antenna` ("TX/RX").
 RX: `stimulate.rx_sample_rate` (4e6), `.fft_size` (4096), `.dwell_samples` (262144),
 `.averages` (6), `.prominence_gate_db` (8), `.delta_gate_db` (6),
 `.permitted_bands_mhz` (the three ISM bands).
-TX: `stimulate.tx_sample_rate` (radio `_fs`), `.tx_gain_db` (50), `.tx_amp` (0.5),
-`.tx_wave_samples` (65536), `.tx_antenna` ("TX/RX"), `.tx_settle_s` (0.05).
+TX: `stimulate.tx_sample_rate` (radio `_fs`), `.tx_gain_db` (50, B220 UHD scale),
+`.pluto_tx_hardwaregain_db` (-20, Pluto 0..-89 dB), `.tx_amp` (0.5),
+`.tx_wave_samples` (65536), `.tx_settle_s` (0.05).
 
 ## Still unbuilt
 - **Pluto interleaved variant** (burst-then-listen on the single-radio Pluto) — only the
