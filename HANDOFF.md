@@ -4,6 +4,48 @@ Continuation brief for a fresh Fable/Claude Code session. Read this first, then 
 
 ---
 
+# ⚡⚡ NEXT-SESSION HANDOFF — 2026-07-04 — scoring-explain + BLE-enrich + active-ping engine (READ FIRST)
+
+Branch **`active-stim-ble-scoring`** (off `pocsag-decoder`). NOT merged/pushed. **273 tests green.**
+Three operator asks from the 2026-07-04 voice dump (+ a linked PoPETs paper). `config.yaml` backed
+up to `config.yaml.bak-20260704-032113` before branching.
+
+## THE PAPER (important correction)
+The linked paper (popets-2025-0011, UCSD "RFScan") is a **PASSIVE** unintentional-EM-emanation
+detector (500× non-coherent averaging + empty-room baseline subtraction + tone-clustering + DNN
+fingerprint + AoA). It explicitly argues **against** the operator's "ping it and watch it react"
+idea (active probing is evadable + stimulates legit devices). Both are legit; treated as separate
+detectors. **RFScan-passive is NOT built yet** and is the most paper-faithful next build — it fits
+the existing baseline/novelty/sigcapture architecture well (see paper text in scratchpad if needed).
+
+## SHIPPED (each committed, tests green)
+1. **Scoring explanation (DONE, `b71038d`).** `correlation.explain_anomaly_score()` →
+   `ScoreExplanation(score, factors, summary)`; `anomaly_score()` delegates (arithmetic byte-identical,
+   old tests pass). New `signals.score_reason` (idempotent migration); runner stores it; surfaced in
+   Results + Manual-Triage tables (visible note + score tooltip), client PDF anomaly table, CSV. 6 tests.
+2. **BLE enrichment (DONE, `6eb3f4b`).** New `survey/ble.py` (pure logic, 17 tests): `classify_mac()`
+   pins address type (public OUI vs the 3 random kinds incl. rotating resolvable-private),
+   decode manufacturer/service/OUI from curated tables (extensible via `survey/ble_extra.json`),
+   flags trackers (AirTag/Find My/Tile/SmartTag/Chipolo). `inventory.scan_ble` enriches rows;
+   `scan_ble_details()` + `POST /api/ble/scan` (demo-blocked) back the new **BLUETOOTH DETAIL SWEEP**
+   card. UI verified in sim (no console errors; tracker card renders).
+3. **Active-ping detector ENGINE (DONE, `5d5b8b7`) — TX NOT wired.** `survey/stimulate.py`: quiet-vs-
+   stimulated differential PSD; `find_responders()` triple-gate (prominence + delta + not-already-
+   present) so a flat stimulus floor-rise and always-on lines don't false-trigger. 9 tests vs a
+   synthetic radio. Honest gates: responsive-subset-only (null≠clean), refuses out-of-ISM-band TX
+   without a logged override. **Real TX path deliberately unbuilt — bench first: see
+   `STIMULATE_HARDWARE_TODO.md`** (implement the small radio protocol on Pluto[interleaved]/B210[concurrent]).
+
+## REMAINING / NEXT
+- **Stimulate:** implement + BENCH the TX radio protocol (Pluto burst-then-listen / B210 concurrent),
+  then wire `POST /api/stimulate/probe` (demo-block) + a UI with band-authorization + caveats up front.
+- **BLE:** optionally cross-reference the standalone BLE MACs against 2.4 GHz sweep detections
+  ("this 2.44 GHz energy = these advertisers"); add config.yaml `pluto.address_type` passthrough if WinRT exposes it.
+- **RFScan-passive** emanation detector (the actual paper) as a distinct high-value build.
+- A `--simulate` preview config was added to `.claude/launch.json` (machine-local, gitignored).
+
+---
+
 # ⚡⚡ NEXT-SESSION HANDOFF — 2026-06-26 — triage / monitor / novelty / dual-device BUILT (READ FIRST)
 
 The full 2026-06-25 vision below is now **built, reviewed, and verified headless + in the live UI.** This block supersedes it.
