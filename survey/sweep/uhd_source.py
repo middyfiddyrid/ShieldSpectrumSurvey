@@ -568,14 +568,23 @@ class B220Source(AD936xSource):
             if os.path.isdir(cand):
                 os.environ["UHD_IMAGES_DIR"] = cand
         self._ensure_uhd_images()
+        # AUTHORITATIVE FPGA selection: pass the LibreSDR bitstream to UHD via the
+        # `fpga=` device arg, NOT via UHD_IMAGES_DIR. os.environ changes in Python
+        # do NOT reliably reach uhd.dll (separate C runtime on Windows caches its
+        # own env), so a UHD_IMAGES_DIR we set here can be ignored by the DLL — it
+        # then loads the STOCK Ettus b210 image from its install dir and fails with
+        # `fx3 is in state 5` (surfaced as uhd_error 44). The explicit fpga= arg
+        # can't be missed. Firmware (usrp_b200_fw.hex, stock Ettus, correct for the
+        # clone) still loads from the images dir normally.
+        args = self._device_args_with_fpga()
         lib = _UHDLib(self._uhd_dir)
         try:
-            self.sdr = UHDRadio(lib, self._device_args)
+            self.sdr = UHDRadio(lib, args)
         except DeviceError:
             raise
         except Exception as e:  # noqa: BLE001
             raise DeviceError(f"could not open UHD radio: {e}") from e
-        self.info.port = self._device_args
+        self.info.port = args
         try:
             self.info.model = f"{self.sdr.mboard_name()} (B220 Mini, 2RX)"
         except Exception:  # noqa: BLE001
@@ -595,6 +604,56 @@ class B220Source(AD936xSource):
                 f"radio reports {n} RX channel(s), expected 2 — left module "
                 f"disabled")
             type(self).channels = n or 1
+
+    def _device_args_with_fpga(self) -> str:
+        """Append `fpga=<our LibreSDR bitstream>` to the device args so UHD loads
+        the correct Artix-7 image regardless of UHD_IMAGES_DIR. No-op if the
+        operator already put an fpga= in device_args, or if no bundled/explicit
+        image resolves."""
+        args = self._device_args
+        if "fpga=" in args:
+            return args
+        img = self._resolve_fpga_image()
+        if not img:
+            return args
+        return f"{args},fpga={img}" if args else f"fpga={img}"
+
+    def _resolve_fpga_image(self) -> Optional[str]:
+        """Return a UHD-arg-safe (forward-slash, NO-SPACE) path to the FPGA
+        bitstream: the operator's `b220.fpga` if set, else the bundled
+        native/uhd/ image. UHD's device-arg parser splits on whitespace, so a
+        path containing spaces (e.g. under 'C:\\Users\\Union Terminal\\...') is
+        copied to a no-space cache dir first. Returns None if nothing resolves or
+        the copy fails (caller then falls back to the images-dir install)."""
+        explicit = str(self.cfg.get("b220", "fpga", default="")).strip()
+        if explicit:
+            src = explicit
+        else:
+            here = os.path.dirname(os.path.abspath(__file__))
+            src = os.path.normpath(os.path.join(
+                here, "..", "..", "native", "uhd",
+                str(self.cfg.get("b220", "fpga_bundled",
+                                 default="usrp_b210_fpga.bin"))))
+        if not os.path.isfile(src):
+            return None
+        src = os.path.normpath(src)
+        if " " not in src:
+            return src.replace("\\", "/")
+        # spaces in the path — stage a copy in a no-space, user-writable dir
+        base = os.path.join(os.environ.get("PUBLIC", r"C:\Users\Public"),
+                            "ShieldTSCM")
+        try:
+            os.makedirs(base, exist_ok=True)
+            dst = os.path.join(base, os.path.basename(src))
+            if not os.path.isfile(dst) or _sha256(dst) != _sha256(src):
+                import shutil
+                shutil.copyfile(src, dst)
+            return dst.replace("\\", "/")
+        except OSError as e:
+            self.info.warnings.append(
+                f"could not stage the FPGA image to a no-space path ({e}); "
+                f"relying on the images-dir install instead")
+            return None
 
     def _ensure_uhd_images(self):
         """The B220 Mini is a LibreSDR clone on a Xilinx Artix-7, NOT the genuine

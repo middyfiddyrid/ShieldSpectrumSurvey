@@ -336,6 +336,47 @@ class TestEnsureUHDImages(unittest.TestCase):
         self.assertEqual(_sha256(self.target), stock_hash)   # untouched
 
 
+class TestFpgaDeviceArg(unittest.TestCase):
+    """The `fpga=` device-arg selection — the AUTHORITATIVE FPGA path (env vars
+    don't reach uhd.dll on Windows). Must be UHD-arg-safe: no spaces, forward
+    slashes, and never doubled."""
+
+    def test_appends_explicit_nospace_image(self):
+        tmp = tempfile.mkdtemp(prefix="fpga_")
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+        img = os.path.join(tmp, "usrp_b210_fpga.bin")
+        with open(img, "wb") as f:
+            f.write(b"BITSTREAM")
+        self.assertNotIn(" ", img)   # tempdir is short-named on this host
+        cfg = FakeCfg({"b220": dict(B220_FAST, fpga=img)})
+        src = FakeB220(cfg)
+        args = src._device_args_with_fpga()
+        self.assertIn("fpga=" + img.replace("\\", "/"), args)
+        self.assertTrue(args.startswith("type=b200"))
+
+    def test_noop_when_fpga_already_in_args(self):
+        cfg = FakeCfg({"b220": dict(B220_FAST,
+                                    device_args="type=b200,fpga=X:/pinned.bin")})
+        src = FakeB220(cfg)
+        self.assertEqual(src._device_args_with_fpga(),
+                         "type=b200,fpga=X:/pinned.bin")
+
+    def test_none_when_image_missing(self):
+        cfg = FakeCfg({"b220": dict(B220_FAST, fpga=r"Z:\no\such.bin")})
+        src = FakeB220(cfg)
+        self.assertEqual(src._device_args_with_fpga(), "type=b200")
+
+    def test_returned_path_has_no_spaces(self):
+        # the real bundled image resolves to a no-space, forward-slash path even
+        # though the repo path contains spaces (staged to PUBLIC\ShieldTSCM)
+        src = FakeB220(CFG)
+        args = src._device_args_with_fpga()
+        if "fpga=" in args:                       # bundled image present
+            val = args.split("fpga=", 1)[1]
+            self.assertNotIn(" ", val)
+            self.assertNotIn("\\", val)
+
+
 class TestFactory(unittest.TestCase):
     def test_open_device_routes_b220(self):
         """open_device('b220') must reach B220Source. Routing is proven whether
