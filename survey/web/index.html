@@ -274,6 +274,7 @@ body.demo #card-casefiles { display:none !important; }
       <select id="device-source">
         <option value="rfexplorer">RF Explorer (6G Combo)</option>
         <option value="pluto">ADALM-Pluto (SDR)</option>
+        <option value="b220">B220 Mini (USRP SDR, 2 antenna ports)</option>
       </select>
       <button class="btn" id="btn-connect">CONNECT</button>
       <span id="device-msg" class="note">not connected</span>
@@ -699,6 +700,24 @@ body.demo #card-casefiles { display:none !important; }
       <span class="note" id="discord-msg"></span>
     </div>
     <div class="scroll" style="max-height:340px"><table id="tbl-anomalies"></table></div>
+  </div>
+  <div class="card" id="stimulate-card">
+    <h3>ACTIVE PROBE (PING) <span class="tag">transmit a stimulus, find what reacts — needs a 2TX/2RX radio</span></h3>
+    <p class="note" style="color:#ffd24a;border-left:3px solid #ffd24a;padding-left:8px">
+      ⚠ This TRANSMITS. It only finds devices that REACT to a ping (receivers,
+      oscillators, junctions) — a "no response" is <b>not</b> a clean bill; run it
+      alongside the passive sweep, never instead of it. Simultaneous stimulate-and-listen
+      needs the <b>B220 (2TX/2RX)</b>; it is bench-pending, not yet field-validated.
+      Stay in bands you are authorized to transmit in (ISM 902–928 / 2400–2483.5 / 5725–5875 MHz).</p>
+    <div class="row">
+      <label>Watch @ MHz <input id="stim-center" type="number" step="0.001" style="width:110px" placeholder="915.0"></label>
+      <label>Ping band <input id="stim-lo" type="number" step="0.1" style="width:90px" placeholder="902"></label>
+      <label>to <input id="stim-hi" type="number" step="0.1" style="width:90px" placeholder="928"></label>
+      <label title="Transmit outside the authorized ISM bands on your own authority — logged"><input id="stim-override" type="checkbox"> band override</label>
+      <button class="btn primary" id="btn-stimulate">▶ PROBE</button>
+      <span class="note" id="stim-msg"></span>
+    </div>
+    <div id="stim-result"></div>
   </div>
   <div class="card">
     <h3>PREDICTED vs FOUND — did everything we expected actually show up?</h3>

@@ -218,6 +218,9 @@ class AD936xSource(BaseDevice):
 
     # single-RX by default; B220 (2R2T) overrides to 2
     channels = 1
+    # config.yaml section this source reads its knobs from; the B220 subclass
+    # overrides to "b220" so both radios keep independent tuning/calibration.
+    CFG_SECTION = "pluto"
     # each read_sweep() is a complete, internally-averaged stepped sweep — the
     # runner uses this to cap redundant host-side averaging passes (speed).
     is_swept_sdr = True
@@ -226,20 +229,20 @@ class AD936xSource(BaseDevice):
         self.cfg = cfg
         self.sdr = None
         self.info = DeviceInfo(driver="ad936x")
-        self._fs = float(cfg.get("pluto", "sample_rate", default=20_000_000))
-        self._keep = float(cfg.get("pluto", "keep_fraction", default=0.8))
-        self._overlap = float(cfg.get("pluto", "overlap", default=0.5))
-        self._settle_s = float(cfg.get("pluto", "settle_seconds", default=0.05))
-        self._nsamp = int(cfg.get("pluto", "capture_samples", default=1 << 16))
-        self._nperseg = int(cfg.get("pluto", "fft_size", default=1024))
-        self._dc_notch_bins = int(cfg.get("pluto", "dc_notch_bins", default=2))
+        self._fs = float(cfg.get(self.CFG_SECTION, "sample_rate", default=20_000_000))
+        self._keep = float(cfg.get(self.CFG_SECTION, "keep_fraction", default=0.8))
+        self._overlap = float(cfg.get(self.CFG_SECTION, "overlap", default=0.5))
+        self._settle_s = float(cfg.get(self.CFG_SECTION, "settle_seconds", default=0.05))
+        self._nsamp = int(cfg.get(self.CFG_SECTION, "capture_samples", default=1 << 16))
+        self._nperseg = int(cfg.get(self.CFG_SECTION, "fft_size", default=1024))
+        self._dc_notch_bins = int(cfg.get(self.CFG_SECTION, "dc_notch_bins", default=2))
         # central guard band (Hz) DISCARDED at every tune center to kill the DC /
         # LO-leakage spike; overlapping neighbours refill it (see read_sweep).
-        self._dc_guard_hz = float(cfg.get("pluto", "dc_guard_hz", default=250_000))
-        self._cal_offset = float(cfg.get("pluto", "cal_offset_db", default=-30.0))
-        self._sweep_bins = int(cfg.get("pluto", "sweep_bins", default=2048))
-        self._gain_mode = str(cfg.get("pluto", "gain_mode", default="manual"))
-        self._gain_db = float(cfg.get("pluto", "gain_db", default=64.0))
+        self._dc_guard_hz = float(cfg.get(self.CFG_SECTION, "dc_guard_hz", default=250_000))
+        self._cal_offset = float(cfg.get(self.CFG_SECTION, "cal_offset_db", default=-30.0))
+        self._sweep_bins = int(cfg.get(self.CFG_SECTION, "sweep_bins", default=2048))
+        self._gain_mode = str(cfg.get(self.CFG_SECTION, "gain_mode", default="manual"))
+        self._gain_db = float(cfg.get(self.CFG_SECTION, "gain_db", default=64.0))
         # per-set_range state (a stable grid so every read_sweep frame matches)
         self._range_hz = None
         self._grid_hz = None
@@ -281,8 +284,8 @@ class AD936xSource(BaseDevice):
         """Find the real tunable range. Start from the configured/known limits
         and confirm the extremes actually tune; clamp + warn if the hardware
         rejects them (e.g. an un-extended AD9363A topping out at 3.8 GHz)."""
-        want_min = float(self.cfg.get("pluto", "freq_min_hz", default=325_000_000))
-        want_max = float(self.cfg.get("pluto", "freq_max_hz", default=3_800_000_000))
+        want_min = float(self.cfg.get(self.CFG_SECTION, "freq_min_hz", default=325_000_000))
+        want_max = float(self.cfg.get(self.CFG_SECTION, "freq_max_hz", default=3_800_000_000))
         real_min = self._confirm_tunable(want_min, ascending=True,
                                          ladder=[70e6, 200e6, 325e6, 400e6])
         real_max = self._confirm_tunable(want_max, ascending=False,
@@ -320,13 +323,13 @@ class AD936xSource(BaseDevice):
     def _validate_required_bands(self, lo_min: float, lo_max: float):
         """If config demands a band the radio can't reach, fail LOUDLY rather
         than silently returning garbage (per spec)."""
-        if not self.cfg.get("pluto", "require_extended", default=False):
+        if not self.cfg.get(self.CFG_SECTION, "require_extended", default=False):
             return
-        need_lo = float(self.cfg.get("pluto", "freq_min_hz", default=70e6))
-        need_hi = float(self.cfg.get("pluto", "freq_max_hz", default=6000e6))
+        need_lo = float(self.cfg.get(self.CFG_SECTION, "freq_min_hz", default=70e6))
+        need_hi = float(self.cfg.get(self.CFG_SECTION, "freq_max_hz", default=6000e6))
         if lo_min > need_lo + 1e6 or lo_max < need_hi - 1e6:
             raise DeviceError(
-                f"pluto.require_extended is set but the radio only tunes "
+                f"{self.CFG_SECTION}.require_extended is set but the radio only tunes "
                 f"{lo_min/1e6:.0f}-{lo_max/1e6:.0f} MHz (need "
                 f"{need_lo/1e6:.0f}-{need_hi/1e6:.0f} MHz). Apply the AD9364 "
                 f"frequency extension or clear pluto.require_extended.")

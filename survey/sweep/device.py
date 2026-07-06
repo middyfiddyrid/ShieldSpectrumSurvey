@@ -574,6 +574,12 @@ def open_device(cfg, source=None) -> BaseDevice:
         dev.connect()
         return dev
 
+    if source in ("b220", "usrp", "uhd"):
+        from .uhd_source import B220Source
+        dev = B220Source(cfg)
+        dev.connect()
+        return dev
+
     if cfg.get("device", "simulate", default=False):
         from .simulator import SimulatedDevice
         dev = SimulatedDevice()

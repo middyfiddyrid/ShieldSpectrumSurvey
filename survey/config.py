@@ -43,7 +43,8 @@ DEFAULTS = {
     },
     "cellmapper": {"import_path": "data/cellmapper_towers.json"},
     "integrations": {"discord_webhook": ""},
-    # spectrum source family: "rfexplorer" (default, unchanged) or "pluto".
+    # spectrum source family: "rfexplorer" (default, unchanged), "pluto", or
+    # "b220" (SUOGOEST B220 Mini / USRP B210-compatible via UHD).
     # env SWEEP_SOURCE overrides this.
     "device": {"simulate": False, "port": "", "baud": 500000, "source": "rfexplorer"},
     # ADALM-Pluto / AD936x SDR source. Only used when device.source == "pluto".
@@ -109,6 +110,39 @@ DEFAULTS = {
         # after a two-radio bench check (HANDOFF: full simultaneous sweep+monitor
         # on ONE radio waits for the July 2RX/2TX B220).
         "concurrent_monitor": False,
+    },
+    # SUOGOEST B220 Mini (USRP B210-compatible, AD9361 2R2T) via UHD. Only used
+    # when device.source == "b220". Sweep-engine knobs mirror the pluto section
+    # (same stepped-sweep code in sdr_source.py, bound through uhd_source.py).
+    # NOTE: the listen/analyze/identify DSP tuning in server.py currently reads
+    # pluto.* regardless of which SDR is connected — those paths see normalised
+    # IQ from both radios, so the shared values stay consistent.
+    "b220": {
+        "device_args": "type=b200",   # UHD device args; add ,serial=... for two units
+        "uhd_dir": "",                # dir with uhd.dll; "" => C:\\Program Files\\UHD\\bin
+        "antenna": "RX2",             # per-channel RX port: "RX2" (RX-only) or "TX/RX"
+        "sample_rate": 20_000_000,    # instantaneous bandwidth per tune (USB3 sustains more; 20M is safe)
+        "keep_fraction": 0.8,
+        "overlap": 0.5,
+        "fft_size": 1024,
+        "capture_samples": 32768,
+        "settle_seconds": 0.01,
+        "dc_notch_bins": 2,
+        "dc_guard_hz": 250_000,
+        "sweep_bins": 2048,
+        "gain_mode": "manual",        # "manual" (repeatable baseline); anything else = AGC
+        "gain_db": 60.0,              # B2xx RX gain range is 0-76 dB
+        "sweep_avg_passes": 2,
+        "identify_samples": 131072,
+        "identify_captures": 8,
+        # UHD fc32 samples are normalised ~[-1,1] (vs the Pluto sweep path's raw
+        # +/-2048 ADC counts), so the equivalent offset sits ~+66 dB above the
+        # Pluto's -30. APPROXIMATE — tune per-unit; lean on baseline-delta.
+        "cal_offset_db": 36.0,
+        # AD9361: full 70 MHz - 6 GHz out of the box (no extension dance)
+        "freq_min_hz": 70_000_000,
+        "freq_max_hz": 6_000_000_000,
+        "require_extended": False,
     },
     "cache": {"dir": "cache", "max_age_hours": 720},
     # monitor recordings (WAV of a received signal). Client-sensitive PII: the

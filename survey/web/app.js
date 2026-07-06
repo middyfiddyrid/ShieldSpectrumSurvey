@@ -1047,7 +1047,7 @@ async function renderDeviceRoles() {
   let r;
   try { r = await api("/api/device/roles"); }
   catch (_) { if (el) el.style.display = "none"; if (sw) sw.textContent = ""; return; }
-  const name = s => s === "pluto" ? "Pluto" : "RF Explorer";
+  const name = s => s === "pluto" ? "Pluto" : s === "b220" ? "B220 Mini" : "RF Explorer";
   const roles = r.roles || [];
   if (el) {
     if (!roles.length) { el.style.display = "none"; }
@@ -1078,7 +1078,7 @@ async function renderDeviceRoles() {
 
 $("btn-connect").onclick = async () => {
   const src = $("device-source") ? $("device-source").value : null;
-  $("device-msg").textContent = `connecting to ${src === "pluto" ? "Pluto" : "RF Explorer"}…`;
+  $("device-msg").textContent = `connecting to ${src === "pluto" ? "Pluto" : src === "b220" ? "B220 Mini (first connect flashes firmware, ~20 s)" : "RF Explorer"}…`;
   try {
     // dual-radio: if concurrent monitoring is on and ANOTHER radio is already
     // connected, keep it open (RFE sweeps while the Pluto monitors)
@@ -1389,17 +1389,17 @@ function freqLinkDelegate(e) {
 });
 
 function inRangeClient(center) {
-  // dual mode: if a Pluto is connected as the monitor, listening works even
-  // while the RF Explorer is the active sweeper — the server tunes the Pluto
-  // and enforces its own range check.
+  // dual mode: if an SDR (Pluto or B220) is connected as the monitor, listening
+  // works even while the RF Explorer is the active sweeper — the server tunes
+  // the SDR and enforces its own range check.
   const roles = App.state && App.state.roles;
-  if (roles && roles.roles && roles.roles.some(r => r.source === "pluto"))
+  if (roles && roles.roles && roles.roles.some(r => SDR_SOURCES.has(r.source)))
     return { ok: true };
   const dev = App.state && App.state.device;
   if (!dev || !dev.modules || !dev.modules.length)
     return { ok: false, msg: "connect a device first (Session tab)." };
-  if (dev.driver !== "pluto")
-    return { ok: false, msg: "tune / view / listen needs the Pluto (SDR) — connect it in the DEVICE card (it can stay connected alongside the RF Explorer)." };
+  if (!SDR_SOURCES.has(dev.driver))
+    return { ok: false, msg: "tune / view / listen needs an SDR (Pluto or B220 Mini) — connect one in the DEVICE card (it can stay connected alongside the RF Explorer)." };
   const lo = Math.min(...dev.modules.map(m => m.min_mhz));
   const hi = Math.max(...dev.modules.map(m => m.max_mhz));
   if (center < lo || center > hi)
@@ -2607,6 +2607,10 @@ function modulesAvailable() {
   return dev ? dev.modules.map(m => m.side) : [];
 }
 
+// SDR-family sources: radios that can capture raw IQ (tune/listen/analyze/
+// identify). The RF Explorer never can.
+const SDR_SOURCES = new Set(["pluto", "b220"]);
+
 // true when the CONNECTED radio is the single-RX Pluto (drives antenna-prompt
 // wording). Keyed off the device driver so it's correct regardless of how the
 // source was picked; falls back to the selected source before connect.
@@ -2614,6 +2618,13 @@ function isPlutoDevice() {
   const dev = App.state && App.state.device;
   if (dev && dev.driver) return dev.driver === "pluto";
   return App.state && App.state.source === "pluto";
+}
+
+// true when the connected (or picked) radio is ANY IQ-capable SDR.
+function isSdrDevice() {
+  const dev = App.state && App.state.device;
+  if (dev && dev.driver) return SDR_SOURCES.has(dev.driver);
+  return !!(App.state && SDR_SOURCES.has(App.state.source));
 }
 
 // F4: true when the device has a single RX (Pluto) → one "Main sweep" step.
@@ -2717,7 +2728,7 @@ $("btn-identify").onclick = async () => {
   const c = parseFloat($("id-center").value);
   if (!c) return alert("Enter a center frequency in MHz (e.g. 433.92).");
   const bw = parseFloat($("id-bw").value);
-  $("id-msg").textContent = isPlutoDevice() ? "capturing IQ & analyzing…" : "matching…";
+  $("id-msg").textContent = isSdrDevice() ? "capturing IQ & analyzing…" : "matching…";
   $("id-results").innerHTML = "";
   try {
     const r = await api("/api/identify", { center_mhz: c, bw_khz: isNaN(bw) ? null : bw });
@@ -3268,6 +3279,40 @@ async function bleDetailScan() {
   } catch (e) { $("ble-detail-msg").textContent = "FAILED: " + e.message; }
 }
 $("btn-scan-ble-detail").onclick = bleDetailScan;
+
+async function stimulateProbe() {
+  const center = parseFloat($("stim-center").value);
+  const lo = parseFloat($("stim-lo").value);
+  const hi = parseFloat($("stim-hi").value);
+  if (!(center > 0) || !(lo > 0) || !(hi > lo)) {
+    $("stim-msg").textContent = "enter a watch frequency and a valid ping band (lo < hi)";
+    return;
+  }
+  const override = $("stim-override").checked;
+  if (override && !confirm("Band override: you are choosing to transmit outside the " +
+      "authorized ISM bands. Confirm you have lawful authority to transmit here.")) return;
+  $("stim-msg").textContent = "probing (transmitting)…";
+  $("stim-result").innerHTML = "";
+  try {
+    const r = await api("/api/stimulate/probe",
+      { center_mhz: center, band_lo_mhz: lo, band_hi_mhz: hi, override_band: override });
+    $("stim-msg").textContent = r.mode ? `mode: ${r.mode}` : "";
+    const cls = r.verdict === "RESPONSE_DETECTED" ? "score-hi" : "";
+    let html = `<p class="${cls}"><b>${esc(r.verdict.replace(/_/g, " "))}</b></p>` +
+      `<p class="note">${esc(r.plain)}</p>`;
+    if (r.responders && r.responders.length) {
+      html += "<table><tr><th>Frequency</th><th>Δ vs quiet</th><th>Stim SNR</th></tr>" +
+        r.responders.map(x =>
+          `<tr><td>${fmtF(x.freq_mhz)}</td><td class="score-hi">+${x.delta_db} dB</td>` +
+          `<td>${x.stim_snr_db} dB</td></tr>`).join("") + "</table>";
+    }
+    (r.warnings || []).forEach(w => {
+      html += `<p class="note" style="color:#ffd24a">⚠ ${esc(w)}</p>`;
+    });
+    $("stim-result").innerHTML = html;
+  } catch (e) { $("stim-msg").textContent = "FAILED: " + e.message; }
+}
+$("btn-stimulate").onclick = stimulateProbe;
 
 function bleCard(d) {
   const mfr = d.manufacturers.map(m => esc(m.company) +

@@ -4,7 +4,58 @@ Continuation brief for a fresh Fable/Claude Code session. Read this first, then 
 
 ---
 
-# ⚡⚡ NEXT-SESSION HANDOFF — 2026-07-04 — scoring-explain + BLE-enrich + active-ping engine (READ FIRST)
+# ⚡⚡ NEXT-SESSION HANDOFF — 2026-07-06 — B220 Mini arrived + integrated (READ FIRST)
+
+The **SUOGOEST B220 Mini** (USRP B210-compatible, AD9361, 70 MHz–6 GHz, **2R2T**,
+USB 3.0) arrived and is integrated as a third device source. Branch
+**`b220-mini-source`** (off `active-stim-ble-scoring`). Full suite green (291
+tests incl. 18 new). The parallel active-stimulation session's TX hooks
+(`UHDRadio.start_tx/stop_tx`, `B220Source.stim_*`) are interleaved in
+`uhd_source.py`/`stimulate.py` and were committed together — the two streams
+interlock.
+
+## What was built
+- **`survey/sweep/uhd_source.py`** — `_UHDLib` (ctypes over `uhd.dll`'s C API;
+  no UHD Python wheels exist for Win/Py3.14; struct layouts pinned by tests) +
+  `UHDRadio` + **`B220Source(AD936xSource)`** with `channels = 2`:
+  right module = RX ch0, left = RX ch1, so dual-phase interior sweeps drive two
+  physical antenna ports. `capture_iq`/`stream_iq` (identify/analyze/listen/
+  record) all wired. `UHD_IMAGES_DIR` auto-set to `%LOCALAPPDATA%\uhd\images`.
+- `AD936xSource` gained **`CFG_SECTION`** ("pluto" default; "b220" override) —
+  each radio reads its own config block. New `b220:` section in config defaults
+  (`cal_offset_db: 36` — fc32 ±1 scale ≈ +66 dB vs the Pluto's raw counts).
+- `open_device` routes `b220|usrp|uhd`; DEVICE dropdown gained "B220 Mini";
+  app.js: `SDR_SOURCES` set + `isSdrDevice()` so tune/listen/analyze gates
+  accept both SDRs; role names show "B220 Mini".
+- Tests: `tests/test_uhd_source.py` (18: struct ABI sizes, cfg-section split,
+  side→channel mapping, synthetic dual-channel sweep, stream lifecycle, gain
+  backoff, factory routing).
+
+## Windows bring-up (DONE on the tower — see SDR_SETUP.md B220 section)
+Ettus WinUSB drivers installed (pnputil, all infs) · UHD 4.10 host at
+`C:\Program Files\UHD` (SHA-256 verified) · b2xx images at
+`%LOCALAPPDATA%\uhd\images` · probe DETECTED **B210**, firmware flash OK.
+
+## ⚑ BLOCKED at FPGA load — needs operator's hands
+`uhd_usrp_probe` fails with **`fx3 is in state 5`** (wedged FX3). Soft device
+restart does NOT clear it. **Physically unplug/replug the radio's USB cable**
+(different port / USB 2.0 port if it persists). After a real power cycle the
+device re-enumerates as "WestBridge", UHD reloads firmware and the FPGA load
+should complete. THEN: bench checklist below.
+
+## ⚑ B220 BENCH CHECKLIST (after the replug clears the FX3)
+1. `uhd_usrp_probe --args type=b200` → expect full B210 tree, 2 RX chains.
+2. `python app.py` → DEVICE card → "B220 Mini" → CONNECT (first connect ~20 s).
+   Expect TWO modules (RX-A right / RX-B left), 70–6000 MHz.
+3. Antennas on **both RX2 ports**. Ambient sweep → interior sweep (both phases).
+4. Click a baseline freq → tune/listen; ◎ ANALYZE on a known signal; ● REC.
+5. Tune `b220.cal_offset_db` against a known reference (start 36).
+6. Active-stim session's TX path: verify separately per its own checklist
+   (TX-A port, chirp keying) — receive-only sweeps must stay receive-only.
+
+---
+
+# ⚡⚡ PRIOR HANDOFF — 2026-07-04 — scoring-explain + BLE-enrich + active-ping engine
 
 Branch **`active-stim-ble-scoring`** (off `pocsag-decoder`). NOT merged/pushed. **273 tests green.**
 Three operator asks from the 2026-07-04 voice dump (+ a linked PoPETs paper). `config.yaml` backed

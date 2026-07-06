@@ -92,6 +92,30 @@ class StimResponse:
 
 
 # ---------------------------------------------------------------------------
+# Stimulus waveform — pure numpy, unit tested (the radio streams this on TX)
+# ---------------------------------------------------------------------------
+
+def make_chirp(fs: float, span_hz: float, n: int, amp: float = 0.5,
+               sweeps: float = 8.0) -> np.ndarray:
+    """A repeating linear frequency sweep (chirp) across ±span/2 at baseband, to be
+    up-converted by the TX LO so it illuminates the whole [center-span/2, center+span/2]
+    band. A swept tone (vs. a static CW) pokes a device's receiver/AGC across its
+    entire passband, not just one spot. `amp` stays <1 (DAC headroom, never full-scale
+    into the front end — same discipline as the NLJD TX). `span_hz` is clamped to fs
+    (can't synthesise beyond the Nyquist window; wider bands need multiple TX windows)."""
+    span = float(min(span_hz, fs))
+    n = int(n)
+    if n <= 0:
+        return np.zeros(0, dtype=np.complex64)
+    period = max(1, int(n / max(sweeps, 1.0)))
+    idx = np.arange(n)
+    frac = (idx % period) / period                 # 0..1 sawtooth
+    f_inst = -span / 2.0 + span * frac             # instantaneous freq, Hz
+    phase = 2.0 * np.pi * np.cumsum(f_inst) / fs
+    return (amp * np.exp(1j * phase)).astype(np.complex64)
+
+
+# ---------------------------------------------------------------------------
 # Pure DSP — no hardware
 # ---------------------------------------------------------------------------
 
@@ -226,9 +250,21 @@ class StimulationEngine:
 
         freqs_q, quiet_db = self._avg_psd(
             lambda: self.radio.stim_capture_quiet(center_hz, self.fs, self.dwell_samples))
-        freqs_s, stim_db = self._avg_psd(
-            lambda: self.radio.stim_capture_stimulated(center_hz, band_lo_hz, band_hi_hz,
-                                                       self.fs, self.dwell_samples))
+
+        # Concurrent radios (B220: independent TX/RX chains) key the stimulus ONCE
+        # for the whole averaging burst via stim_tx_on/off; interleaved/synthetic
+        # radios that lack those hooks manage TX inside stim_capture_stimulated.
+        tx_on = getattr(self.radio, "stim_tx_on", None)
+        tx_off = getattr(self.radio, "stim_tx_off", None)
+        if tx_on:
+            tx_on(band_lo_hz, band_hi_hz)
+        try:
+            freqs_s, stim_db = self._avg_psd(
+                lambda: self.radio.stim_capture_stimulated(center_hz, band_lo_hz, band_hi_hz,
+                                                           self.fs, self.dwell_samples))
+        finally:
+            if tx_off:
+                tx_off()
         if freqs_q is None or freqs_s is None or quiet_db.shape != stim_db.shape:
             return StimResponse(verdict="INCONCLUSIVE",
                                 plain=_plain("INCONCLUSIVE", [], band_mhz),

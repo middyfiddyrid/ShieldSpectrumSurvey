@@ -1,10 +1,13 @@
-# SDR Source Setup — ADALM-Pluto (and the July B220)
+# SDR Source Setup — ADALM-Pluto and the B220 Mini
 
-The sweep engine can run from the **RF Explorer** (default, unchanged) or an
-**ADALM-Pluto** SDR. The rest of the app is identical either way — the Pluto is
-wrapped as a `BaseDevice` (`survey/sweep/sdr_source.py`) that synthesises the same
-`SweepFrame(freqs_mhz, amps_dbm)` the RF Explorer produces, by stepping the LO,
-capturing IQ, computing a Welch PSD, and stitching the segments together.
+The sweep engine can run from the **RF Explorer** (default, unchanged), an
+**ADALM-Pluto** SDR, or the **SUOGOEST B220 Mini** (USRP B210-compatible,
+AD9361 2R2T — see the B220 section at the end). The rest of the app is
+identical either way — each SDR is wrapped as a `BaseDevice`
+(`survey/sweep/sdr_source.py`, `survey/sweep/uhd_source.py`) that synthesises
+the same `SweepFrame(freqs_mhz, amps_dbm)` the RF Explorer produces, by
+stepping the LO, capturing IQ, computing a Welch PSD, and stitching the
+segments together.
 
 ## Selecting the source
 
@@ -141,3 +144,68 @@ sweep over the 2.4 GHz ISM band and checks: contiguous trace, no center-bin
 spikes (worst-center excess ≤ 6 dB over local floor), seam continuity, and a
 `capture_iq()` round-trip. The pure DSP (Welch / notch / plan / stitch / stepped
 sweep) is covered hardware-free by `tests/test_sdr_source.py`.
+
+---
+
+## B220 Mini (SUOGOEST, USRP B210-compatible) — arrived 2026-07-06
+
+AD9361, **70 MHz – 6 GHz, 2R2T**, USB 3.0 Type-C. Enumerates as an Ettus USRP
+B2xx (`USB\VID_2500&PID_0020`) and is driven by **UHD**, not libiio. UHD probe
+identifies it as a **B210**. No frequency-extension dance needed — full range
+out of the box.
+
+### Why it matters to the app
+
+- **Two real RX channels**: the app's dual-module model (left/right) maps onto
+  the two physical RX ports — `right` = RX channel 0, `left` = RX channel 1 —
+  so interior sweep phases drive separate antennas (`survey/sweep/uhd_source.py`,
+  `B220Source.channels = 2`).
+- Full SDR capability set: `capture_iq` / `stream_iq` → identify, analyze,
+  listen, record all work, same as the Pluto.
+- Independent TX chain used (deliberately, TX-A only) by the active-stimulation
+  engine — see `survey/stimulate.py`. Sweeps remain receive-only.
+
+### Windows install (one time — DONE on the tower 2026-07-06)
+
+1. **Ettus WinUSB driver** — `erllc_uhd_winusb_driver.zip` from
+   <https://files.ettus.com/binaries/misc/>; install every `.inf` with
+   `pnputil /add-driver <inf> /install` (admin). Covers the pre-firmware
+   "WestBridge" state and the post-firmware B200/B210 identity.
+2. **UHD host** — `uhd_4.10.0.0-release_Win64_VS2022.exe` from
+   <https://files.ettus.com/binaries/uhd/latest_release/Windows11/VS2022/>
+   (silent: `/S`). Installs to `C:\Program Files\UHD`. SHA-256 verified.
+3. **FPGA/firmware images** (user-writable, no admin):
+   `python "C:\Program Files\UHD\lib\uhd\utils\uhd_images_downloader.py" -t b2xx -i %LOCALAPPDATA%\uhd\images`
+   The app and probe need `UHD_IMAGES_DIR=%LOCALAPPDATA%\uhd\images` — the
+   B220Source sets it automatically if unset.
+4. Verify: `"C:\Program Files\UHD\bin\uhd_usrp_probe.exe" --args type=b200`
+   (first contact flashes FX3 firmware + FPGA over USB, ~20-30 s).
+
+### Selecting it
+
+```yaml
+# config.yaml
+device:
+  source: b220        # "rfexplorer" | "pluto" | "b220"
+b220:
+  device_args: "type=b200"   # add ,serial=... if two UHD radios are attached
+  antenna: "RX2"             # RX-only port; TX/RX is reserved for stimulation
+```
+
+Or the DEVICE card dropdown ("B220 Mini"), or `set SWEEP_SOURCE=b220`.
+
+### Gotchas (learned on this unit)
+
+- **`fx3 is in state 5`** during FPGA load = the FX3 USB controller is wedged.
+  A soft `pnputil /restart-device` does NOT clear it (no VBUS cut). **Physically
+  unplug/replug the USB cable**; if it persists, use a different port (USB 2.0
+  ports are often more reliable than 3.0 with these clones) or a better Type-C
+  cable. A real power cycle re-enumerates the device as "WestBridge" and UHD
+  reloads firmware cleanly.
+- **Python binding**: none — no official UHD wheels for Windows/Py3.14. The app
+  binds `uhd.dll`'s C API directly via ctypes (`_UHDLib` in `uhd_source.py`).
+  Struct layouts are pinned by unit tests (`tests/test_uhd_source.py`).
+- **Calibration**: fc32 samples are normalised ±1, so `b220.cal_offset_db`
+  (~+36) sits ≈66 dB above the Pluto's raw-count −30. Approximate either way —
+  baseline-delta is the detection method, not absolute dBm.
+- Only ONE process can hold the radio (same as the Pluto).
