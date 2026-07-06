@@ -6,7 +6,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from survey.stimulate import StimulationEngine, find_responders  # noqa: E402
+from survey.stimulate import StimulationEngine, find_responders, make_chirp  # noqa: E402
 
 
 class FakeCfg:
@@ -57,6 +57,51 @@ class Radio:
         if self.response == "floor":
             return _noise(n, sigma=3.16)              # +10 dB, but flat (no line)
         return _noise(n) + _tone(n, fs, 500_000)      # 'line' and 'always'
+
+
+class ConcurrentRadio(Radio):
+    """A 2T2R-style radio that keys TX once per burst via stim_tx_on/off (the B220
+    path). Records the lifecycle so the test can prove the engine used it."""
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.tx_on_calls = 0
+        self.tx_off_calls = 0
+        self.tx_live = False
+
+    def stim_mode(self):
+        return "concurrent"
+
+    def stim_tx_on(self, lo_hz, hi_hz):
+        self.tx_on_calls += 1
+        self.tx_live = True
+
+    def stim_tx_off(self):
+        self.tx_off_calls += 1
+        self.tx_live = False
+
+    def stim_capture_stimulated(self, center_hz, lo_hz, hi_hz, fs, n):
+        assert self.tx_live, "engine must key TX before a stimulated capture"
+        return super().stim_capture_stimulated(center_hz, lo_hz, hi_hz, fs, n)
+
+
+class TestChirp(unittest.TestCase):
+    def test_chirp_sweeps_the_band(self):
+        fs, span, n = 4_000_000.0, 1_000_000.0, 1 << 16
+        w = make_chirp(fs, span, n)
+        self.assertEqual(w.dtype, np.complex64)
+        self.assertLessEqual(float(np.max(np.abs(w))), 1.0)     # DAC headroom
+        f_inst = np.diff(np.unwrap(np.angle(w))) * fs / (2 * np.pi)
+        # ignore sawtooth wrap glitches via percentiles; energy spans ~±span/2
+        self.assertLess(np.percentile(f_inst, 2), -span / 2 * 0.7)
+        self.assertGreater(np.percentile(f_inst, 98), span / 2 * 0.7)
+
+    def test_span_clamped_to_nyquist(self):
+        w = make_chirp(2_000_000.0, 50_000_000.0, 4096)         # span >> fs
+        self.assertEqual(w.size, 4096)
+        self.assertLessEqual(float(np.max(np.abs(w))), 1.0)
+
+    def test_zero_length(self):
+        self.assertEqual(make_chirp(4e6, 1e6, 0).size, 0)
 
 
 class TestFindResponders(unittest.TestCase):
@@ -130,6 +175,21 @@ class TestEngine(unittest.TestCase):
         res = eng.probe(self.center, *self.band, override_band=True)
         self.assertNotEqual(res.verdict, "BLOCKED_BAND")
         self.assertTrue(any("OVERRIDE" in w for w in res.warnings))
+
+    def test_concurrent_radio_keys_tx_once_per_burst(self):
+        radio = ConcurrentRadio(response="line")
+        res = StimulationEngine(self.cfg, radio).probe(self.center, *self.band)
+        self.assertEqual(res.verdict, "RESPONSE_DETECTED")
+        self.assertEqual(res.mode, "concurrent")
+        self.assertEqual(radio.tx_on_calls, 1)       # keyed ONCE for the whole burst
+        self.assertEqual(radio.tx_off_calls, 1)      # and always turned back off
+        self.assertFalse(radio.tx_live)
+
+    def test_concurrent_tx_off_even_on_block(self):
+        radio = ConcurrentRadio(permitted=((2400.0, 2483.5),))
+        res = StimulationEngine(self.cfg, radio).probe(self.center, *self.band)
+        self.assertEqual(res.verdict, "BLOCKED_BAND")
+        self.assertFalse(radio.tx_live)              # never keyed TX out of band
 
 
 if __name__ == "__main__":

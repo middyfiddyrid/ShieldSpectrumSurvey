@@ -96,7 +96,8 @@ def create_app(db, cfg, demo=False) -> Flask:
     DEMO_BLOCKED = ("/api/poi", "/api/report/internal_memo",
                     "/api/analyze/threat_vectors", "/api/case_files", "/case_files",
                     "/api/triage", "/api/novelty", "/api/record",
-                    "/api/attribution", "/api/decode/override", "/api/ble/scan")
+                    "/api/attribution", "/api/decode/override", "/api/ble/scan",
+                    "/api/stimulate")
 
     @app.before_request
     def _demo_guard():
@@ -1643,6 +1644,38 @@ def create_app(db, cfg, demo=False) -> Flask:
         return jsonify({"count": len(records), "message": message,
                         "trackers": sum(1 for r in records if r["is_tracker"]),
                         "devices": records})
+
+    @app.post("/api/stimulate/probe")
+    def stimulate_probe():
+        """Active-stimulation probe: transmit a swept stimulus across a band and look
+        for a device that REACTS. Requires a 2TX/2RX radio (B220) for simultaneous
+        stimulate-and-listen. TRANSMITS — demo-blocked, refuses unauthorized bands
+        unless override_band is acknowledged. HARDWARE-UNTESTED end-to-end; see
+        STIMULATE_HARDWARE_TODO.md before field use."""
+        from .stimulate import StimulationEngine
+        body = request.get_json(silent=True) or {}
+        center = body.get("center_mhz")
+        lo = body.get("band_lo_mhz")
+        hi = body.get("band_hi_mhz")
+        if center is None or lo is None or hi is None:
+            return err("need center_mhz, band_lo_mhz, band_hi_mhz")
+        dev, mlock, mstop, msrc = st.controller.monitor_target()
+        if dev is None or not hasattr(dev, "stim_mode"):
+            return err("active radio can't transmit — connect a 2TX/2RX radio (B220) "
+                       "for active stimulation (the RF Explorer and Pluto can't do "
+                       "simultaneous stimulate-and-listen)", 409)
+        if st.controller.busy(msrc):
+            return err("radio is busy — stop the current sweep/monitor first", 409)
+        try:
+            eng = StimulationEngine(cfg, dev)
+            mstop.set()
+            with mlock:
+                res = eng.probe(float(center) * 1e6, float(lo) * 1e6, float(hi) * 1e6,
+                                override_band=bool(body.get("override_band")))
+        except Exception as e:  # noqa: BLE001
+            log.exception("stimulation probe failed")
+            return err(f"stimulation failed: {e}", 500)
+        return jsonify(res.to_dict())
 
     # ---------- signal wiki (captures) ----------
 

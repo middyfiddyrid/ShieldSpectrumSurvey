@@ -68,6 +68,12 @@ class TestDemoGuard(unittest.TestCase):
         # standalone BLE scan harvests third-party MAC addresses -> internal only
         self.assertEqual(self.c.post("/api/ble/scan", json={}).status_code, 403)
 
+    def test_stimulate_blocked_in_demo(self):
+        # the active-stimulation probe TRANSMITS -> never reachable in the public demo
+        self.assertEqual(self.c.post("/api/stimulate/probe",
+                                     json={"center_mhz": 915, "band_lo_mhz": 902,
+                                           "band_hi_mhz": 928}).status_code, 403)
+
     def _analyze_decode(self, demo):
         d = tempfile.mkdtemp()
         db = Database(os.path.join(d, "t.db"))
