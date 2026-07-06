@@ -79,6 +79,15 @@ class _StreamCmd(ctypes.Structure):
                 ("time_spec_frac_secs", ctypes.c_double)]
 
 
+def _sha256(path: str) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _default_uhd_dirs() -> list:
     dirs = []
     env = os.environ.get("UHD_DIR")
@@ -537,6 +546,7 @@ class B220Source(AD936xSource):
             cand = os.path.join(os.environ.get("LOCALAPPDATA", ""), "uhd", "images")
             if os.path.isdir(cand):
                 os.environ["UHD_IMAGES_DIR"] = cand
+        self._ensure_uhd_images()
         lib = _UHDLib(self._uhd_dir)
         try:
             self.sdr = UHDRadio(lib, self._device_args)
@@ -564,6 +574,54 @@ class B220Source(AD936xSource):
                 f"radio reports {n} RX channel(s), expected 2 — left module "
                 f"disabled")
             type(self).channels = n or 1
+
+    def _ensure_uhd_images(self):
+        """The B220 Mini is a LibreSDR clone on a Xilinx Artix-7, NOT the genuine
+        B210's Spartan-6. UHD's stock `usrp_b210_fpga.bin` is a Spartan-6 bitstream
+        that can never configure this board — it fails with `fx3 is in state 5`
+        (FPGA DONE never asserts). We ship the correct Artix-7 bitstream in
+        native/uhd/ and install it into UHD's images dir (backing up any Ettus
+        original as *.ettus-orig, never deleting) so a bare `--args type=b200`
+        loads it. Idempotent: only copies when the target differs by hash. If the
+        operator has already pointed b220.fpga at a specific image, we do nothing.
+
+        Config knobs (both optional):
+          b220.fpga        — explicit FPGA .bin path; skips this auto-install
+          b220.fpga_bundled— override the bundled image name in native/uhd/
+        """
+        if str(self.cfg.get("b220", "fpga", default="")).strip():
+            return  # operator pinned an explicit image; respect it
+        here = os.path.dirname(os.path.abspath(__file__))
+        bundled_dir = os.path.normpath(os.path.join(here, "..", "..", "native", "uhd"))
+        bundled = os.path.join(
+            bundled_dir,
+            str(self.cfg.get("b220", "fpga_bundled", default="usrp_b210_fpga.bin")))
+        if not os.path.isfile(bundled):
+            return  # nothing bundled — fall back to whatever UHD already has
+        images_dir = (os.environ.get("UHD_IMAGES_DIR")
+                      or self._uhd_dir
+                      or os.path.join(os.environ.get("LOCALAPPDATA", ""), "uhd", "images"))
+        if not images_dir or not os.path.isdir(images_dir):
+            return
+        target = os.path.join(images_dir, "usrp_b210_fpga.bin")
+        try:
+            if os.path.isfile(target) and _sha256(target) == _sha256(bundled):
+                return  # already the right image
+            if os.path.isfile(target):
+                backup = target + ".ettus-orig"
+                if not os.path.exists(backup):   # keep the FIRST original only
+                    os.replace(target, backup)   # rename, never delete
+            import shutil
+            shutil.copyfile(bundled, target)
+            log.info("installed LibreSDR FPGA image into %s", images_dir)
+            self.info.warnings.append(
+                "installed the LibreSDR (Artix-7) FPGA image — the stock Ettus "
+                "B210 bitstream cannot configure this clone")
+        except OSError as e:
+            self.info.warnings.append(
+                f"could not install the LibreSDR FPGA image ({e}); if connect "
+                f"fails with 'fx3 is in state 5', copy native/uhd/usrp_b210_fpga.bin "
+                f"into {images_dir} by hand")
 
     def connect(self) -> DeviceInfo:
         info = super().connect()
@@ -675,14 +733,34 @@ class B220Source(AD936xSource):
                              default=list(DEFAULT_PERMITTED_BANDS_MHZ))
         return [tuple(b) for b in bands]
 
+    def _stim_rx_channel(self) -> int:
+        """Which RX channel listens during stimulation. Default 0 (RX2-A). Set
+        stimulate.rx_channel = 1 to listen on RX2-B (the OTHER channel) for more
+        isolation from TX/RX-A — the four ports are TX/RX-A, RX2-A, TX/RX-B, RX2-B."""
+        ch = int(self.cfg.get("stimulate", "rx_channel", default=0))
+        return ch if ch < self.channels else 0
+
     def stim_capture_quiet(self, center_hz: float, fs: float, n: int) -> np.ndarray:
         """RX capture with TX guaranteed OFF (the quiet reference)."""
         if self.sdr is not None:
             self.sdr.stop_tx()
+        self._chan = self._stim_rx_channel()
         return self.capture_iq(center_hz, fs, n)
 
+    def start_tx(self, waveform: np.ndarray, center_hz: float, rate_hz: float,
+                 gain_db: float):
+        """Generic transmitter entry point (so a B220 can be the TX side of a split
+        Pluto/B220 rig). Emits on the configured TX channel/port."""
+        tx_chan = int(self.cfg.get("stimulate", "tx_channel", default=0))
+        self.sdr.start_tx(waveform, center_hz, rate_hz, gain_db, chan=tx_chan,
+                          antenna=str(self.cfg.get("stimulate", "tx_antenna", default="TX/RX")))
+
+    def stop_tx(self):
+        if self.sdr is not None:
+            self.sdr.stop_tx()
+
     def stim_tx_on(self, band_lo_hz: float, band_hi_hz: float):
-        """Start the swept stimulus across [lo,hi] on TX-A for the whole burst."""
+        """Start the swept stimulus across [lo,hi] on the TX port for the whole burst."""
         from ..stimulate import make_chirp
         tx_rate = float(self.cfg.get("stimulate", "tx_sample_rate", default=self._fs))
         gain = float(self.cfg.get("stimulate", "tx_gain_db", default=50.0))
@@ -691,8 +769,7 @@ class B220Source(AD936xSource):
         n_wave = int(self.cfg.get("stimulate", "tx_wave_samples", default=1 << 16))
         wave = make_chirp(tx_rate, span, n_wave,
                           amp=float(self.cfg.get("stimulate", "tx_amp", default=0.5)))
-        self.sdr.start_tx(wave, center, tx_rate, gain, chan=0,
-                          antenna=str(self.cfg.get("stimulate", "tx_antenna", default="TX/RX")))
+        self.start_tx(wave, center, tx_rate, gain)
 
     def stim_tx_off(self):
         if self.sdr is not None:
@@ -706,6 +783,7 @@ class B220Source(AD936xSource):
         settle = float(self.cfg.get("stimulate", "tx_settle_s", default=0.05))
         if settle > 0:
             time.sleep(settle)
+        self._chan = self._stim_rx_channel()
         return self.capture_iq(center_hz, fs, n)
 
     def is_alive(self) -> bool:

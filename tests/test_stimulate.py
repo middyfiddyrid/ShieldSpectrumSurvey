@@ -6,7 +6,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from survey.stimulate import StimulationEngine, find_responders, make_chirp  # noqa: E402
+from survey.stimulate import (  # noqa: E402
+    SplitStimRadio, StimulationEngine, find_responders, make_chirp)
 
 
 class FakeCfg:
@@ -82,6 +83,57 @@ class ConcurrentRadio(Radio):
     def stim_capture_stimulated(self, center_hz, lo_hz, hi_hz, fs, n):
         assert self.tx_live, "engine must key TX before a stimulated capture"
         return super().stim_capture_stimulated(center_hz, lo_hz, hi_hz, fs, n)
+
+
+class _SplitTx:
+    """Transmit radio for the split setup — records that it was keyed and that a real
+    waveform was handed to it."""
+    _fs = 4_000_000
+
+    def __init__(self, state):
+        self.state = state
+
+    def start_tx(self, wave, center_hz, rate_hz, gain_db):
+        self.state["tx_live"] = True
+        self.state["wave_len"] = len(wave)
+
+    def stop_tx(self):
+        self.state["tx_live"] = False
+
+
+class _SplitRx:
+    """Receive radio — injects the device-response tone only while TX is live, so the
+    quiet capture is clean and the stimulated capture shows the reaction."""
+    def __init__(self, state):
+        self.state = state
+
+    def capture_iq(self, center_hz, fs, n):
+        iq = _noise(n)
+        if self.state.get("tx_live"):
+            iq = iq + _tone(n, fs, 500_000)
+        return iq
+
+
+class TestSplitRadio(unittest.TestCase):
+    def test_pluto_tx_b220_rx_detects_response(self):
+        state = {}
+        radio = SplitStimRadio(FakeCfg(), _SplitTx(state), _SplitRx(state))
+        res = StimulationEngine(FakeCfg(), radio).probe(915_000_000, 902_000_000, 928_000_000)
+        self.assertEqual(res.mode, "split")
+        self.assertEqual(res.verdict, "RESPONSE_DETECTED")
+        self.assertGreater(state["wave_len"], 0)         # a real chirp was transmitted
+        self.assertFalse(state["tx_live"])               # TX turned off after the burst
+
+    def test_split_blocked_band_never_transmits(self):
+        state = {}
+        cfg = FakeCfg()
+        cfg._vals = dict(FakeCfg._vals)
+        radio = SplitStimRadio(cfg, _SplitTx(state), _SplitRx(state))
+        # 915 not inside a 2.4 GHz-only permit -> blocked before any TX
+        radio.stim_permitted_bands = lambda: [(2400.0, 2483.5)]
+        res = StimulationEngine(cfg, radio).probe(915_000_000, 902_000_000, 928_000_000)
+        self.assertEqual(res.verdict, "BLOCKED_BAND")
+        self.assertNotIn("tx_live", state)               # start_tx never called
 
 
 class TestChirp(unittest.TestCase):

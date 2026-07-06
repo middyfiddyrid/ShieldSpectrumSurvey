@@ -570,3 +570,31 @@ class PlutoSource(AD936xSource):
 
     def _read_iq(self) -> np.ndarray:
         return np.asarray(self.sdr.rx(), dtype=np.complex64)
+
+    # -- transmit (active stimulation: Pluto as the TX side of a split rig) --
+    # HARDWARE-UNTESTED — the Pluto is 1T1R; here it TRANSMITS ONLY (the B220 listens),
+    # which sidesteps its self-interference. pyadi's cyclic buffer loops the chirp
+    # continuously until stop_tx(). Bench-validate before field use.
+    def start_tx(self, waveform, center_hz: float, rate_hz: float, gain_db: float):
+        atten = float(self.cfg.get("stimulate", "pluto_tx_hardwaregain_db", default=-20.0))
+        atten = max(-89.0, min(0.0, atten))            # Pluto TX gain is 0..-89 dB
+        self.sdr.tx_lo = int(center_hz)
+        self.sdr.sample_rate = int(rate_hz)
+        try:
+            self.sdr.tx_rf_bandwidth = int(rate_hz)
+        except Exception:  # noqa: BLE001
+            pass
+        self.sdr.tx_hardwaregain_chan0 = atten
+        try:
+            self.sdr.tx_destroy_buffer()
+        except Exception:  # noqa: BLE001
+            pass
+        self.sdr.tx_cyclic_buffer = True               # loop the chirp continuously
+        samples = (np.asarray(waveform, dtype=np.complex64) * (2 ** 14)).astype(np.complex64)
+        self.sdr.tx(samples)
+
+    def stop_tx(self):
+        try:
+            self.sdr.tx_destroy_buffer()
+        except Exception:  # noqa: BLE001
+            pass

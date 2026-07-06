@@ -1648,28 +1648,59 @@ def create_app(db, cfg, demo=False) -> Flask:
     @app.post("/api/stimulate/probe")
     def stimulate_probe():
         """Active-stimulation probe: transmit a swept stimulus across a band and look
-        for a device that REACTS. Requires a 2TX/2RX radio (B220) for simultaneous
-        stimulate-and-listen. TRANSMITS — demo-blocked, refuses unauthorized bands
+        for a device that REACTS. TRANSMITS — demo-blocked, refuses unauthorized bands
         unless override_band is acknowledged. HARDWARE-UNTESTED end-to-end; see
-        STIMULATE_HARDWARE_TODO.md before field use."""
-        from .stimulate import StimulationEngine
+        STIMULATE_HARDWARE_TODO.md before field use.
+
+        Two rigs (config `stimulate.setup`):
+          * "single" (default) — one 2TX/2RX B220: TX/RX port out, RX2 port in.
+          * "split"  — TX on one radio, RX on another (e.g. Pluto TX + B220 RX) for the
+            best isolation. Set `stimulate.tx_source` / `stimulate.rx_source`."""
+        import contextlib
+        from .stimulate import SplitStimRadio, StimulationEngine
         body = request.get_json(silent=True) or {}
         center = body.get("center_mhz")
         lo = body.get("band_lo_mhz")
         hi = body.get("band_hi_mhz")
         if center is None or lo is None or hi is None:
             return err("need center_mhz, band_lo_mhz, band_hi_mhz")
-        dev, mlock, mstop, msrc = st.controller.monitor_target()
-        if dev is None or not hasattr(dev, "stim_mode"):
-            return err("active radio can't transmit — connect a 2TX/2RX radio (B220) "
-                       "for active stimulation (the RF Explorer and Pluto can't do "
-                       "simultaneous stimulate-and-listen)", 409)
-        if st.controller.busy(msrc):
-            return err("radio is busy — stop the current sweep/monitor first", 409)
+
+        setup = str(cfg.get("stimulate", "setup", default="single")).lower()
+        locks = []
+        if setup == "split":
+            tx_src = str(cfg.get("stimulate", "tx_source", default="pluto")).lower()
+            rx_src = str(cfg.get("stimulate", "rx_source", default="b220")).lower()
+            devs = st.controller.devices
+            tx, rx = devs.get(tx_src), devs.get(rx_src)
+            if tx is None or rx is None:
+                return err(f"split stimulation needs BOTH radios connected — TX={tx_src}, "
+                           f"RX={rx_src}. Connect both in the DEVICE card (keep-other).", 409)
+            if not hasattr(tx, "start_tx") or not hasattr(rx, "capture_iq"):
+                return err(f"{tx_src} can't transmit or {rx_src} can't capture IQ for a "
+                           "split rig — check stimulate.tx_source/rx_source", 409)
+            if st.controller.busy(tx_src) or st.controller.busy(rx_src):
+                return err("a radio is busy — stop the sweep/monitor first", 409)
+            radio = SplitStimRadio(cfg, tx, rx)
+            for s in (tx_src, rx_src):
+                lk = st.controller.device_locks.get(s)
+                if lk is not None:
+                    locks.append(lk)
+        else:
+            dev, mlock, mstop, msrc = st.controller.monitor_target()
+            if dev is None or not hasattr(dev, "stim_mode"):
+                return err("active radio can't transmit — connect a 2TX/2RX radio (B220), "
+                           "or set stimulate.setup=split for a Pluto-TX + B220-RX rig", 409)
+            if st.controller.busy(msrc):
+                return err("radio is busy — stop the current sweep/monitor first", 409)
+            radio, mstop_ = dev, mstop
+            mstop_.set()
+            if mlock is not None:
+                locks.append(mlock)
         try:
-            eng = StimulationEngine(cfg, dev)
-            mstop.set()
-            with mlock:
+            eng = StimulationEngine(cfg, radio)
+            with contextlib.ExitStack() as stack:
+                for lk in locks:
+                    stack.enter_context(lk)
                 res = eng.probe(float(center) * 1e6, float(lo) * 1e6, float(hi) * 1e6,
                                 override_band=bool(body.get("override_band")))
         except Exception as e:  # noqa: BLE001

@@ -280,3 +280,65 @@ class StimulationEngine:
         return StimResponse(verdict=verdict, plain=_plain(verdict, responders, band_mhz),
                             responders=responders, band_mhz=band_mhz, mode=mode,
                             confident=confident, band_permitted=permitted, warnings=warnings)
+
+
+# ---------------------------------------------------------------------------
+# Split radio: transmit on ONE radio, listen on ANOTHER (best TX/RX isolation)
+# ---------------------------------------------------------------------------
+
+class SplitStimRadio:
+    """Compose a TRANSMIT radio and a RECEIVE radio into one stimulation radio, so
+    the two roles are on physically SEPARATE hardware/antennas. This beats a single
+    2T2R radio's same-board full-duplex for isolation — the transmitter's leakage
+    into its own receiver is the hardest part of active stimulation, and two boxes
+    a metre apart sidestep most of it.
+
+    Typical use: Pluto transmits the chirp, B220 listens (or vice-versa). Any object
+    with `start_tx(waveform, center_hz, rate_hz, gain_db)` + `stop_tx()` can be the
+    transmitter; any object with `capture_iq(center_hz, fs, n)` can be the receiver.
+
+    Implements the same protocol StimulationEngine consumes, so the engine is unchanged.
+    """
+
+    def __init__(self, cfg, tx_radio, rx_radio):
+        self.cfg = cfg
+        self.tx = tx_radio
+        self.rx = rx_radio
+
+    def stim_mode(self) -> str:
+        return "split"
+
+    def stim_permitted_bands(self):
+        bands = self.cfg.get("stimulate", "permitted_bands_mhz",
+                             default=list(DEFAULT_PERMITTED_BANDS_MHZ))
+        return [tuple(b) for b in bands]
+
+    def stim_capture_quiet(self, center_hz, fs, n):
+        self.stim_tx_off()
+        return self.rx.capture_iq(center_hz, fs, n)
+
+    def stim_tx_on(self, band_lo_hz, band_hi_hz):
+        tx_rate = float(self.cfg.get("stimulate", "tx_sample_rate", default=fs_default(self.tx)))
+        gain = float(self.cfg.get("stimulate", "tx_gain_db", default=50.0))
+        amp = float(self.cfg.get("stimulate", "tx_amp", default=0.5))
+        n_wave = int(self.cfg.get("stimulate", "tx_wave_samples", default=1 << 16))
+        span = float(band_hi_hz - band_lo_hz)
+        center = (band_lo_hz + band_hi_hz) / 2.0
+        wave = make_chirp(tx_rate, span, n_wave, amp=amp)
+        self.tx.start_tx(wave, center, tx_rate, gain)
+
+    def stim_tx_off(self):
+        stop = getattr(self.tx, "stop_tx", None)
+        if stop:
+            stop()
+
+    def stim_capture_stimulated(self, center_hz, band_lo_hz, band_hi_hz, fs, n):
+        settle = float(self.cfg.get("stimulate", "tx_settle_s", default=0.05))
+        if settle > 0:
+            time.sleep(settle)
+        return self.rx.capture_iq(center_hz, fs, n)
+
+
+def fs_default(radio) -> float:
+    """A sensible TX sample rate if config doesn't override: the radio's own _fs."""
+    return float(getattr(radio, "_fs", 4_000_000) or 4_000_000)
