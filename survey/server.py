@@ -1677,6 +1677,34 @@ def create_app(db, cfg, demo=False) -> Flask:
             return err(f"stimulation failed: {e}", 500)
         return jsonify(res.to_dict())
 
+    @app.post("/api/emanations/scan")
+    def emanations_scan():
+        """Passive emanation scan: hunt a hidden device by the clock harmonics it
+        LEAKS (a comb of evenly-spaced tones) — catches silent recorders that never
+        transmit and won't react to a ping. Receive-only; needs an SDR (raw IQ)."""
+        from .emanations import EmanationScanner
+        body = request.get_json(silent=True) or {}
+        lo, hi = body.get("band_lo_mhz"), body.get("band_hi_mhz")
+        if lo is None or hi is None:
+            return err("need band_lo_mhz, band_hi_mhz")
+        dev, mlock, mstop, msrc = st.controller.monitor_target()
+        is_sdr = dev is not None and hasattr(dev, "capture_iq") and \
+            getattr(dev, "is_swept_sdr", False)
+        if not is_sdr:
+            return err("emanation scanning needs raw IQ — connect an SDR (Pluto or "
+                       "B220); the RF Explorer can't do this", 409)
+        if st.controller.busy(msrc):
+            return err("radio is busy — stop the current sweep/monitor first", 409)
+        try:
+            eng = EmanationScanner(cfg, dev)
+            mstop.set()
+            with mlock:
+                res = eng.scan(float(lo) * 1e6, float(hi) * 1e6)
+        except Exception as e:  # noqa: BLE001
+            log.exception("emanation scan failed")
+            return err(f"emanation scan failed: {e}", 500)
+        return jsonify(res.to_dict())
+
     # ---------- signal wiki (captures) ----------
 
     @app.post("/api/captures/start")

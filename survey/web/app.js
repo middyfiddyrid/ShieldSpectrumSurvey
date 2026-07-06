@@ -3314,6 +3314,41 @@ async function stimulateProbe() {
 }
 $("btn-stimulate").onclick = stimulateProbe;
 
+async function emanationScan() {
+  const lo = parseFloat($("ema-lo").value);
+  const hi = parseFloat($("ema-hi").value);
+  if (!(lo > 0) || !(hi > lo)) {
+    $("ema-msg").textContent = "enter a scan band (lo < hi), e.g. 80 to 1000";
+    return;
+  }
+  $("ema-msg").textContent = "scanning (averaging many captures — this can take a while)…";
+  $("ema-result").innerHTML = "";
+  try {
+    const r = await api("/api/emanations/scan", { band_lo_mhz: lo, band_hi_mhz: hi });
+    $("ema-msg").textContent = `${r.averaged_sweeps} averages/hop`;
+    const cls = r.verdict === "SUSPECTED_EMITTER" ? "score-hi" : "";
+    let html = `<p class="${cls}"><b>${esc(r.verdict.replace(/_/g, " "))}</b></p>` +
+      `<p class="note">${esc(r.plain)}</p>`;
+    (r.combs || []).forEach(c => {
+      html += `<div class="card" style="margin:6px 0;background:#1f1212">` +
+        `<div class="row" style="justify-content:space-between">` +
+        `<b>Clock ~${c.clock_mhz} MHz — ${c.n_harmonics} harmonics</b>` +
+        `<span class="threat-tag">⚑ SUSPECTED DEVICE</span></div>` +
+        `<p class="note" style="color:#ffd24a;margin:2px 0">${esc(c.device_hint)}</p>` +
+        `<p class="note" style="margin:2px 0">tones: ${c.harmonics_mhz.map(f => fmtF(f)).join(", ")}</p>` +
+        `</div>`;
+    });
+    if (r.spikes && r.spikes.length) {
+      html += `<p class="note">${r.spikes.length} narrowband tone(s) seen total.</p>`;
+    }
+    (r.warnings || []).forEach(w => {
+      html += `<p class="note" style="color:#ffd24a">⚠ ${esc(w)}</p>`;
+    });
+    $("ema-result").innerHTML = html;
+  } catch (e) { $("ema-msg").textContent = "FAILED: " + e.message; }
+}
+$("btn-emanation").onclick = emanationScan;
+
 function bleCard(d) {
   const mfr = d.manufacturers.map(m => esc(m.company) +
     (m.hints.length ? " (" + m.hints.map(esc).join(", ") + ")" : "")).join("; ");

@@ -719,6 +719,21 @@ body.demo #card-casefiles { display:none !important; }
     </div>
     <div id="stim-result"></div>
   </div>
+  <div class="card" id="emanation-card">
+    <h3>PASSIVE EMANATION SCAN <span class="tag">find the SILENT bugs by the RF they leak — no transmitting</span></h3>
+    <p class="note">Catches a covert camera/recorder that never transmits and won't react to a
+      ping: its clock still <b>leaks</b> a comb of evenly-spaced tones. Needs an SDR (Pluto/B220),
+      a close antenna, and a relatively quiet spot. A null result is one independent look, <b>not</b>
+      a clean bill — run it alongside the sweep and the active probe.</p>
+    <div class="row">
+      <label>Scan band <input id="ema-lo" type="number" step="1" style="width:90px" placeholder="80"></label>
+      <label>to <input id="ema-hi" type="number" step="1" style="width:90px" placeholder="1000"></label>
+      <span class="note">MHz — where device clocks emanate (this is slow: many averaged captures)</span>
+      <button class="btn primary" id="btn-emanation">▶ SCAN</button>
+      <span class="note" id="ema-msg"></span>
+    </div>
+    <div id="ema-result"></div>
+  </div>
   <div class="card">
     <h3>PREDICTED vs FOUND — did everything we expected actually show up?</h3>
     <div class="row"><span class="note" id="expected-summary">run a sweep first</span>
