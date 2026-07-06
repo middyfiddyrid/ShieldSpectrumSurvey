@@ -219,14 +219,35 @@ class UHDRadio:
     def __init__(self, lib: _UHDLib, device_args: str = "type=b200"):
         self.lib = lib
         self.h = ctypes.c_void_p()
-        err = lib.dll.uhd_usrp_make(ctypes.byref(self.h),
-                                    device_args.encode("utf-8"))
+        # The B2xx's FIRST open resets + re-enumerates the USB device (firmware/
+        # FPGA load), which on USB3 hosts routinely makes the very first
+        # uhd_usrp_make race the re-enumeration and fail (uhd_error 44) even
+        # though the radio is healthy — a fresh attempt a moment later succeeds.
+        # CRUCIAL: a failed make can leave a partial handle / claimed WinUSB
+        # interface, which then poisons EVERY retry inside the SAME process (the
+        # app then fails forever until restart while a fresh CLI probe works). So
+        # we free the handle after each failed attempt and retry a few times,
+        # exactly like PlutoSource does for the analogous libiio race.
+        err = 44
+        for attempt in range(5):
+            self.h = ctypes.c_void_p()
+            err = lib.dll.uhd_usrp_make(ctypes.byref(self.h),
+                                        device_args.encode("utf-8"))
+            if err == 0:
+                break
+            try:                       # release any partial claim before retrying
+                lib.dll.uhd_usrp_free(ctypes.byref(self.h))
+            except Exception:  # noqa: BLE001
+                pass
+            self.h = ctypes.c_void_p()
+            time.sleep(1.0)            # let the USB re-enumeration settle
         if err != 0:
             raise DeviceError(
-                f"uhd_usrp_make({device_args!r}) failed (uhd_error {err}). Is the "
-                f"radio plugged into USB 3.0, the Ettus WinUSB driver installed, "
-                f"and no other process using it? (First open flashes FX3 firmware "
-                f"+ FPGA over USB and can take ~20 s.)")
+                f"uhd_usrp_make({device_args!r}) failed (uhd_error {err}) after 5 "
+                f"tries. Is the radio plugged in (USB3), the Ettus WinUSB driver "
+                f"installed, and no OTHER process using it? If a prior app instance "
+                f"is still running it holds the radio — close it. (First open "
+                f"flashes FX3 firmware + FPGA over USB and can take ~20 s.)")
         self._md = ctypes.c_void_p()
         self._check(lib.dll.uhd_rx_metadata_make(ctypes.byref(self._md)),
                     "rx_metadata_make")
