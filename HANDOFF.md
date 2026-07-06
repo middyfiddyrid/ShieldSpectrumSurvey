@@ -52,24 +52,44 @@ interlock.
 ## Windows bring-up (DONE on the tower — see SDR_SETUP.md B220 section)
 Ettus WinUSB drivers installed (pnputil, all infs) · UHD 4.10 host at
 `C:\Program Files\UHD` (SHA-256 verified) · b2xx images at
-`%LOCALAPPDATA%\uhd\images` · probe DETECTED **B210**, firmware flash OK.
+`%LOCALAPPDATA%\uhd\images` · probe DETECTED **B210**.
 
-## ⚑ BLOCKED at FPGA load — needs operator's hands
-`uhd_usrp_probe` fails with **`fx3 is in state 5`** (wedged FX3). Soft device
-restart does NOT clear it. **Physically unplug/replug the radio's USB cable**
-(different port / USB 2.0 port if it persists). After a real power cycle the
-device re-enumerates as "WestBridge", UHD reloads firmware and the FPGA load
-should complete. THEN: bench checklist below.
+## ✅ FX3-state-5 SOLVED — it's a LibreSDR clone, needed the RIGHT FPGA image
+The `fx3 is in state 5` failure was NOT a USB/cable/power problem (that theory
+was wrong; it persisted identically on USB2 and after power cycles). The B220
+Mini is a **LibreSDR clone on a Xilinx Artix-7 XC7A100T**, not the genuine
+B210's Spartan-6 — so UHD's stock `usrp_b210_fpga.bin` could never configure it
+(FPGA DONE never asserts → state 5). Fix: the correct **Artix-7 bitstream**
+(2.9 MB, sha256 `0ab54295…`, from github.com/lmesserStep/LibreSDRB210). Both the
+200T image (4.34 MB) AND the stock Ettus image state-5; only the 100T image
+configured this unit.
+- Bundled in **`native/uhd/usrp_b210_fpga.bin`** (+ Ettus `usrp_b200_fw.hex` +
+  a provenance README). `B220Source._ensure_uhd_images()` installs it into UHD's
+  images dir at connect, backing up any Ettus original as `*.ettus-orig` (never
+  deletes). Idempotent (hash-gated). Overridable via `b220.fpga` /
+  `b220.fpga_bundled`. If a future unit is the 200T variant, drop the 200T bin
+  (sha `7322a2a9…`) into native/uhd/.
+- Images RAM-loaded per session — nothing flashed, power cycle reverts to blank.
 
-## ⚑ B220 BENCH CHECKLIST (after the replug clears the FX3)
-1. `uhd_usrp_probe --args type=b200` → expect full B210 tree, 2 RX chains.
-2. `python app.py` → DEVICE card → "B220 Mini" → CONNECT (first connect ~20 s).
-   Expect TWO modules (RX-A right / RX-B left), 70–6000 MHz.
-3. Antennas on **both RX2 ports**. Ambient sweep → interior sweep (both phases).
-4. Click a baseline freq → tune/listen; ◎ ANALYZE on a known signal; ● REC.
-5. Tune `b220.cal_offset_db` against a known reference (start 36).
-6. Active-stim session's TX path: verify separately per its own checklist
+## ✅ LIVE-BENCH VERIFIED on the real B220 (2026-07-06)
+Through the app's own code path (`POST /api/device/connect {source:b220}` on the
+live server): connected as **"B210 (B220 Mini, 2RX)"**, reported **TWO modules**
+(right=RX-A, left=RX-B, both 70–6000 MHz), `simulated:false`, zero warnings. UI
+shows the dual-port workflow (nav "4 · SWEEP — LEFT PORT" / "5 · SWEEP — RIGHT
+PORT"; footer RANGE right+left). Live IQ via `/api/identify @ 2437 MHz` →
+**SNR 49.8 dB**, occupied BW ~1 MHz, identify pipeline classified it (nRF24 GFSK
+candidates — a real 2.4 GHz dongle in the room). No console errors. **315 tests
+green** (22 in test_uhd_source incl. the image-install tests).
+
+## ⚑ B220 — remaining operator bench (physical antennas)
+1. Antennas on **both RX2 SMA ports**. Ambient sweep → interior sweep (both LEFT
+   and RIGHT phases now drive the two physical RX channels).
+2. Click a baseline freq → tune/listen; ◎ ANALYZE on a known signal; ● REC.
+3. Tune `b220.cal_offset_db` against a known reference (start 36).
+4. Active-stim session's TX path: verify separately per its own checklist
    (TX-A port, chirp keying) — receive-only sweeps must stay receive-only.
+5. Throughput on Windows caps ~20–32 MS/s (driver-stack limit for these clones);
+   fine for the stepped sweep.
 
 ---
 

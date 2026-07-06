@@ -120,6 +120,13 @@ DEFAULTS = {
     "b220": {
         "device_args": "type=b200",   # UHD device args; add ,serial=... for two units
         "uhd_dir": "",                # dir with uhd.dll; "" => C:\\Program Files\\UHD\\bin
+        # The B220 Mini is a LibreSDR clone (Artix-7), NOT a genuine B210
+        # (Spartan-6). The stock Ettus usrp_b210_fpga.bin can't configure it
+        # ("fx3 is in state 5"). B220Source auto-installs the correct bitstream
+        # bundled in native/uhd/ into UHD's images dir at connect. Override only
+        # if needed:
+        "fpga": "",                   # explicit FPGA .bin path; set = skip auto-install
+        "fpga_bundled": "usrp_b210_fpga.bin",  # bundled image name in native/uhd/ (100T; swap for 200T)
         "antenna": "RX2",             # per-channel RX port: "RX2" (RX-only) or "TX/RX"
         "sample_rate": 20_000_000,    # instantaneous bandwidth per tune (USB3 sustains more; 20M is safe)
         "keep_fraction": 0.8,

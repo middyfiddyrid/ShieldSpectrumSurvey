@@ -194,14 +194,30 @@ b220:
 
 Or the DEVICE card dropdown ("B220 Mini"), or `set SWEEP_SOURCE=b220`.
 
-### Gotchas (learned on this unit)
+### THE bring-up gotcha: `fx3 is in state 5` = wrong FPGA image (SOLVED)
 
-- **`fx3 is in state 5`** during FPGA load = the FX3 USB controller is wedged.
-  A soft `pnputil /restart-device` does NOT clear it (no VBUS cut). **Physically
-  unplug/replug the USB cable**; if it persists, use a different port (USB 2.0
-  ports are often more reliable than 3.0 with these clones) or a better Type-C
-  cable. A real power cycle re-enumerates the device as "WestBridge" and UHD
-  reloads firmware cleanly.
+The B220 Mini is a **LibreSDR clone on a Xilinx Artix-7 (XC7A100T on this unit,
+XC7A200T on some)**, NOT the genuine B210's Spartan-6. UHD loads firmware fine
+and detects "B210", but the stock Ettus `usrp_b210_fpga.bin` is a Spartan-6
+bitstream the Artix-7 can never configure — FPGA DONE never asserts and the FX3
+drops to `FX3_STATE_ERROR` (state 5). It fails **deterministically** across power
+cycles, on USB2 and USB3 alike. It is **not** a cable/port/power problem (that
+was an early wrong theory; those cause *intermittent* state-5 on genuine boards).
+
+**Fix (already wired):** the correct Artix-7 bitstream ships in
+`native/uhd/usrp_b210_fpga.bin` and `B220Source._ensure_uhd_images()` installs it
+into UHD's images dir at connect (renames any Ettus original to `*.ettus-orig`,
+never deletes; hash-gated so it's idempotent). A bare
+`uhd_usrp_probe --args type=b200` then returns the full B210 tree with 2 RX chains.
+- 100T image: 2,900,396 B, sha256 `0ab54295…d03bdca` — github.com/lmesserStep/LibreSDRB210
+- 200T image: 4,337,612 B, sha256 `7322a2a9…46ce5` — github.com/NustyFrozen/LibreSDR-UHD-B220-Mini
+  (byte-identical at alphafox02/LibreSDR_USRP). A wrong-size image fails the same
+  harmless way, so trying both is safe. Swap `native/uhd/usrp_b210_fpga.bin` or
+  set `b220.fpga` / `b220.fpga_bundled`.
+- Manual install: rename `usrp_b210_fpga.bin` in the UHD images dir aside, copy
+  the clone image in. Low-level tool for diagnostics:
+  `C:\Program Files\UHD\lib\uhd\utils\b2xx_fx3_utils.exe` (`-S` USB mode, `-D`
+  reset, `-L <bin>` direct load). Images are RAM-loaded per session — reversible.
 - **Python binding**: none — no official UHD wheels for Windows/Py3.14. The app
   binds `uhd.dll`'s C API directly via ctypes (`_UHDLib` in `uhd_source.py`).
   Struct layouts are pinned by unit tests (`tests/test_uhd_source.py`).

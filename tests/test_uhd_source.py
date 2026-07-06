@@ -6,14 +6,16 @@ tests/b220_live_check.py against the real unit.
 """
 
 import ctypes
+import os
+import tempfile
 import threading
 import unittest
 
 import numpy as np
 
 from survey.sweep.device import DeviceError
-from survey.sweep.uhd_source import (B220Source, _StreamArgs, _StreamCmd,
-                                     _TuneRequest, _TuneResult)
+from survey.sweep.uhd_source import (B220Source, _sha256, _StreamArgs,
+                                     _StreamCmd, _TuneRequest, _TuneResult)
 
 
 class FakeCfg:
@@ -273,16 +275,86 @@ class TestGainPolicy(unittest.TestCase):
         self.assertTrue(radio.agc[0])
 
 
+class TestEnsureUHDImages(unittest.TestCase):
+    """The clone-FPGA auto-install: it must place the bundled Artix-7 bitstream
+    into UHD's images dir and back up (never delete) any Ettus original. Uses
+    the REAL bundled image in native/uhd/ + a temp images dir."""
+
+    def setUp(self):
+        here = os.path.dirname(os.path.abspath(__file__))
+        self.bundled = os.path.normpath(
+            os.path.join(here, "..", "native", "uhd", "usrp_b210_fpga.bin"))
+        if not os.path.isfile(self.bundled):
+            self.skipTest("bundled native/uhd/usrp_b210_fpga.bin not present")
+        self.tmp = tempfile.mkdtemp(prefix="uhdimg_")
+        self.target = os.path.join(self.tmp, "usrp_b210_fpga.bin")
+        self._old_env = os.environ.get("UHD_IMAGES_DIR")
+        os.environ["UHD_IMAGES_DIR"] = self.tmp
+        self.src = FakeB220(CFG)   # __init__ only; no hardware touched
+
+    def tearDown(self):
+        if self._old_env is None:
+            os.environ.pop("UHD_IMAGES_DIR", None)
+        else:
+            os.environ["UHD_IMAGES_DIR"] = self._old_env
+        import shutil
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write_stock(self):
+        with open(self.target, "wb") as f:
+            f.write(b"STOCK-ETTUS-SPARTAN6-BITSTREAM" * 100)
+
+    def test_installs_over_stock_and_backs_up(self):
+        self._write_stock()
+        stock_hash = _sha256(self.target)
+        self.src._ensure_uhd_images()
+        self.assertEqual(_sha256(self.target), _sha256(self.bundled))
+        backup = self.target + ".ettus-orig"
+        self.assertTrue(os.path.isfile(backup))
+        self.assertEqual(_sha256(backup), stock_hash)   # original preserved intact
+
+    def test_idempotent_no_second_backup(self):
+        self._write_stock()
+        self.src._ensure_uhd_images()
+        first_backup = _sha256(self.target + ".ettus-orig")
+        # re-run: target already correct → must not touch the backup or re-copy
+        self.src._ensure_uhd_images()
+        self.assertEqual(_sha256(self.target + ".ettus-orig"), first_backup)
+
+    def test_no_backup_when_already_correct(self):
+        import shutil
+        shutil.copyfile(self.bundled, self.target)
+        self.src._ensure_uhd_images()
+        self.assertFalse(os.path.isfile(self.target + ".ettus-orig"))
+
+    def test_explicit_fpga_skips_autoinstall(self):
+        self._write_stock()
+        stock_hash = _sha256(self.target)
+        cfg = FakeCfg({"b220": dict(B220_FAST, fpga=r"Z:\pinned.bin")})
+        src = FakeB220(cfg)
+        src._ensure_uhd_images()
+        self.assertEqual(_sha256(self.target), stock_hash)   # untouched
+
+
 class TestFactory(unittest.TestCase):
     def test_open_device_routes_b220(self):
-        """open_device('b220') must reach B220Source (import path sanity —
-        a real connect needs uhd.dll, so expect DeviceError w/o hardware,
-        never ImportError/AttributeError)."""
+        """open_device('b220') must reach B220Source. Routing is proven whether
+        the open fails (no uhd.dll in CI, or the bogus serial matches nothing) —
+        which must be a DeviceError, NOT ImportError/AttributeError from a wiring
+        bug — or, on a machine with a real radio, returns a B220Source. A bogus
+        serial guarantees we never hijack an attached unit; fpga set skips the
+        image auto-install so the test has no filesystem side effects."""
         from survey.sweep.device import open_device
-        cfg = FakeCfg({"b220": dict(B220_FAST, uhd_dir=r"Z:\nonexistent"),
+        from survey.sweep.uhd_source import B220Source
+        cfg = FakeCfg({"b220": dict(B220_FAST, fpga=r"Z:\skip.bin",
+                                    device_args="type=b200,serial=NO_SUCH_DEV"),
                        "device": {}})
-        with self.assertRaises(DeviceError):
-            open_device(cfg, source="b220")
+        try:
+            dev = open_device(cfg, source="b220")
+        except DeviceError:
+            return  # reached B220Source, failed to open — routing proven
+        self.addCleanup(dev.close)
+        self.assertIsInstance(dev, B220Source)
 
 
 if __name__ == "__main__":

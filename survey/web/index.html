@@ -298,7 +298,7 @@ body.demo #card-casefiles { display:none !important; }
   <div class="card">
     <h3>SIGNAL ID <span class="tag">sigidwiki — what is this emitter?</span></h3>
     <p class="note">Enter a frequency (and bandwidth if known), or paste a detected signal's
-       frequency. With the <b>Pluto</b> connected this captures live IQ, measures the
+       frequency. With an <b>SDR</b> (Pluto or B220) connected this captures live IQ, measures the
        modulation, and ranks the closest known signal types from a sigidwiki-style reference —
        then confirm against the linked sigidwiki page. (RF Explorer: frequency/bandwidth match only.)</p>
     <div class="row">
@@ -395,7 +395,7 @@ body.demo #card-casefiles { display:none !important; }
     <canvas id="strip"></canvas>
     <p class="note">Colored bands = expected allocations · markers after sweeping
       (green identified · amber known band · red anomaly · ⚠ caution band)</p>
-    <p class="note">Click any <b>frequency</b> below to tune the Pluto there — see the analyzer
+    <p class="note">Click any <b>frequency</b> below to tune the SDR there — see the analyzer
        &amp; waterfall and hear the demodulated audio, then step with Next. (Frequencies below
        325 MHz need the AD9364 extension.)</p>
     <div class="scroll" style="max-height:480px"><table id="tbl-baseline"></table></div>
@@ -438,7 +438,7 @@ body.demo #card-casefiles { display:none !important; }
     </div>
     <div class="row" style="margin-top:6px">
       <label class="note">Instant BW</label>
-      <select id="insp-ibw" title="Pluto capture bandwidth — wider = smoother spectrum; USB may limit at 20 MHz">
+      <select id="insp-ibw" title="SDR capture bandwidth — wider = smoother spectrum; USB may limit at 20 MHz">
         <option value="2.4">2.4 MHz</option>
         <option value="5">5 MHz</option>
         <option value="10">10 MHz</option>
