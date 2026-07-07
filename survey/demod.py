@@ -7,8 +7,18 @@ SSB (USB/LSB — single-sideband voice), CW (Morse / unmodulated carriers as a b
 
 Receive-only, like the rest of the app. Pure numpy DSP (no scipy) — unit tested
 in tests/test_demod.py. Audio quality is "field intelligible", not hi-fi: a
-crude boxcar channel filter + FM/AM discriminator + decimation to ~24 kHz WAV.
+windowed-sinc channel filter + FM/AM discriminator + decimation to ~24 kHz WAV.
 Digital signals (cellular, Wi-Fi) correctly come out as hash — that's the tell.
+
+Two output paths (DEMOD_ANALYZE_DISSEMINATE_DESIGN.md §4a):
+  - state=None  : one-shot callers (inspect / analyze / record) — the legacy
+                  per-block peak-normalize, unchanged byte-for-byte.
+  - state=Demod : the LIVE stream — SNR-keyed squelch, RMS-target AGC, FM
+    State        de-emphasis and FIR anti-alias, all carrying per-stream state so
+                  nothing clicks at the 0.15 s block seam. This is the fix for
+                  "the demod feels weak": an empty channel is muted (or held at a
+                  bounded level) instead of a per-block peak-normalize amplifying
+                  pure noise to full scale.
 """
 
 import struct
@@ -102,12 +112,146 @@ def _lowpass(x: np.ndarray, fs: float, cutoff: float) -> np.ndarray:
     return _fir_lowpass(x, fir)
 
 
-def demodulate(iq, fs: float, mode: str = "nfm", offset_hz: float = 0.0) -> tuple[np.ndarray, int]:
+# ---------------------------------------------------------------------------
+# Live-stream state + strengthening DSP (only used when demodulate(state=...))
+# ---------------------------------------------------------------------------
+
+class DemodState:
+    """Per-stream demod state so squelch hysteresis, the AGC gain, and the FM
+    de-emphasis IIR carry across the 0.15 s audio blocks instead of resetting
+    (which would click at every block seam). Construct ONE per /api/listen_pcm
+    stream; the AGC/de-emphasis tunables are seeded from config once here.
+
+    Also the telemetry surface: last_snr_db / gated / agc_gain feed the
+    "why is it weak?" front-end diagnostic (server publishes them into
+    listen_spectrum.demod)."""
+
+    def __init__(self, *, agc_target_rms: float = 0.18, agc_attack_ms: float = 8.0,
+                 agc_release_ms: float = 300.0, agc_max_gain: float = 40.0,
+                 squelch_hang_blocks: int = 3, deemphasis_us: float = 75.0):
+        # tunables (seeded from config; constant for the stream's life)
+        self.agc_target_rms = float(agc_target_rms)
+        self.agc_attack_ms = float(agc_attack_ms)
+        self.agc_release_ms = float(agc_release_ms)
+        self.agc_max_gain = float(agc_max_gain)
+        self.squelch_hang_blocks = int(squelch_hang_blocks)
+        self.deemphasis_us = float(deemphasis_us)
+        # evolving state (carried block to block)
+        self.agc_gain = 1.0          # last block's output gain (ramp anchor)
+        self.deemph_tail = None      # last K-1 input samples for the de-emphasis FIR
+        self.sq_open = True          # squelch starts OPEN (never hide a signal on tune-in)
+        self.sq_hang = 0             # consecutive below-threshold blocks
+        # telemetry (read by the server for the diagnostic line)
+        self.last_snr_db = None
+        self.last_out_gain = 1.0
+        self.gated = False
+
+    def reset_continuity(self):
+        """On a mid-stream retune / width change the passband shifts, so old
+        de-emphasis memory and AGC anchor no longer apply — snap them so the
+        change doesn't click. Keeps tunables + squelch decision."""
+        self.deemph_tail = None
+        self.agc_gain = min(self.agc_gain, 1.0)
+
+
+def _periodogram_snr_db(iq: np.ndarray, nperseg: int = 1024,
+                        max_segs: int = 64, mask_dc: bool = True) -> float:
+    """Cheap in-band SNR for the squelch gate + S-meter: peak-over-median of an
+    AVERAGED (Welch) periodogram. Averaging is essential — a SINGLE periodogram of
+    white noise is chi-square-spiky (peak/median ~10 dB), which would read as
+    'signal present' on an empty channel and defeat the squelch; averaging
+    flattens noise to ~1-2 dB while a real carrier still spikes.
+
+    mask_dc=True masks ±guard bins around DC (the band-center Pluto LO spike) — use
+    on a RAW wide capture. mask_dc=False keeps DC — use on a CHANNEL-ISOLATED
+    baseband where the tuned signal legitimately sits at DC (masking it there would
+    hide the very signal we are gating on)."""
+    iq = np.asarray(iq)
+    npg = int(min(nperseg, iq.size))
+    if npg < 32:
+        return 0.0
+    segs = int(min(max(1, iq.size // npg), max_segs))
+    w = np.hanning(npg)
+    frames = iq[:segs * npg].reshape(segs, npg) * w
+    spec = np.fft.fftshift(np.fft.fft(frames, axis=1), axes=1)
+    p = np.mean(np.abs(spec) ** 2, axis=0)       # Welch average over segments
+    if mask_dc:
+        c = p.size // 2
+        guard = max(1, p.size // 64)             # mask ± a small band around DC/LO
+        lo, hi = max(0, c - guard), min(p.size, c + guard + 1)
+        p = np.delete(p, np.s_[lo:hi])
+    if p.size == 0:
+        return 0.0
+    med = float(np.median(p))
+    peak = float(np.max(p))
+    if med <= 0 or peak <= 0:
+        return 0.0
+    return float(10.0 * np.log10(peak / med))
+
+
+def _deemphasis(audio: np.ndarray, rate: float, tau_us: float,
+                state: "DemodState") -> np.ndarray:
+    """FM de-emphasis: a 50/75 µs one-pole low-pass that undoes the transmitter's
+    pre-emphasis so FM audio isn't bright/hissy. Implemented as a SHORT truncated-
+    exponential FIR (unity DC gain) — vectorized and numerically stable (the
+    cumulative-division vectorization of a one-pole underflows here), with
+    overlap-carry via state.deemph_tail so it doesn't click at the block seam."""
+    tau = max(1e-9, float(tau_us) * 1e-6)
+    dt = 1.0 / float(rate)
+    alpha = dt / (tau + dt)
+    a = 1.0 - alpha
+    if a <= 0.0:
+        return audio
+    k = int(np.clip(int(np.ceil(np.log(1e-4) / np.log(a))), 4, 512))
+    kernel = alpha * (a ** np.arange(k))
+    tail = state.deemph_tail
+    if tail is None or tail.size != (k - 1):
+        tail = np.zeros(k - 1, dtype=np.float64)
+    xin = np.concatenate([tail, audio.astype(np.float64)])
+    y = np.convolve(xin, kernel)[k - 1: k - 1 + audio.size]
+    state.deemph_tail = xin[-(k - 1):].copy() if (k - 1) > 0 else None
+    return y
+
+
+def _agc_block(audio: np.ndarray, state: "DemodState", arate: float,
+               gated: bool) -> tuple[np.ndarray, float]:
+    """RMS-target AGC on the live path (replaces per-block peak-normalize). Holds
+    a target loudness with a fast attack / slow release, capped by agc_max_gain,
+    and ramps the scalar gain from the previous block's value across THIS block so
+    the level never steps at the seam. When `gated` (squelch closed) it drives the
+    gain toward zero — silence — instead of amplifying noise. Brickwall-clips the
+    output for safety. Returns (int16 PCM, gain_applied)."""
+    audio = np.asarray(audio, dtype=np.float64)
+    if audio.size == 0:
+        return np.zeros(0, dtype="<i2"), state.agc_gain
+    if gated:
+        target = 0.0
+    else:
+        rms = float(np.sqrt(np.mean(audio * audio))) + 1e-9
+        target = float(np.clip(state.agc_target_rms / rms, 0.0, state.agc_max_gain))
+    block_s = max(1e-4, audio.size / float(arate))
+    tc_ms = state.agc_attack_ms if target < state.agc_gain else state.agc_release_ms
+    coef = 1.0 - np.exp(-block_s / max(1e-4, tc_ms / 1000.0))
+    new_gain = state.agc_gain + coef * (target - state.agc_gain)
+    ramp = np.linspace(state.agc_gain, new_gain, audio.size)
+    out = np.clip(audio * ramp, -0.95, 0.95)
+    state.agc_gain = new_gain
+    pcm16 = (out * 32767.0).astype("<i2")
+    return pcm16, new_gain
+
+
+def demodulate(iq, fs: float, mode: str = "nfm", offset_hz: float = 0.0,
+               chan_bw_hz: float = None, state: "DemodState" = None,
+               squelch_snr_db: float = None) -> tuple[np.ndarray, int]:
     """IQ -> (int16 PCM mono, sample_rate).
     mode: 'wfm' | 'nfm' | 'am' | 'usb' | 'lsb' | 'cw'.
     offset_hz: a movable demod tuner WITHIN the captured band — shifts the signal
     at (center + offset_hz) down to baseband so the per-mode channel filter below
-    isolates THAT one signal, not the LO-spike-corrupted band center. 0 = center."""
+    isolates THAT one signal, not the LO-spike-corrupted band center. 0 = center.
+    state: None -> the legacy one-shot per-block peak-normalize (callers unchanged).
+    A DemodState -> the strengthened LIVE path (squelch/AGC/de-emphasis, carried).
+    squelch_snr_db: if not None (and state given), mute the block when the measured
+    in-band SNR falls below it (with hysteresis/hang). None -> squelch OFF."""
     iq = np.asarray(iq, dtype=np.complex64)
     if iq.size < 16:
         raise ValueError("capture too short to demodulate")
@@ -117,7 +261,10 @@ def demodulate(iq, fs: float, mode: str = "nfm", offset_hz: float = 0.0) -> tupl
         iq = (iq * np.exp(-1j * 2 * np.pi * offset_hz * t)).astype(np.complex64)
 
     if mode == "am":
+        if chan_bw_hz:                                 # adjustable channel width (AM audio ~bw/2)
+            iq = _lowpass(iq, fs, max(2000.0, min(float(chan_bw_hz) / 2.0, fs * 0.45)))
         audio = np.abs(iq).astype(np.float64)
+        chan_sig = iq                                  # channel-isolated baseband for the squelch SNR
         arate = fs
     elif mode in ("usb", "lsb"):
         # IQ is complex baseband on the tuned carrier; one sideband sits above
@@ -130,6 +277,7 @@ def demodulate(iq, fs: float, mode: str = "nfm", offset_hz: float = 0.0) -> tupl
         x = iq * np.exp(-1j * 2 * np.pi * shift * t).astype(np.complex64)
         x = _lowpass(x, fs, SSB_BW)
         audio = np.real(x).astype(np.float64)
+        chan_sig = x
         arate = fs
     elif mode == "cw":
         # Narrow-filter the carrier, then beat it against a BFO offset so a
@@ -139,13 +287,16 @@ def demodulate(iq, fs: float, mode: str = "nfm", offset_hz: float = 0.0) -> tupl
         t = np.arange(x.size, dtype=np.float64) / fs
         x = x * np.exp(1j * 2 * np.pi * CW_BFO * t).astype(np.complex64)
         audio = np.real(x).astype(np.float64)
+        chan_sig = x
         arate = fs
     else:
         # FIR channel-filter + decimate toward the channel bandwidth before the
         # FM discriminator. The sharp stopband rejects out-of-channel signals
         # (the steerable-tuner "isolate THIS signal" requirement); the boxcar it
         # replaces leaked neighbours straight through its -13 dB sidelobes.
-        chan_bw = NFM_CHAN_BW if mode == "nfm" else WFM_CHAN_BW
+        default_bw = NFM_CHAN_BW if mode == "nfm" else WFM_CHAN_BW
+        chan_bw = float(chan_bw_hz) if chan_bw_hz else default_bw
+        chan_bw = max(2000.0, min(chan_bw, fs * 0.45))   # adjustable channel width (the on-screen band)
         dec = max(1, int(fs / (chan_bw * 2.0)))
         fir = _design_fir(_auto_taps(fs, chan_bw), chan_bw, fs)
         x = _fir_decimate(iq, fir, dec)
@@ -153,15 +304,52 @@ def demodulate(iq, fs: float, mode: str = "nfm", offset_hz: float = 0.0) -> tupl
         if x.size < 4:
             raise ValueError("capture too short for this mode")
         audio = _fm_discriminator(x)                   # FM discriminator (unchanged: POCSAG shares it)
+        chan_sig = x
 
+    # in-band SNR (live path only) measured on the CHANNEL-ISOLATED baseband, NOT
+    # the raw wide capture: the offset shift moved the tuned signal to DC and the
+    # per-mode filter rejected out-of-channel energy, so the squelch/S-meter track
+    # THIS signal — they don't mute the clicked one or open on a neighbour.
+    snr_db = (_periodogram_snr_db(chan_sig, nperseg=256, mask_dc=False)
+              if state is not None else None)
     dec2 = max(1, int(round(arate / AUDIO_RATE)))
-    audio = _decimate(audio, dec2)
+
+    if state is None:
+        # -------- legacy one-shot path: unchanged behavior (callers depend on it)
+        audio = _decimate(audio, dec2)
+        arate = arate / dec2
+        audio = audio - np.mean(audio)                 # DC block
+        peak = float(np.max(np.abs(audio))) or 1.0
+        pcm = np.clip(audio / peak * 0.9, -1.0, 1.0)
+        pcm16 = (pcm * 32767.0).astype("<i2")
+        return pcm16, int(round(arate))
+
+    # -------- live stream path: anti-alias -> de-emphasis -> squelch -> AGC ------
+    if dec2 > 1:                                        # FIR anti-alias only when we actually decimate
+        cutoff = min(AUDIO_RATE * 0.5, arate * 0.45)
+        fir2 = _design_fir(_auto_taps(arate, cutoff), cutoff, arate)
+        audio = _fir_decimate(audio, fir2, dec2)
     arate = arate / dec2
 
-    audio = audio - np.mean(audio)                 # DC block
-    peak = float(np.max(np.abs(audio))) or 1.0
-    pcm = np.clip(audio / peak * 0.9, -1.0, 1.0)
-    pcm16 = (pcm * 32767.0).astype("<i2")
+    audio = audio - np.mean(audio)                     # DC block
+    if state.deemphasis_us and mode in ("nfm", "wfm"):
+        audio = _deemphasis(audio, arate, state.deemphasis_us, state)
+
+    gated = False
+    if squelch_snr_db is not None and snr_db is not None:
+        if snr_db < float(squelch_snr_db):
+            state.sq_hang += 1
+        else:
+            state.sq_hang = 0
+            state.sq_open = True
+        if state.sq_hang > state.squelch_hang_blocks:
+            state.sq_open = False
+        gated = not state.sq_open
+    state.last_snr_db = snr_db
+    state.gated = gated
+
+    pcm16, out_gain = _agc_block(audio, state, arate, gated)
+    state.last_out_gain = out_gain
     return pcm16, int(round(arate))
 
 

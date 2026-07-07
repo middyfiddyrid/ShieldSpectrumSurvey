@@ -11,7 +11,7 @@ from flask import (Flask, Response, jsonify, request, send_file,
 
 from .baseline.base import DiskCache
 from .baseline.manager import build_baseline
-from .db import TRIAGE_DECISIONS
+from .db import TRIAGE_DECISIONS, ATTRIBUTION_STATUSES
 from .correlation import compute_room_localization
 from .geocode import geocode
 from .report import export_csv, generate_report
@@ -95,7 +95,8 @@ def create_app(db, cfg, demo=False) -> Flask:
     # address-novelty history are operator-internal too.
     DEMO_BLOCKED = ("/api/poi", "/api/report/internal_memo",
                     "/api/analyze/threat_vectors", "/api/case_files", "/case_files",
-                    "/api/triage", "/api/novelty", "/api/record")
+                    "/api/triage", "/api/novelty", "/api/record",
+                    "/api/attribution", "/api/decode/override")
 
     @app.before_request
     def _demo_guard():
@@ -854,12 +855,14 @@ def create_app(db, cfg, demo=False) -> Flask:
             return err("need center_mhz")
         center_mhz = float(request.args["center_mhz"])
         mode = (request.args.get("mode") or pick_mode(center_mhz)).lower()
-        dev = st.controller.device
+        # dual mode: listen on the MONITOR radio (the Pluto) so a sweep can keep
+        # running on the RF Explorer; single-device behaviour is unchanged.
+        dev, _mlock, _mstop, msrc = st.controller.monitor_target()
         if not (dev is not None and hasattr(dev, "stream_iq")
                 and getattr(dev, "is_swept_sdr", False)):
             return err("connect the Pluto (SDR) to listen", 409)
-        if st.controller.busy():
-            return err("a sweep is running — stop it to listen", 409)
+        if st.controller.busy(msrc):
+            return err("the monitor radio is busy — stop its sweep to listen", 409)
         mods = dev.info.modules
         lo_mhz, hi_mhz = min(m.min_mhz for m in mods), max(m.max_mhz for m in mods)
         if not (lo_mhz <= center_mhz <= hi_mhz):
@@ -911,18 +914,43 @@ def create_app(db, cfg, demo=False) -> Flask:
         span_hi = float(cfg.get("pluto", "listen_wf_span_hi_db", default=40.0))
         psd_ema = nf_ema = None
         wf_seq = 0
-        st.controller.listen_stop.set()       # preempt whatever stream is running now
-        with st.controller.device_lock:       # wait for the previous user of the radio to release
-            st.controller.listen_stop.clear()
+        # live demod strengthening (DEMOD_ANALYZE_DISSEMINATE_DESIGN.md §4a): ONE
+        # DemodState per stream so squelch/AGC/de-emphasis carry across blocks.
+        from .demod import DemodState
+
+        def _dnum(key, d):                    # null-safe: an explicit YAML null -> default
+            v = cfg.get("demod", key, default=d)
+            return d if v is None else v
+        dstate = DemodState(
+            agc_target_rms=float(_dnum("agc_target_rms", 0.18)),
+            agc_attack_ms=float(_dnum("agc_attack_ms", 8.0)),
+            agc_release_ms=float(_dnum("agc_release_ms", 300.0)),
+            agc_max_gain=float(_dnum("agc_max_gain", 40.0)),
+            squelch_hang_blocks=int(_dnum("squelch_hang_blocks", 3)),
+            deemphasis_us=float(_dnum("deemphasis_us", 75.0)))
+        sq_default = cfg.get("pluto", "listen_squelch_snr_db", default=None)
+        last_off, last_bw = 0.0, None
+        _mdev, mlock, mstop, _msrc = st.controller.monitor_target()
+        mstop.set()                           # preempt whatever stream is running now
+        with mlock:                           # wait for the previous user of THIS radio to release
+            mstop.clear()
             st.controller.listening = True
             st.controller.listen_offset_hz = 0.0   # new tune -> demod band center until clicked
+            st.controller.listen_chan_bw_hz = None # new tune -> per-mode default channel width
+            st.controller.listen_squelch_snr_db = sq_default  # OFF by default (config)
             st.controller.listen_spectrum = None
-            stop = st.controller.listen_stop
+            stop = mstop
             try:
                 for iq in dev.stream_iq(center_mhz * 1e6, fs, n_block, stop):
                     try:
                         off = float(getattr(st.controller, "listen_offset_hz", 0.0) or 0.0)
-                        pcm, arate = demodulate(iq, fs, mode, off)
+                        bw = getattr(st.controller, "listen_chan_bw_hz", None)
+                        if off != last_off or bw != last_bw:
+                            dstate.reset_continuity()      # passband moved -> don't click
+                            last_off, last_bw = off, bw
+                        sq = getattr(st.controller, "listen_squelch_snr_db", None)
+                        pcm, arate = demodulate(iq, fs, mode, off, bw,
+                                                state=dstate, squelch_snr_db=sq)
                     except Exception:  # noqa: BLE001
                         continue
                     yield pcm, arate
@@ -958,6 +986,14 @@ def create_app(db, cfg, demo=False) -> Flask:
                             "center_mhz": center_mhz, "mode": mode,
                             "ts": _time.time(), "seq": wf_seq,
                             "analyzer": {"freqs_mhz": af, "power_dbm": ap},
+                            "demod": {
+                                "snr_db": (round(dstate.last_snr_db, 1)
+                                           if dstate.last_snr_db is not None else None),
+                                "gated": bool(dstate.gated),
+                                "agc_gain_db": round(20.0 * _np.log10(
+                                    max(dstate.last_out_gain, 1e-6)), 1),
+                                "squelch_db": getattr(st.controller,
+                                                      "listen_squelch_snr_db", None)},
                             "waterfall": {
                                 "freqs_mhz": [round((center_mhz * 1e6 + f) / 1e6, 4)
                                               for f in wf["freqs_hz"]],
@@ -1044,6 +1080,23 @@ def create_app(db, cfg, demo=False) -> Flask:
         lim = fs * 0.48                        # stay inside the captured band edges
         st.controller.listen_offset_hz = max(-lim, min(lim, off))
         return jsonify({"offset_hz": st.controller.listen_offset_hz})
+
+    @app.post("/api/listen/bandwidth")
+    def listen_bandwidth():
+        """Adjust the demodulator CHANNEL WIDTH live — the shaded band on the
+        analyzer. Narrow for a tight signal (pager, NFM voice), wide for a
+        wireless mic / video subcarrier. 'auto' restores the per-mode default."""
+        body = request.get_json(silent=True) or {}
+        v = body.get("chan_bw_hz")
+        if v in (None, "", "auto"):
+            st.controller.listen_chan_bw_hz = None
+            return jsonify({"chan_bw_hz": None})
+        try:
+            bw = float(v)
+        except (TypeError, ValueError):
+            return err("chan_bw_hz must be a number or 'auto'")
+        st.controller.listen_chan_bw_hz = max(2000.0, min(bw, 20_000_000.0))
+        return jsonify({"chan_bw_hz": st.controller.listen_chan_bw_hz})
 
     # ---------- monitor recordings (WAV; client-sensitive, gitignored) ----------
 
@@ -1234,14 +1287,73 @@ def create_app(db, cfg, demo=False) -> Flask:
 
     @app.post("/api/sweep/abort")
     def sweep_abort():
-        st.controller.abort()
-        return jsonify({"aborted": True})
+        """F7: default = pause the radio, save everything. {'erase': true} is the
+        confirmed hard abort — the aborted sweep's data is deleted."""
+        body = request.get_json(force=True, silent=True) or {}
+        erase = bool(body.get("erase"))
+        st.controller.abort(erase=erase)
+        return jsonify({"aborted": True, "erase": erase})
 
     @app.post("/api/sweep/next_segment")
     def sweep_next_segment():
         """F5: release the manual-advance gate so the sweep moves to the next segment."""
         st.controller.advance()
         return jsonify({"ok": True})
+
+    @app.post("/api/sweep/sustain")
+    def sweep_sustain():
+        """F6: hold the current segment (keep re-sweeping it live) / release it."""
+        body = request.get_json(force=True) or {}
+        on = bool(body.get("on"))
+        if on and not st.controller.state.get("running"):
+            return err("no sweep running")
+        st.controller.set_sustain(on)
+        return jsonify({"ok": True, "sustain": on})
+
+    _catalog_cache = {}
+
+    @app.get("/api/catalog/segment")
+    def catalog_segment():
+        """F6: covert-device classes from the surveillance catalog whose signature
+        bands intersect [low, high] MHz — segment-local intel for the operator."""
+        try:
+            low = float(request.args.get("low", 0))
+            high = float(request.args.get("high", 0))
+        except ValueError:
+            return err("low/high must be numeric")
+        if "data" not in _catalog_cache:
+            path = os.path.join(os.path.dirname(__file__), "surveillance_catalog.json")
+            try:
+                with open(path, encoding="utf-8") as f:
+                    _catalog_cache["data"] = json.load(f)
+            except OSError:
+                _catalog_cache["data"] = {}
+        out = []
+        for dc in (_catalog_cache["data"].get("device_classes") or []):
+            hits = []
+            for s in dc.get("signatures", []):
+                try:
+                    if float(s["freq_min_mhz"]) <= high and float(s["freq_max_mhz"]) >= low:
+                        hits.append(s)
+                except (KeyError, TypeError, ValueError):
+                    continue
+            if not hits:
+                continue
+            out.append({
+                "device_class": dc.get("device_class", ""),
+                "summary": (dc.get("summary") or "")[:280],
+                "confirm_steps": (dc.get("confirm_steps") or [])[:3],
+                "false_positive_overlap": (dc.get("false_positive_overlap") or [])[:4],
+                "signatures": [{
+                    "name": s.get("name") or s.get("signature") or "",
+                    "freq_min_mhz": s.get("freq_min_mhz"),
+                    "freq_max_mhz": s.get("freq_max_mhz"),
+                    "bandwidth_khz": s.get("bandwidth_khz"),
+                    "class": s.get("class"), "duty": s.get("duty"),
+                } for s in hits[:8]],
+            })
+        out.sort(key=lambda d: -len(d["signatures"]))
+        return jsonify({"low": low, "high": high, "classes": out})
 
     # ---------- results ----------
 
@@ -1316,7 +1428,8 @@ def create_app(db, cfg, demo=False) -> Flask:
         rows = db.query(
             "SELECT id, center_mhz, bw_khz, peak_dbm, persistence, classification, "
             "matched_label, match_reason, caution, anomaly_score, room, module, "
-            "is_novel_to_address, novelty_reason, triage_status, triage_notes "
+            "is_novel_to_address, novelty_reason, triage_status, triage_notes, "
+            "attribution_status, attribution_notes "
             "FROM signals WHERE sweep_id=? AND (classification!='VERIFIED' OR caution=1) "
             "ORDER BY anomaly_score DESC, center_mhz", (sweep["id"],))
         counts = {}
@@ -1345,6 +1458,56 @@ def create_app(db, cfg, demo=False) -> Flask:
         row = db.set_signal_triage(signal_id, session["id"], status,
                                    body.get("notes", ""))
         return jsonify(row)
+
+    @app.post("/api/signals/<int:signal_id>/attribution")
+    def signal_attribution(signal_id):
+        """Record whether this detection captures the CLIENT'S own environment.
+        client_space => a bug targeting the client (escalate + IQ evidence).
+        third_party / infrastructure => do NOT decode content — move along."""
+        session = st.session()
+        if not session:
+            return err("no session")
+        body = request.get_json(force=True)
+        status = (body.get("status") or "").strip()
+        if status not in ATTRIBUTION_STATUSES:
+            return err(f"status must be one of {', '.join(ATTRIBUTION_STATUSES)}")
+        exists = db.query_one("SELECT id FROM signals WHERE id=? AND session_id=?",
+                              (signal_id, session["id"]))
+        if not exists:
+            return err("signal not found in this session", 404)
+        row = db.set_signal_attribution(signal_id, session["id"], status,
+                                        body.get("notes", ""))
+        return jsonify(row)
+
+    @app.post("/api/decode/override")
+    def decode_override():
+        """Log an ECPA force-decode override. Decoding the CONTENT of a signal that
+        is NOT attributed to the client is potentially unlawful interception
+        (18 U.S.C. 2511); the operator may proceed at their own documented
+        discretion, but ONLY with an explicit acknowledgment recorded here. Requires
+        ecpa_ack=true + a reason. Returns the immutable audit row."""
+        session = st.session()
+        if not session:
+            return err("no session")
+        body = request.get_json(force=True)
+        if not body.get("ecpa_ack"):
+            return err("ecpa_ack (acknowledgment of the ECPA warning) is required", 400)
+        reason = (body.get("reason") or "").strip()
+        if not reason:
+            return err("a reason for the override is required for the audit log", 400)
+        row = db.add_decode_override(
+            session["id"], body.get("signal_id"), body.get("center_mhz"),
+            (body.get("mode") or "").strip(),
+            (body.get("operator") or session.get("operator") or "").strip(), reason)
+        return jsonify(row)
+
+    @app.get("/api/decode/overrides")
+    def decode_overrides_list():
+        """The ECPA override audit log for this session (internal only)."""
+        session = st.session()
+        if not session:
+            return err("no session")
+        return jsonify(db.list_decode_overrides(session["id"]))
 
     @app.post("/api/triage/bulk")
     def triage_bulk():

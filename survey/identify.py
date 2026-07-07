@@ -226,11 +226,35 @@ def classify_modulation(f: dict) -> str:
 
 # reference set ships WITH the package (data/ is gitignored for runtime DBs)
 DEFAULT_REF_PATH = os.path.join(os.path.dirname(__file__), "sigidwiki_ref.json")
+CATALOG_PATH = os.path.join(os.path.dirname(__file__), "surveillance_catalog.json")
 
 
 def load_reference(path: str | None = None) -> list[dict]:
+    """Reference signals for matching. The sigidwiki starter set ALWAYS loads;
+    when the default path is used we additively fold in the surveillance-device
+    catalog (survey/surveillance_catalog.json) — its device_classes flattened to
+    signatures in the same field shape, each tagged with its parent device_class
+    + confirm_steps + false_positive_overlap so a match can surface them. Passing
+    an explicit `path` loads ONLY that file (keeps tests/custom refs isolated)."""
     with open(path or DEFAULT_REF_PATH, "r", encoding="utf-8") as fh:
-        return (json.load(fh) or {}).get("signals", [])
+        refs = (json.load(fh) or {}).get("signals", [])
+    if path is None:
+        try:
+            with open(CATALOG_PATH, "r", encoding="utf-8") as fh:
+                cat = json.load(fh) or {}
+            for dc in cat.get("device_classes", []):
+                name = dc.get("device_class", "")
+                steps = dc.get("confirm_steps", [])
+                fps = dc.get("false_positive_overlap", [])
+                for sig in dc.get("signatures", []):
+                    r = dict(sig)
+                    r["device_class"] = name
+                    r["confirm_steps"] = steps
+                    r["false_positive_overlap"] = fps
+                    refs.append(r)
+        except (FileNotFoundError, ValueError):
+            pass                                     # catalog optional; sigidwiki still works
+    return refs
 
 
 def _bw_score(meas_khz: float, ref_khz: float) -> float:
@@ -283,6 +307,9 @@ def identify(center_hz: float, feats: dict | None, reference: list[dict],
             "name": ref["name"], "url": ref["url"], "mode": ref["mode"],
             "class": ref["class"], "bandwidth_khz": ref["bandwidth_khz"],
             "tscm": ref.get("tscm", ""), "in_band": in_band,
+            "device_class": ref.get("device_class"),            # catalog parent (None for sigidwiki entries)
+            "confirm_steps": ref.get("confirm_steps", []),      # how to confirm this device class
+            "false_positive_overlap": ref.get("false_positive_overlap", []),  # legit things that look the same
             "score": round(score, 1), "reasons": reasons,
         })
     out.sort(key=lambda c: c["score"], reverse=True)

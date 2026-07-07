@@ -51,6 +51,10 @@ const App = {
   focusAnomalies: false,   // F3: hide expected/known, dampen+rescale chart to anomalies
   mutedKeys: {},           // F3: individually muted signals (key -> {lo,hi})
   wantWake: false, _wakeLock: null,   // F1: screen wake lock
+  // F6: sustained-segment info panes
+  infoTab: "signals",      // which pane sits in the table slot while sustained
+  liveWindow: null,        // {lo,hi} MHz zoom window for the LIVE pane (null = whole segment)
+  _sweepSt: null, _lastTrace: null, _catKey: null,
 };
 
 /* ---------- F1: keep the laptop screen awake while the app is open ----------
@@ -121,6 +125,7 @@ function show(view) {
   if (view === "poi") loadPoi();
   if (view === "cases") loadCases();
   if (view === "triage") loadTriage();
+  if (view === "sweep") renderDeviceRoles();
 }
 
 /* ---------- engagement / pre-sweep ---------- */
@@ -483,6 +488,28 @@ function render(st) {
     }
     refreshLiveSweepSignals(st.sweep.sweep_id);
     renderSegPanel(st);
+    // F6: sustain button + swappable info panes
+    App._sweepSt = st.sweep;
+    App._lastTrace = st.sweep.live_trace || App._lastTrace;
+    const sBtn = $("btn-sustain");
+    if (sBtn) {
+      const sus = !!st.sweep.sustaining, req = !!st.sweep.sustain_requested;
+      sBtn.style.display = st.sweep.phase === "capture" ? "none" : "";
+      sBtn.textContent = sus ? "▶ RESUME SWEEP"
+        : req ? "⏳ SUSTAIN — finishing passes…" : "⏸ SUSTAIN SEGMENT";
+      sBtn.classList.toggle("on", sus || req);
+    }
+    const tabs = $("sweep-info-tabs");
+    if (tabs) {
+      tabs.style.display = st.sweep.sustaining ? "flex" : "none";
+      // leaving sustain closes the extra panes — back to the signal table
+      if (!st.sweep.sustaining && App.infoTab !== "signals") setInfoTab("signals");
+    }
+    if (st.sweep.sustaining) {
+      if (App.infoTab === "live") renderLiveZoom(st.sweep.live_trace);
+      if (App.infoTab === "expected") renderExpandedExpected(st);
+      if (App.infoTab === "catalog") maybeLoadCatalog(st.sweep.current_segment);
+    }
   } else if (!st.sweep.running) {
     so.classList.remove("show");
     App.overlayHidden = false;
@@ -1008,7 +1035,8 @@ async function refreshLiveSweepSignals(sweepId) {
       const cls = s.identity_tier || (s.classification === "VERIFIED" ? "IDENTIFIED"
         : s.classification === "PLAUSIBLE" ? "KNOWN_BAND" : "ANOMALY");
       const id = s.display_label || s.matched_label || s.match_reason || "";
-      return `<tr><td>${shown.length - i}</td><td>${fmtF(s.center_mhz)}</td>` +
+      return `<tr><td>${shown.length - i}</td><td><a class="freqlink" href="#" ` +
+        `data-center="${s.center_mhz}" data-label="${esc(id)}">${fmtF(s.center_mhz)}</a></td>` +
         `<td>${s.peak_dbm} dBm</td><td>${s.bw_khz != null ? Math.round(s.bw_khz) + " kHz" : "—"}</td>` +
         `<td><span class="pill ${cls}">${k}</span>${s.caution ? " ⚠" : ""}</td>` +
         `<td>${esc(id).slice(0, 70)}</td></tr>`;
@@ -1035,11 +1063,58 @@ $("btn-create").onclick = async () => {
   } catch (e) { $("session-msg").textContent = "ERROR: " + e.message; }
 };
 
+
+/* DEVICE card: plain-language "who is doing what" line so the operator can SEE
+   dual-radio mode working (connections reset on every app restart). */
+async function renderDeviceRoles() {
+  const el = $("device-roles");     // DEVICE card (Session tab)
+  const sw = $("sweep-radio-ready"); // readiness line on the Sweep screen
+  if (!el && !sw) return;
+  let r;
+  try { r = await api("/api/device/roles"); }
+  catch (_) { if (el) el.style.display = "none"; if (sw) sw.textContent = ""; return; }
+  const name = s => s === "pluto" ? "Pluto" : "RF Explorer";
+  const roles = r.roles || [];
+  if (el) {
+    if (!roles.length) { el.style.display = "none"; }
+    else {
+      const job = x => x.role === "sweeper" ? "runs the sweep"
+                     : x.role === "monitor" ? "listens/analyzes signals" : "connected (idle)";
+      el.innerHTML = roles.map(x =>
+        `<b>${name(x.source)}</b> — ${job(x)}${x.busy ? " (busy)" : ""}`).join(" &nbsp;·&nbsp; ");
+      if (r.concurrent_enabled && roles.length >= 2)
+        el.innerHTML += ` &nbsp;·&nbsp; <b style="color:var(--green)">BOTH RADIOS ACTIVE</b> — you can inspect signals while a sweep runs`;
+      else if (r.concurrent_enabled && roles.length === 1)
+        el.innerHTML += ` &nbsp;·&nbsp; connect the other radio too to inspect during sweeps`;
+      el.style.display = "";
+    }
+  }
+  if (sw) {
+    const have = new Set(roles.map(x => x.source));
+    if (!roles.length)
+      sw.innerHTML = `<span style="color:var(--dim)">No radio connected — connect one on the Session tab (DEVICE) before sweeping.</span>`;
+    else if (r.concurrent_enabled && have.has("rfexplorer") && have.has("pluto"))
+      sw.innerHTML = `<span style="color:var(--green)">✓ Both radios ready</span> — the Pluto monitors while the RF Explorer sweeps, so you can inspect signals live mid-sweep.`;
+    else if (r.concurrent_enabled)
+      sw.innerHTML = `<span style="color:var(--amber)">⚠ Only ${name(roles[0].source)} connected.</span> Connect the Pluto too (Session tab › DEVICE) to inspect signals live during the sweep — the sweep still runs either way.`;
+    else
+      sw.innerHTML = `<b>${name(roles[0].source)}</b> connected — ready to sweep.`;
+  }
+}
+
 $("btn-connect").onclick = async () => {
   const src = $("device-source") ? $("device-source").value : null;
   $("device-msg").textContent = `connecting to ${src === "pluto" ? "Pluto" : "RF Explorer"}…`;
   try {
-    const d = await api("/api/device/connect", src ? { source: src } : {});
+    // dual-radio: if concurrent monitoring is on and ANOTHER radio is already
+    // connected, keep it open (RFE sweeps while the Pluto monitors)
+    let keepOther = false;
+    try {
+      const roles = await api("/api/device/roles");
+      keepOther = !!(roles.concurrent_enabled &&
+                     roles.roles.some(r => r.source !== src));
+    } catch (_) { /* roles unavailable → legacy single-device connect */ }
+    const d = await api("/api/device/connect", src ? { source: src, keep_other: keepOther } : {});
     $("device-msg").textContent = "connected";
     $("device-detail").innerHTML =
       `<div>Model</div><div>${esc(d.model)} (driver: ${esc(d.driver)})</div>` +
@@ -1049,8 +1124,10 @@ $("btn-connect").onclick = async () => {
       (d.wideband_license ? "<div>License</div><div>RFELIC05 wideband EXTENSION ACTIVE</div>" : "") +
       (d.modules.length < 2 ? `<div>⚠ Coverage</div><div class="caution">single-module mode — coverage gap will be noted in the report</div>` : "") +
       (d.warnings.length ? `<div>⚠ Warnings</div><div class="caution">${d.warnings.map(esc).join("<br>")}</div>` : "");
+    renderDeviceRoles();
   } catch (e) { $("device-msg").textContent = "FAILED: " + e.message; }
 };
+renderDeviceRoles();   // show current radio roles on page load too
 
 $("btn-baseline").onclick = async () => {
   try { await api("/api/baseline/build", {}); } catch (e) { $("baseline-msg").textContent = e.message; }
@@ -1329,19 +1406,26 @@ function freqLinkDelegate(e) {
   e.preventDefault();
   e.stopPropagation();
   if (a.dataset.huntIdx != null) { huntStep(parseInt(a.dataset.huntIdx, 10)); return; }
-  listenAt(parseFloat(a.dataset.center), a.dataset.label || "", a.dataset.mode || undefined);
+  const sid = a.dataset.sid ? parseInt(a.dataset.sid, 10) : null;
+  listenAt(parseFloat(a.dataset.center), a.dataset.label || "", a.dataset.mode || undefined, sid, a.dataset.attr || null);
 }
-["tbl-anomalies", "tbl-signals", "tbl-wiki", "tbl-hunt", "tbl-triage"].forEach(id => {
+["tbl-anomalies", "tbl-signals", "tbl-wiki", "tbl-hunt", "tbl-triage", "tbl-live-ledger"].forEach(id => {
   const el = $(id);
   if (el) el.addEventListener("click", freqLinkDelegate, true);  // capture: beat the row onclick
 });
 
 function inRangeClient(center) {
+  // dual mode: if a Pluto is connected as the monitor, listening works even
+  // while the RF Explorer is the active sweeper — the server tunes the Pluto
+  // and enforces its own range check.
+  const roles = App.state && App.state.roles;
+  if (roles && roles.roles && roles.roles.some(r => r.source === "pluto"))
+    return { ok: true };
   const dev = App.state && App.state.device;
   if (!dev || !dev.modules || !dev.modules.length)
     return { ok: false, msg: "connect a device first (Session tab)." };
   if (dev.driver !== "pluto")
-    return { ok: false, msg: "tune / view / listen needs the Pluto (SDR) — the RF Explorer is amplitude-only." };
+    return { ok: false, msg: "tune / view / listen needs the Pluto (SDR) — connect it in the DEVICE card (it can stay connected alongside the RF Explorer)." };
   const lo = Math.min(...dev.modules.map(m => m.min_mhz));
   const hi = Math.max(...dev.modules.map(m => m.max_mhz));
   if (center < lo || center > hi)
@@ -1370,6 +1454,7 @@ function resetMonitorMetrics() {
   App._sigHistory = [];
   App._sigHistoryT0 = 0;
   ["sm-peak", "sm-mean", "sm-snr", "sm-floor"].forEach(id => { if ($(id)) $(id).textContent = "—"; });
+  const dm = $("sm-demod"); if (dm) dm.textContent = "";
   const fill = $("sm-bar-fill"); if (fill) fill.style.width = "0%";
   const dot = $("sm-peak-dot"); if (dot) dot.style.display = "none";
   const hc = $("insp-history");
@@ -1430,6 +1515,23 @@ function computeMeterStats(analyzer, centerMhz, demodMhz, mode) {
     for (let i = 0; i < n; i++) if (p[i] > peakVal) { peakVal = p[i]; peakIdx = i; }
   }
   return { peak: peakHold, mean, floor, snr, peakIdx, peakFreq: fr[peakIdx], rawPeak: peak };
+}
+
+function updateDemodDiag(d) {
+  // live demod-chain readout (from the backend `demod` telemetry): the channel-
+  // isolated SNR, how hard the AGC is working, and a plain "why is it weak"
+  // verdict — front-end/antenna vs genuinely weak signal vs OK.
+  const el = $("sm-demod");
+  if (!el) return;
+  if (!d || d.snr_db == null) { el.textContent = ""; return; }
+  const agc = (d.agc_gain_db >= 0 ? "+" : "") + Math.round(d.agc_gain_db);
+  let verdict;
+  if (d.gated) verdict = "muted — squelch closed (nothing in the channel)";
+  else if (d.snr_db < 6 && d.agc_gain_db > 18) verdict = "weak — AGC boosting hard; likely front-end/antenna/range, not DSP";
+  else if (d.snr_db < 6) verdict = "weak signal in channel";
+  else verdict = "OK";
+  const sq = (d.squelch_db != null) ? " · squelch " + d.squelch_db + " dB" : "";
+  el.textContent = "DEMOD  SNR " + d.snr_db.toFixed(1) + " dB · AGC " + agc + " dB" + sq + "  —  " + verdict;
 }
 
 function updateSmeterDisplay(m) {
@@ -1504,10 +1606,17 @@ function drawSignalHistory(cv) {
 // an optional demod override (WFM/NFM/AM/USB/LSB/CW); omit to let the backend
 // pick_mode / the <select> decide. The `tuneId` guards against a stale async
 // fallback stomping a newer tune (multiple lists can drive the same panel).
-function inspectByFreq(center, label, mode) {
+function inspectByFreq(center, label, mode, sid, attr) {
   const tuneId = (App.tuneId = (App.tuneId || 0) + 1);
   App.inspCenter = center; App.inspLabel = label;   // for mode <select> re-tune
   App.demodMhz = center;                             // demod tuner starts at band center (offset 0)
+  App.demodBwHz = null;                              // new signal -> per-mode default channel width
+  if (arguments.length >= 4) {                       // opened from a detected signal (has an id)
+    App.inspSignalId = (sid != null && !isNaN(sid)) ? sid : null;
+    App.inspAttribution = attr || "unassessed";
+  }
+  renderInspAttribution();
+  if ($("insp-bw")) $("insp-bw").value = "auto";
   App._lastSpecSeq = null;                           // new tune → first frame always draws
   $("inspect-panel").style.display = "";
   $("insp-title").textContent = `${fmtF(center)} · ${label || ""}`;   // fmtF already carries the unit
@@ -1631,13 +1740,13 @@ function setInspNav(enabled) {
 
 // Entry point for the NON-baseline lists (Results / detected signals / Wiki).
 // Disables Next/Prev (no list to step) and tunes the given center+label.
-function listenAt(center, label, mode) {
+function listenAt(center, label, mode, sid, attr) {
   if (center == null || isNaN(center)) return;
   stopAuto();                       // a manual freq pick takes manual control
   App.inspContext = "freq";
   App.inspIdx = null;
   setInspNav(false);
-  inspectByFreq(center, label, mode);
+  inspectByFreq(center, label, mode, sid, attr);
 }
 
 /* ---------- signal hunt: step the not-in-baseline (unknown) emitters ---------- */
@@ -1732,6 +1841,7 @@ function startSpectrumPoll() {
       drawAnalyzer($("insp-analyzer"), s.analyzer, meter);
       drawSignalHistory($("insp-history"));
     }
+    updateDemodDiag(s.demod);              // live demod chain: SNR/AGC/squelch + "why weak" verdict
     if (s.waterfall) drawWaterfall($("insp-waterfall"), s.waterfall);
   }, specPollMs());
 }
@@ -1799,13 +1909,60 @@ function drawAnalyzer(cv, a, meter) {
   ctx.fillText(hi.toFixed(0) + " dBm", 3, 11);
 }
 
-// Vertical cursor at the current demod tuner (App.demodMhz) within [f0,f1].
+const DEMOD_BW_STEPS = [3000, 6000, 12000, 16000, 25000, 50000, 100000, 150000, 250000];
+
+// The demodulator channel width in Hz: an explicit operator choice (App.demodBwHz)
+// or the per-mode default. This is what actually gets filtered/heard/decoded, and
+// what the shaded band on the analyzer shows.
+function currentDemodBwHz() {
+  if (App.demodBwHz != null) return App.demodBwHz;
+  const m = (($("insp-mode") || {}).value || "nfm");
+  if (m === "wfm") return 150000;
+  if (m === "am") return 10000;
+  if (m === "usb" || m === "lsb") return 3000;
+  if (m === "cw") return 1000;
+  return 16000;                                  // nfm + decode modes (pocsag/flex/ook/dtmf)
+}
+
+// Vertical cursor + shaded CHANNEL-WIDTH band at the demod tuner within [f0,f1].
 function drawDemodMarker(ctx, W, H, f0, f1) {
   if (App.demodMhz == null || f1 === f0) return;
-  const mx = W * (App.demodMhz - f0) / (f1 - f0);
+  const span = f1 - f0;
+  const mx = W * (App.demodMhz - f0) / span;
+  const halfMhz = (currentDemodBwHz() / 1e6) / 2;   // band half-width in MHz
+  const xL = W * (App.demodMhz - halfMhz - f0) / span;
+  const xR = W * (App.demodMhz + halfMhz - f0) / span;
+  const cl = Math.max(0, xL), cr = Math.min(W, xR);
+  if (cr > cl) {                                     // the passband the operator hears/decodes
+    ctx.fillStyle = "rgba(255,210,74,0.14)";
+    ctx.fillRect(cl, 0, cr - cl, H);
+    ctx.strokeStyle = "rgba(255,210,74,0.55)"; ctx.lineWidth = 1;
+    ctx.beginPath();
+    if (xL >= 0 && xL <= W) { ctx.moveTo(Math.round(xL) + 0.5, 0); ctx.lineTo(Math.round(xL) + 0.5, H); }
+    if (xR >= 0 && xR <= W) { ctx.moveTo(Math.round(xR) + 0.5, 0); ctx.lineTo(Math.round(xR) + 0.5, H); }
+    ctx.stroke();
+  }
   if (mx < 0 || mx > W) return;
-  ctx.strokeStyle = "#ffd24a"; ctx.lineWidth = 1; ctx.beginPath();
+  ctx.strokeStyle = "#ffd24a"; ctx.lineWidth = 1; ctx.beginPath();       // center hairline
   ctx.moveTo(Math.round(mx) + 0.5, 0); ctx.lineTo(Math.round(mx) + 0.5, H); ctx.stroke();
+}
+
+// Set the demod channel width (Hz, or null=auto) and push it to the live audio filter.
+function setDemodBw(hz) {
+  App.demodBwHz = hz;
+  const sel = $("insp-bw");
+  if (sel) sel.value = (hz == null) ? "auto" : String(hz);
+  api("/api/listen/bandwidth", { chan_bw_hz: (hz == null) ? "auto" : hz }).catch(() => {});
+}
+
+// Scroll-wheel over the analyzer widens/narrows the channel through the preset steps.
+function nudgeDemodBw(dir) {
+  const cur = currentDemodBwHz();
+  let idx = 0, best = Infinity;
+  DEMOD_BW_STEPS.forEach((s, i) => { const d = Math.abs(s - cur); if (d < best) { best = d; idx = i; } });
+  idx = Math.max(0, Math.min(DEMOD_BW_STEPS.length - 1, idx + (dir > 0 ? 1 : -1)));
+  setDemodBw(DEMOD_BW_STEPS[idx]);
+  $("insp-msg").textContent = "filter " + (DEMOD_BW_STEPS[idx] / 1000) + " kHz";
 }
 
 // Click the live spectrum/waterfall to tune the demodulator to THAT signal — a
@@ -1823,6 +1980,11 @@ function tuneDemodFromClick(e, cv) {
 }
 if ($("insp-analyzer")) $("insp-analyzer").addEventListener("click", (e) => tuneDemodFromClick(e, $("insp-analyzer")));
 if ($("insp-waterfall")) $("insp-waterfall").addEventListener("click", (e) => tuneDemodFromClick(e, $("insp-waterfall")));
+if ($("insp-bw")) $("insp-bw").addEventListener("change", () => {
+  const v = $("insp-bw").value;
+  setDemodBw(v === "auto" ? null : parseFloat(v));
+});
+if ($("insp-analyzer")) $("insp-analyzer").addEventListener("wheel", (e) => { e.preventDefault(); nudgeDemodBw(-e.deltaY); }, { passive: false });
 
 // BUGFIX: the monitor/inspect panel was authored INSIDE the baseline <section>,
 // which is display:none unless the baseline tab is active — so every other list
@@ -1892,7 +2054,7 @@ function renderAnalyze(j) {
   if (d && d.messages && d.messages.length) {
     rows.push(`<div class="note" style="margin-top:2px">DECODED — ${esc(d.protocol || "")}` +
               `${d.note ? " · " + esc(d.note) : ""}:</div>`);
-    rows.push("<pre style='white-space:pre-wrap;background:#04070c;border:1px solid #26303d;padding:6px;margin:2px 0'>" +
+    rows.push("<pre style='white-space:pre-wrap;background:#04070c;color:#cfd8e3;border:1px solid #26303d;padding:6px;margin:2px 0'>" +
       d.messages.map(m => esc(decodeMsgLine(d.protocol, m))).join("\n") + "</pre>");
   } else if (d && d.note) {
     rows.push(`<div class="note">${esc(d.note)}</div>`);
@@ -1913,12 +2075,16 @@ function renderAnalyze(j) {
         `</div>`);
   }
   if (cands.length) {
-    rows.push("<div class='note' style='margin-top:4px'>CANDIDATES (sigidwiki — feature match, confirm by ear/eye):</div>");
+    rows.push("<div class='note' style='margin-top:4px'>CANDIDATES (device catalog + sigidwiki — feature match, confirm by ear/eye):</div>");
     rows.push("<table><tr><th>Signal</th><th>Class</th><th>BW</th><th>TSCM note</th><th></th></tr>" +
-      cands.map(c => `<tr><td>${esc(c.name)}</td><td>${esc(c.class)}</td><td>${c.bandwidth_khz} kHz</td>` +
+      cands.map(c => `<tr><td>${esc(c.name)}` +
+        (c.device_class ? `<br><span class="note">${esc(c.device_class)}</span>` : "") + `</td>` +
+        `<td>${esc(c.class)}</td><td>${c.bandwidth_khz} kHz</td>` +
         `<td class="note" style="max-width:240px">${esc(c.tscm || "")}</td>` +
         `<td><a href="${esc(c.url)}" target="_blank" rel="noopener" class="note">ref ↗</a></td></tr>`).join("") +
       "</table>");
+    const topCat = cands.find(c => c.device_class);
+    if (topCat) rows.push(catalogDetail(topCat));
   }
   out.innerHTML = rows.join("");
   out.style.display = "";
@@ -1977,6 +2143,14 @@ if ($("insp-record-iq")) $("insp-record-iq").onclick = () => toggleRecord("iq");
 
 /* ---------- MANUAL gated triage (post-hoc, no radio) ---------- */
 const TRIAGE_LABELS = { cleared: "Cleared", suspect: "Suspect", flagged: "Flag", ask_client: "Ask client" };
+// Attribution: is this detection capturing THE CLIENT'S OWN space? (the legal line for decoding content)
+const ATTRIBUTION_LABELS = { client_space: "Client's space ⚠", third_party: "Third-party",
+                             infrastructure: "Infrastructure", inconclusive: "Inconclusive" };
+const ATTRIBUTION_TITLES = {
+  client_space: "Confirmed capturing the CLIENT's own environment — a bug targeting them. Escalate + capture IQ evidence.",
+  third_party: "Someone else's signal (neighbor, passer-by). Do NOT decode its content — move along.",
+  infrastructure: "External / expected infrastructure (tower, broadcast). Not about the client.",
+  inconclusive: "Can't yet tell — needs more assessment (location, demod of the client's own space)." };
 
 function triageFilters() {
   const minScore = parseFloat(($("triage-filter-score") || {}).value);
@@ -1992,7 +2166,10 @@ function triageFilteredSignals(signals) {
   const f = triageFilters();
   return (signals || []).filter(s => {
     const st = s.triage_status || "unreviewed";
-    if (f.status && st !== f.status) return false;
+    // a confirmed threat is NEVER hidden by the review-state filter — flagging a
+    // bug must not make it vanish from the list (only room/score still narrow it)
+    const isThreat = st === "flagged" || s.attribution_status === "client_space";
+    if (f.status && st !== f.status && !isThreat) return false;
     if (f.novelOnly && !s.is_novel_to_address) return false;
     if (f.minScore != null && (s.anomaly_score || 0) < f.minScore) return false;
     if (f.room && (s.room || "") !== f.room) return false;
@@ -2029,7 +2206,7 @@ function renderTriageTable() {
   }
   tb.innerHTML =
     "<tr><th>Score</th><th>Frequency</th><th>Room</th><th>Class</th><th>Novel?</th>" +
-    "<th>Decision</th><th>Notes</th><th>Monitor</th></tr>" +
+    "<th>Decision</th><th>Attribution (about the client?)</th><th>Notes</th><th>Monitor</th></tr>" +
     visible.map(triageRow).join("");
 }
 
@@ -2066,20 +2243,23 @@ async function loadTriage() {
 function triageRow(s) {
   const st = s.triage_status || "unreviewed";
   const btns = Object.keys(TRIAGE_LABELS).map(k =>
-    `<button class="btn ${st === k ? "primary" : ""}" style="padding:2px 6px" ` +
+    `<button class="btn ${st === k ? "primary" : ""}" style="padding:2px 5px;font-size:11px" ` +
     `onclick="triageDecide(${s.id},'${k}')">${TRIAGE_LABELS[k]}</button>`).join(" ");
+  // the real threat: flagged, or confirmed capturing the client's own space
+  const isThreat = st === "flagged" || s.attribution_status === "client_space";
   const novel = s.is_novel_to_address
     ? `<span class="pill" style="color:#ffd24a" title="${esc(s.novelty_reason || "")}">▲ NEW</span>` : "";
   const lbl = (s.matched_label || s.classification || "signal").replace(/'/g, "");
-  return `<tr data-sid="${s.id}">` +
-    `<td>${(s.anomaly_score || 0).toFixed(0)}</td>` +
-    `<td><a href="#" class="freqlink" data-center="${s.center_mhz}" data-label="${esc(lbl)}">${fmtF(s.center_mhz)}</a></td>` +
+  return `<tr data-sid="${s.id}" class="${isThreat ? "threat-row" : ""}">` +
+    `<td>${(s.anomaly_score || 0).toFixed(0)}${isThreat ? '<br><span class="threat-tag">● THREAT</span>' : ''}</td>` +
+    `<td><a href="#" class="freqlink" data-center="${s.center_mhz}" data-sid="${s.id}" data-attr="${s.attribution_status || "unassessed"}" data-label="${esc(lbl)}">${fmtF(s.center_mhz)}</a></td>` +
     `<td class="note">${esc(s.room || "—")}</td>` +
     `<td><span class="pill ${s.classification}">${esc(statusLabel(s.classification))}</span>${s.caution ? " ⚠" : ""}</td>` +
     `<td>${novel}</td>` +
     `<td>${btns}<div class="note" style="margin-top:2px">${st === "unreviewed" ? "— unreviewed" : esc(TRIAGE_LABELS[st] || st)}</div></td>` +
+    `<td>${attributionCell(s)}</td>` +
     `<td><input class="triage-note" data-sid="${s.id}" value="${esc(s.triage_notes || "")}" placeholder="notes…" style="width:150px"></td>` +
-    `<td><button class="btn" onclick="monitorFreq(${s.center_mhz},'${esc(lbl)}')">▶ monitor</button></td>` +
+    `<td><button class="btn" onclick="monitorFreq(${s.center_mhz},'${esc(lbl)}',${s.id},'${s.attribution_status || "unassessed"}')">▶ monitor</button></td>` +
     `</tr>`;
 }
 
@@ -2089,6 +2269,45 @@ async function triageDecide(id, status) {
   try { await api(`/api/signals/${id}/triage`, { status, notes }); }
   catch (e) { alert("Triage failed: " + (e.message || e)); return; }
   loadTriage();
+}
+
+// Attribution buttons + the ECPA-gated force-decode override, per signal.
+function attributionCell(s) {
+  const ast = s.attribution_status || "unassessed";
+  const btns = Object.keys(ATTRIBUTION_LABELS).map(k =>
+    `<button class="btn ${ast === k ? "primary" : ""}" style="padding:2px 5px;font-size:11px" ` +
+    `title="${esc(ATTRIBUTION_TITLES[k])}" onclick="triageAttribute(${s.id},'${k}')">${ATTRIBUTION_LABELS[k]}</button>`).join(" ");
+  const decodeBtn = `<button class="btn" style="padding:2px 5px;font-size:11px" ` +
+    `title="Decode this signal's CONTENT. Lawful only for the client's own space/device — logs an ECPA acknowledgment." ` +
+    `onclick="ecpaOverride(${s.id},${s.center_mhz})">⚖ decode…</button>`;
+  const state = ast === "unassessed" ? "" :
+    `<div class="note" style="margin-top:2px${ast === "client_space" ? ";color:#ff6b6b" : ""}">${esc(ATTRIBUTION_LABELS[ast])}</div>`;
+  return btns + " " + decodeBtn + state;
+}
+
+async function triageAttribute(id, status) {
+  const noteEl = document.querySelector(`.triage-note[data-sid="${id}"]`);
+  const notes = noteEl ? noteEl.value : "";
+  try { await api(`/api/signals/${id}/attribution`, { status, notes }); }
+  catch (e) { alert("Attribution failed: " + (e.message || e)); return; }
+  loadTriage();
+}
+
+async function ecpaOverride(id, center) {
+  const ok = confirm(
+`ECPA / Wiretap Act warning (18 U.S.C. §2511)
+
+Decoding the CONTENT of a communication that is NOT your client's own may be unlawful interception. Proceed ONLY for a signal you have a lawful basis to decode — the client's own space or device.
+
+This override will be LOGGED with your acknowledgment. Continue?`);
+  if (!ok) return;
+  const reason = prompt("Reason / lawful basis for decoding this signal (recorded in the audit log):", "");
+  if (!reason) { alert("A reason is required — override NOT logged."); return; }
+  try {
+    const row = await api("/api/decode/override",
+      { ecpa_ack: true, reason, signal_id: id, center_mhz: center });
+    alert("Override logged (audit id " + row.id + "). You may now decode this signal in the monitor.");
+  } catch (e) { alert("Override failed: " + (e.message || e)); }
 }
 
 async function triageBulk(status, notes, predicate) {
@@ -2141,9 +2360,38 @@ async function maybeOpenTriageAfterSweep(sweepId) {
 
 // Open the monitor on a triaged signal and auto-run ANALYZE so the operator sees
 // WHAT it is (receive + identify), not just a power trace.
-function monitorFreq(center, label) {
-  listenAt(center, label);
+function monitorFreq(center, label, sid, attr) {
+  listenAt(center, label, undefined, sid != null ? sid : null, attr || null);
   setTimeout(analyzeSignal, 400);
+}
+
+// Attribution controls in the MONITOR panel — identify AND attribute a signal in
+// one place (only shown when the panel was opened from a detected signal w/ an id).
+function renderInspAttribution() {
+  const el = $("insp-attribution");
+  if (!el) return;
+  if (App.inspSignalId == null) { el.style.display = "none"; return; }
+  const cur = App.inspAttribution || "unassessed";
+  const btns = Object.keys(ATTRIBUTION_LABELS).map(k =>
+    `<button class="btn ${cur === k ? "primary" : ""}" style="padding:2px 6px;font-size:11px" ` +
+    `title="${esc(ATTRIBUTION_TITLES[k])}" onclick="setInspAttribution('${k}')">${ATTRIBUTION_LABELS[k]}</button>`).join(" ");
+  el.innerHTML = `<span class="note">About the client?</span> ${btns} ` +
+    `<button class="btn" style="padding:2px 6px;font-size:11px" ` +
+    `title="Decode this signal's CONTENT — lawful only for the client's own space/device; logs an ECPA acknowledgment" ` +
+    `onclick="ecpaOverride(${App.inspSignalId}, ${App.inspCenter})">⚖ decode…</button>` +
+    (cur !== "unassessed"
+      ? `<span class="note"${cur === "client_space" ? ' style="color:var(--red)"' : ''}> · ${esc(ATTRIBUTION_LABELS[cur])}</span>`
+      : "");
+  el.style.display = "";
+}
+
+async function setInspAttribution(status) {
+  if (App.inspSignalId == null) return;
+  try { await api(`/api/signals/${App.inspSignalId}/attribution`, { status }); }
+  catch (e) { alert("Attribution failed: " + (e.message || e)); return; }
+  App.inspAttribution = status;
+  renderInspAttribution();
+  if (App.triage && App.triage.signals) loadTriage();   // keep the triage tab in sync
 }
 if ($("btn-triage-load")) $("btn-triage-load").onclick = () => {
   const flash = $("triage-flash");
@@ -2462,7 +2710,115 @@ function renderSegPanel(st) {
     `<span class="n">${esc(a.label || a.reason || "")}</span></div>`).join("");
 }
 
+/* ---------- F6: sustained-segment info panes ---------- */
+function setInfoTab(name) {
+  App.infoTab = name;
+  document.querySelectorAll("#sweep-info-tabs button[data-tab]").forEach(b =>
+    b.classList.toggle("on", b.dataset.tab === name));
+  ["signals", "live", "expected", "catalog"].forEach(k => {
+    const p = $("pane-" + k);
+    if (p) p.style.display = k === name ? "" : "none";
+  });
+  if (name !== "live") hideLiveShade();
+}
+
+function hideLiveShade() {
+  const el = $("live-shade");
+  if (el) el.style.display = "none";
+}
+
+/* LIVE pane: shade the chosen window on the main chart and re-render just that
+   span, live, in the table slot. Window defaults to the whole segment. */
+function renderLiveZoom(t) {
+  const c = $("livezoom");
+  if (!c || !t) return;
+  const lo = t.low, hi = t.high;
+  let w = App.liveWindow;
+  if (!w || w.hi <= lo || w.lo >= hi) w = { lo, hi };
+  const chart = $("livechart"), shade = $("live-shade");
+  if (chart && shade && hi > lo) {
+    const W = chart.clientWidth;
+    const x1 = Math.max(0, (w.lo - lo) / (hi - lo)) * W;
+    const x2 = Math.min(1, (w.hi - lo) / (hi - lo)) * W;
+    shade.style.display = "";
+    shade.style.left = x1 + "px";
+    shade.style.width = Math.max(2, x2 - x1) + "px";
+  }
+  const f = t.freqs || [], idx = [];
+  for (let i = 0; i < f.length; i++) if (f[i] >= w.lo && f[i] <= w.hi) idx.push(i);
+  if (idx.length < 2) return;
+  const scale = App._traceScale;   // livechart's labels anchor to this — restore after
+  const slice = arr => (arr ? idx.map(i => arr[i]) : null);
+  drawTrace(c, { freqs: idx.map(i => f[i]), amps: slice(t.amps),
+                 avg: slice(t.avg), maxpeak: slice(t.maxpeak) });
+  App._traceScale = scale;
+}
+
+function renderExpandedExpected(st) {
+  const el = $("tbl-seg-expected");
+  if (!el) return;
+  const cs = st.sweep.current_segment;
+  const exp = (cs && cs.expected) || [];
+  el.innerHTML = "<tr><th>Status</th><th>Frequency</th><th>Label / service</th><th>Band</th></tr>" +
+    (exp.length ? exp.map(e =>
+      `<tr><td>${e.status === "found" ? '<span class="pill ok">RECEIVED</span>'
+                                       : '<span class="pill SCANNING">LOOKING…</span>'}</td>` +
+      `<td>${fmtF(e.center_mhz)}</td><td>${esc(e.label || e.service || "")}</td>` +
+      `<td>${e.freq_low_mhz != null ? fmtF(e.freq_low_mhz) + " – " + fmtF(e.freq_high_mhz) : ""}</td></tr>`
+    ).join("") :
+    `<tr><td colspan="4" class="note">nothing specific expected in this band</td></tr>`);
+}
+
+/* BUG CATALOG pane: which covert-device classes are known to transmit inside
+   the sustained segment — pulled from the surveillance catalog, cached per segment. */
+async function maybeLoadCatalog(cs) {
+  if (!cs || cs.low_mhz == null) return;
+  const key = cs.low_mhz + "-" + cs.high_mhz;
+  if (App._catKey === key) return;
+  App._catKey = key;
+  const el = $("catalog-body");
+  if (!el) return;
+  el.innerHTML = `<p class="note" style="padding:6px 9px">checking surveillance catalog…</p>`;
+  try {
+    const r = await api(`/api/catalog/segment?low=${cs.low_mhz}&high=${cs.high_mhz}`);
+    if (!r.classes || !r.classes.length) {
+      el.innerHTML = `<p class="note" style="padding:6px 9px">no catalogued covert-device class uses ${cs.low_mhz.toFixed(1)}–${cs.high_mhz.toFixed(1)} MHz.</p>`;
+      return;
+    }
+    el.innerHTML = r.classes.map(c =>
+      `<div class="cat-item"><b>${esc(c.device_class)}</b>` +
+      `<div class="note">${c.signatures.map(s =>
+        `${fmtF(s.freq_min_mhz)}–${fmtF(s.freq_max_mhz)}` +
+        (s.class ? ` · ${esc(s.class)}` : "") + (s.duty ? ` · ${esc(s.duty)}` : "")
+      ).join(" &nbsp;·&nbsp; ")}</div>` +
+      (c.confirm_steps && c.confirm_steps.length
+        ? `<div class="note" style="color:var(--cyan)">confirm: ${esc(c.confirm_steps[0])}</div>` : "") +
+      (c.false_positive_overlap && c.false_positive_overlap.length
+        ? `<div class="note">might innocently be: ${esc(c.false_positive_overlap.join("; "))}</div>` : "") +
+      `</div>`).join("");
+  } catch (e) {
+    App._catKey = null;
+    el.innerHTML = `<p class="note" style="padding:6px 9px">catalog unavailable: ${esc(e.message || e)}</p>`;
+  }
+}
+
 /* ---------- sigidwiki signal identification ---------- */
+// A matched catalog signature carries its parent device class + how to confirm it
+// + what it might innocently be. Render that as a compact profile card (empty for
+// plain sigidwiki entries, which have no device_class).
+function catalogDetail(c) {
+  if (!c || !c.device_class) return "";
+  const steps = (c.confirm_steps || []).length
+    ? `<div style="margin-top:5px"><b>How to confirm:</b><ul style="margin:3px 0 0 16px;padding:0">`
+      + c.confirm_steps.map(x => `<li>${esc(x)}</li>`).join("") + `</ul></div>` : "";
+  const fps = (c.false_positive_overlap || []).length
+    ? `<div style="margin-top:5px"><b>Might innocently be:</b> <span class="note">`
+      + c.false_positive_overlap.map(esc).join("; ") + `</span></div>` : "";
+  return `<div class="card" style="margin-top:8px;padding:10px;background:var(--panel2)">`
+    + `<div><span class="pill ANOMALY">DEVICE</span> <b>${esc(c.device_class)}</b></div>`
+    + steps + fps + `</div>`;
+}
+
 function renderIdentify(r) {
   let html = "";
   const f = r.features;
@@ -2483,12 +2839,15 @@ function renderIdentify(r) {
   }
   html += "<table><tr><th>Candidate</th><th>Score</th><th>Mode</th><th>Why it matched</th><th></th></tr>";
   for (const c of r.candidates) {
-    html += `<tr><td>${esc(c.name)}</td><td>${c.score}</td><td>${esc(c.mode)}</td>`
+    html += `<tr><td>${esc(c.name)}`
+      + (c.device_class ? `<br><span class="note">${esc(c.device_class)}</span>` : "")
+      + `</td><td>${c.score}</td><td>${esc(c.mode)}</td>`
       + `<td class="note">${c.reasons.map(esc).join("; ")}`
       + (c.tscm ? `<br><b>TSCM:</b> ${esc(c.tscm)}` : "") + "</td>"
-      + `<td><a href="${esc(c.url)}" target="_blank" rel="noopener">sigidwiki ↗</a></td></tr>`;
+      + `<td><a href="${esc(c.url)}" target="_blank" rel="noopener">ref ↗</a></td></tr>`;
   }
-  $("id-results").innerHTML = html + "</table>";
+  const topCat = r.candidates.find(c => c.device_class);
+  $("id-results").innerHTML = html + "</table>" + (topCat ? catalogDetail(topCat) : "");
 }
 
 $("btn-identify").onclick = async () => {
@@ -2624,7 +2983,17 @@ if ($("seg-expected")) $("seg-expected").onclick = (e) => {
   App._lastLabelKey = "";
 };
 
-$("btn-abort").onclick = () => api("/api/sweep/abort", {});
+/* F7: aborting is a decision — pause & save (default-safe) or confirmed erase */
+$("btn-abort").onclick = () => $("abort-dialog").classList.add("show");
+$("abort-cancel").onclick = () => $("abort-dialog").classList.remove("show");
+$("abort-save").onclick = async () => {
+  $("abort-dialog").classList.remove("show");
+  await api("/api/sweep/abort", {});
+};
+$("abort-erase").onclick = async () => {
+  $("abort-dialog").classList.remove("show");
+  await api("/api/sweep/abort", { erase: true });
+};
 $("btn-hide-overlay").onclick = () => {
   App.overlayHidden = true; $("sweep-overlay").classList.remove("show");
 };
@@ -2668,7 +3037,7 @@ async function loadDirectional() {
     const top = App.dirQueue[0];
     const hidden = App.anomalies.length - App.dirQueue.length;
     $("dir-instruction").innerHTML =
-      `<b style="color:#fff">ATTACH THE DIRECTIONAL ANTENNA</b> and return to ` +
+      `<b style="color:var(--bright)">ATTACH THE DIRECTIONAL ANTENNA</b> and return to ` +
       `<b style="color:var(--amber)">${esc(top.strongest_room || top.room || "the premises")}</b>. ` +
       `Triage: hunting the top ${App.dirQueue.length} by anomaly score` +
       (hidden > 0 ? ` (${hidden} lower-scored hidden — clear them via baseline ` +
@@ -2738,7 +3107,8 @@ async function loadResults() {
       "<th>In/Out Δ</th><th>Strongest room</th><th>Class</th><th>Why not verified</th><th></th></tr>" +
       anomalies.map(s =>
         `<tr><td class="${s.anomaly_score >= 60 ? "score-hi" : "score-md"}">${(s.anomaly_score || 0).toFixed(0)}</td>` +
-        `<td><a href="#" class="freqlink" data-center="${s.center_mhz}" ` +
+        `<td><a href="#" class="freqlink" data-center="${s.center_mhz}" data-sid="${s.id}" ` +
+        `data-attr="${s.attribution_status || "unassessed"}" ` +
         `data-label="${esc(s.matched_label || s.match_reason || "anomaly")}">${fmtF(s.center_mhz)}</a></td>` +
         `<td>${s.peak_dbm}</td><td>${s.bw_khz}</td>` +
         `<td>${((s.persistence || 0) * 100).toFixed(0)}%</td>` +
@@ -2747,12 +3117,44 @@ async function loadResults() {
         `<td><span class="pill ${s.classification}">${esc(statusLabel(s.classification))}</span>${s.caution ? " ⚠" : ""}</td>` +
         `<td style="max-width:300px">${esc(s.match_reason)}</td>` +
         `<td><button class="btn" onclick="captureOne(${s.id})">CAPTURE</button></td></tr>`).join("");
+    renderFindingsSummary(anomalies);
   } catch (e) {}
   loadHunt();
   loadSignals();
   loadReports();
   loadExpected();
   loadReportOptions();
+}
+
+// One-glance verdict for the operator + client: unexplained anomalies, how many
+// were flagged as threats (decision=flagged or attribution=client_space), cleared,
+// and how many still need review. Threat count turns red when > 0.
+async function renderFindingsSummary(anomalies) {
+  const el = $("results-summary");
+  if (!el) return;
+  let sigs = [];
+  let remaining = null;
+  try {
+    const tri = await api("/api/triage/last");
+    sigs = tri.signals || [];
+    remaining = tri.remaining_unexplained;
+  } catch (e) { /* summary still shows anomaly count without triage detail */ }
+  const threats = sigs.filter(s => s.triage_status === "flagged" ||
+                                   s.attribution_status === "client_space").length;
+  const cleared = sigs.filter(s => s.triage_status === "cleared").length;
+  const chip = (val, label, style) =>
+    `<span style="display:inline-block;margin-right:22px">` +
+    `<b style="font-size:19px;${style || ""}">${val}</b> <span class="note">${label}</span></span>`;
+  el.innerHTML =
+    `<div style="display:flex;align-items:center;flex-wrap:wrap">` +
+    chip(anomalies.length, "unexplained anomalies", anomalies.length ? "color:var(--amber)" : "color:var(--green)") +
+    chip(threats, threats ? "flagged as THREATS ●" : "flagged as threats",
+         threats ? "color:var(--red)" : "color:var(--dim)") +
+    chip(cleared, "cleared", "color:var(--green)") +
+    (remaining != null ? chip(remaining, "still to review",
+         remaining ? "color:var(--amber)" : "color:var(--green)") : "") +
+    `</div>`;
+  el.style.display = "";
 }
 
 async function loadReportOptions() {
@@ -2799,7 +3201,7 @@ async function loadExpected() {
           : !x.swept ? '<span class="pill not_configured">NOT SWEPT</span>'
           : x.expectation === "strong" ? '<span class="pill failed">MISSING</span>'
           : '<span class="pill stale">SILENT</span>';
-        return `<tr${!x.found && x.expectation === "strong" ? ' style="background:#1f1212"' : ""}>` +
+        return `<tr${!x.found && x.expectation === "strong" ? ' style="background:var(--err-bg)"' : ""}>` +
           `<td>${f}</td><td>${esc(x.callsign || x.label)}</td>` +
           `<td>${x.distance_mi != null ? x.distance_mi.toFixed(0) : ""}</td>` +
           `<td>${esc(x.expectation)} — ${esc(x.basis)}</td>` +
@@ -3007,7 +3409,7 @@ async function loadInventory() {
         const loud = d.loud_unowned;
         const rssi = d.rssi_dbm != null ?
           `<span class="${loud ? "score-hi" : ""}">${d.rssi_dbm}</span>` : "—";
-        return `<tr${loud ? ' style="background:#1f1212"' : ""}>` +
+        return `<tr${loud ? ' style="background:var(--err-bg)"' : ""}>` +
           `<td>${d.kind.toUpperCase()}</td><td>${esc(d.name) || "<i>(no name)</i>"}</td>` +
           `<td>${esc(d.identifier)}</td><td>${rssi}${loud ? " ⚠ LOUD+UNOWNED" : ""}</td>` +
           `<td>${esc(d.channel)}${d.freq_mhz ? " / " + fmtF(d.freq_mhz) : ""}</td>` +
@@ -3074,6 +3476,36 @@ if ($("insp-ibw")) $("insp-ibw").onchange = () => {
 if ($("insp-block-s")) $("insp-block-s").onchange = () => {
   if (App.inspCenter != null) inspectByFreq(App.inspCenter, App.inspLabel, $("insp-mode").value);
 };
+
+/* ---------- F6: sustain + info-pane wiring ---------- */
+if ($("btn-sustain")) $("btn-sustain").onclick = async () => {
+  const s = App._sweepSt || {};
+  const on = !(s.sustaining || s.sustain_requested);
+  try { await api("/api/sweep/sustain", { on }); }
+  catch (e) { $("sweep-overlay-eta").textContent = "sustain failed: " + e.message; }
+};
+document.querySelectorAll("#sweep-info-tabs button[data-tab]").forEach(b =>
+  b.onclick = () => setInfoTab(b.dataset.tab));
+/* LIVE window: drag a span on the main chart; double-click resets to the segment */
+(() => {
+  const c = $("livechart");
+  if (!c) return;
+  let drag = null;
+  const canPick = () => App.infoTab === "live" && App._sweepSt && App._sweepSt.sustaining;
+  c.addEventListener("mousedown", e => { if (canPick()) drag = { x0: e.offsetX, x1: null }; });
+  c.addEventListener("mousemove", e => { if (drag) drag.x1 = e.offsetX; });
+  window.addEventListener("mouseup", () => {
+    if (!drag) return;
+    const t = App._lastTrace;
+    if (t && drag.x1 != null && Math.abs(drag.x1 - drag.x0) > 8) {
+      const W = c.clientWidth, lo = t.low, hi = t.high;
+      const a = Math.min(drag.x0, drag.x1) / W, b = Math.max(drag.x0, drag.x1) / W;
+      App.liveWindow = { lo: lo + a * (hi - lo), hi: lo + b * (hi - lo) };
+    }
+    drag = null;
+  });
+  c.addEventListener("dblclick", () => { if (canPick()) App.liveWindow = null; });
+})();
 
 initWakeLock();
 poll();
