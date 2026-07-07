@@ -173,6 +173,9 @@ class Config:
     def __init__(self, path: str):
         self.path = os.path.abspath(path)
         self.data = copy.deepcopy(DEFAULTS)
+        # session-only overrides (e.g. --simulate): consulted by get() but
+        # kept out of self.data so set_and_save() can never write them to disk
+        self._runtime_overrides = {}
         self.load()
 
     def load(self):
@@ -183,12 +186,20 @@ class Config:
         return self
 
     def get(self, *keys, default=None):
+        if keys in self._runtime_overrides:
+            return self._runtime_overrides[keys]
         cur = self.data
         for k in keys:
             if not isinstance(cur, dict) or k not in cur:
                 return default
             cur = cur[k]
         return cur
+
+    def set_runtime_override(self, keys: tuple, value):
+        """Override a setting for this process only. get(*keys) returns the
+        override (full key path only), and it is never persisted — set_and_save()
+        dumps self.data, which this does not touch."""
+        self._runtime_overrides[tuple(keys)] = value
 
     def set_and_save(self, keys: tuple, value):
         """Used by calibration mode to persist tuned values back to config.yaml."""

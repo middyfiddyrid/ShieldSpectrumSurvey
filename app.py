@@ -44,8 +44,16 @@ def main():
     cfg = Config(os.path.join(BASE_DIR, "config.yaml"))
     demo = args.demo or os.environ.get("DCS_DEMO") == "1"
     if args.simulate or demo:
-        cfg.data["device"]["simulate"] = True
+        # runtime-only: writing this into cfg.data would let any settings save
+        # persist simulate:true, silently turning later real sweeps into sims
+        cfg.set_runtime_override(("device", "simulate"), True)
         print("*** SIMULATED DEVICE MODE — demo/diagnostic only, not a real sweep ***")
+    elif cfg.get("device", "simulate", default=False):
+        print("!" * 78)
+        print("!!! WARNING: config.yaml has device.simulate: true — ALL sweeps will run")
+        print("!!! against the SIMULATED device, not real hardware. If this is not")
+        print("!!! intentional, set device.simulate to false in config.yaml.")
+        print("!" * 78)
     if demo:
         print("*** PUBLIC DEMO MODE — empty demo DB, PII features disabled ***")
 
