@@ -915,6 +915,22 @@ def create_app(db, cfg, demo=False) -> Flask:
         span_hi = float(cfg.get("pluto", "listen_wf_span_hi_db", default=40.0))
         psd_ema = nf_ema = None
         wf_seq = 0
+        # live demod strengthening (DEMOD_ANALYZE_DISSEMINATE_DESIGN.md §4a): ONE
+        # DemodState per stream so squelch/AGC/de-emphasis carry across blocks.
+        from .demod import DemodState
+
+        def _dnum(key, d):                    # null-safe: an explicit YAML null -> default
+            v = cfg.get("demod", key, default=d)
+            return d if v is None else v
+        dstate = DemodState(
+            agc_target_rms=float(_dnum("agc_target_rms", 0.18)),
+            agc_attack_ms=float(_dnum("agc_attack_ms", 8.0)),
+            agc_release_ms=float(_dnum("agc_release_ms", 300.0)),
+            agc_max_gain=float(_dnum("agc_max_gain", 40.0)),
+            squelch_hang_blocks=int(_dnum("squelch_hang_blocks", 3)),
+            deemphasis_us=float(_dnum("deemphasis_us", 75.0)))
+        sq_default = cfg.get("pluto", "listen_squelch_snr_db", default=None)
+        last_off, last_bw = 0.0, None
         _mdev, mlock, mstop, _msrc = st.controller.monitor_target()
         mstop.set()                           # preempt whatever stream is running now
         with mlock:                           # wait for the previous user of THIS radio to release
@@ -922,6 +938,7 @@ def create_app(db, cfg, demo=False) -> Flask:
             st.controller.listening = True
             st.controller.listen_offset_hz = 0.0   # new tune -> demod band center until clicked
             st.controller.listen_chan_bw_hz = None # new tune -> per-mode default channel width
+            st.controller.listen_squelch_snr_db = sq_default  # OFF by default (config)
             st.controller.listen_spectrum = None
             stop = mstop
             try:
@@ -929,7 +946,12 @@ def create_app(db, cfg, demo=False) -> Flask:
                     try:
                         off = float(getattr(st.controller, "listen_offset_hz", 0.0) or 0.0)
                         bw = getattr(st.controller, "listen_chan_bw_hz", None)
-                        pcm, arate = demodulate(iq, fs, mode, off, bw)
+                        if off != last_off or bw != last_bw:
+                            dstate.reset_continuity()      # passband moved -> don't click
+                            last_off, last_bw = off, bw
+                        sq = getattr(st.controller, "listen_squelch_snr_db", None)
+                        pcm, arate = demodulate(iq, fs, mode, off, bw,
+                                                state=dstate, squelch_snr_db=sq)
                     except Exception:  # noqa: BLE001
                         continue
                     yield pcm, arate
@@ -965,6 +987,14 @@ def create_app(db, cfg, demo=False) -> Flask:
                             "center_mhz": center_mhz, "mode": mode,
                             "ts": _time.time(), "seq": wf_seq,
                             "analyzer": {"freqs_mhz": af, "power_dbm": ap},
+                            "demod": {
+                                "snr_db": (round(dstate.last_snr_db, 1)
+                                           if dstate.last_snr_db is not None else None),
+                                "gated": bool(dstate.gated),
+                                "agc_gain_db": round(20.0 * _np.log10(
+                                    max(dstate.last_out_gain, 1e-6)), 1),
+                                "squelch_db": getattr(st.controller,
+                                                      "listen_squelch_snr_db", None)},
                             "waterfall": {
                                 "freqs_mhz": [round((center_mhz * 1e6 + f) / 1e6, 4)
                                               for f in wf["freqs_hz"]],
@@ -1258,14 +1288,73 @@ def create_app(db, cfg, demo=False) -> Flask:
 
     @app.post("/api/sweep/abort")
     def sweep_abort():
-        st.controller.abort()
-        return jsonify({"aborted": True})
+        """F7: default = pause the radio, save everything. {'erase': true} is the
+        confirmed hard abort — the aborted sweep's data is deleted."""
+        body = request.get_json(force=True, silent=True) or {}
+        erase = bool(body.get("erase"))
+        st.controller.abort(erase=erase)
+        return jsonify({"aborted": True, "erase": erase})
 
     @app.post("/api/sweep/next_segment")
     def sweep_next_segment():
         """F5: release the manual-advance gate so the sweep moves to the next segment."""
         st.controller.advance()
         return jsonify({"ok": True})
+
+    @app.post("/api/sweep/sustain")
+    def sweep_sustain():
+        """F6: hold the current segment (keep re-sweeping it live) / release it."""
+        body = request.get_json(force=True) or {}
+        on = bool(body.get("on"))
+        if on and not st.controller.state.get("running"):
+            return err("no sweep running")
+        st.controller.set_sustain(on)
+        return jsonify({"ok": True, "sustain": on})
+
+    _catalog_cache = {}
+
+    @app.get("/api/catalog/segment")
+    def catalog_segment():
+        """F6: covert-device classes from the surveillance catalog whose signature
+        bands intersect [low, high] MHz — segment-local intel for the operator."""
+        try:
+            low = float(request.args.get("low", 0))
+            high = float(request.args.get("high", 0))
+        except ValueError:
+            return err("low/high must be numeric")
+        if "data" not in _catalog_cache:
+            path = os.path.join(os.path.dirname(__file__), "surveillance_catalog.json")
+            try:
+                with open(path, encoding="utf-8") as f:
+                    _catalog_cache["data"] = json.load(f)
+            except OSError:
+                _catalog_cache["data"] = {}
+        out = []
+        for dc in (_catalog_cache["data"].get("device_classes") or []):
+            hits = []
+            for s in dc.get("signatures", []):
+                try:
+                    if float(s["freq_min_mhz"]) <= high and float(s["freq_max_mhz"]) >= low:
+                        hits.append(s)
+                except (KeyError, TypeError, ValueError):
+                    continue
+            if not hits:
+                continue
+            out.append({
+                "device_class": dc.get("device_class", ""),
+                "summary": (dc.get("summary") or "")[:280],
+                "confirm_steps": (dc.get("confirm_steps") or [])[:3],
+                "false_positive_overlap": (dc.get("false_positive_overlap") or [])[:4],
+                "signatures": [{
+                    "name": s.get("name") or s.get("signature") or "",
+                    "freq_min_mhz": s.get("freq_min_mhz"),
+                    "freq_max_mhz": s.get("freq_max_mhz"),
+                    "bandwidth_khz": s.get("bandwidth_khz"),
+                    "class": s.get("class"), "duty": s.get("duty"),
+                } for s in hits[:8]],
+            })
+        out.sort(key=lambda d: -len(d["signatures"]))
+        return jsonify({"low": low, "high": high, "classes": out})
 
     # ---------- results ----------
 

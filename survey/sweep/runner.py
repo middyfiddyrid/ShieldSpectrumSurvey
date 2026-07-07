@@ -66,6 +66,13 @@ class SweepController:
         # between segments until advance_event fires (still honouring abort_event).
         self.manual_advance = False
         self.advance_event = threading.Event()
+        # F6 sustain: operator holds the CURRENT segment — after its passes finish
+        # the worker keeps re-sweeping the same span live (view-only, no re-detect)
+        # until RESUME or abort. Works on every sweep kind, any profile.
+        self.sustain_flag = False
+        # F7: confirmed hard abort — erase the aborted sweep's data (vs the
+        # default pause-and-save). Set via abort(erase=True), applied in work().
+        self.erase_on_abort = False
         # F2 anomaly accumulator — persists across segments for the whole sweep.
         self._anomalies = []
         self.state = {"running": False, "phase": None, "module": None, "room": None,
@@ -73,7 +80,8 @@ class SweepController:
                       "eta_seconds": 0, "signal_count": 0, "message": "idle",
                       "live_trace": None, "current_segment": None, "error": None,
                       "directional": None, "calibration": None, "capture": None,
-                      "awaiting_advance": False, "anomalies_found": []}
+                      "awaiting_advance": False, "anomalies_found": [],
+                      "sustain_requested": False, "sustaining": False}
         self._lock = threading.Lock()
 
     # ---- device ----
@@ -197,14 +205,29 @@ class SweepController:
         return {"roles": roles, "concurrent_enabled": self.concurrent_enabled(),
                 "active_source": self.active_source}
 
-    def abort(self):
+    def abort(self, erase: bool = False):
+        """Stop the active worker. erase=False (default) is 'pause the radio,
+        save the session' — everything recorded so far is kept. erase=True is a
+        confirmed hard abort: this sweep's rows (signals/segments/sweep) are
+        deleted once the worker stops. Baseline and other sweeps are untouched."""
+        self.erase_on_abort = bool(erase)
         self.abort_event.set()
         self.advance_event.set()   # wake a manually-paused sweep so it can stop
-        self._set(message="abort requested — keeping data collected so far")
+        self.sustain_flag = False  # a sustained segment must not outlive the sweep
+        self._set(message="abort requested — erasing this sweep's data" if erase
+                          else "abort requested — keeping data collected so far",
+                  sustain_requested=False)
 
     def advance(self):
         """F5: operator tapped NEXT SEGMENT — release the manual-advance gate."""
         self.advance_event.set()
+
+    def set_sustain(self, on: bool):
+        """F6: hold/release the current segment. Turning it on mid-segment takes
+        effect when the segment's passes finish; turning it off releases the
+        live-watch loop so the sweep moves on."""
+        self.sustain_flag = bool(on)
+        self._set(sustain_requested=self.sustain_flag)
 
     def _set(self, **kw):
         with self._lock:
@@ -220,6 +243,8 @@ class SweepController:
         self.abort_event.clear()
         self.manual_advance = bool(manual_advance)
         self.advance_event.clear()
+        self.sustain_flag = False
+        self.erase_on_abort = False
         self._anomalies = []
         sweep_id = self.db.execute(
             "INSERT INTO sweeps (session_id,phase,module,room,profile,started_utc,"
@@ -237,32 +262,49 @@ class SweepController:
                 log.exception("sweep failed")
                 status = "error"
                 self._set(error=str(e), message=f"sweep error: {e}")
-            self.db.execute("UPDATE sweeps SET status=?, finished_utc=? WHERE id=?",
-                            (status, time.time(), sweep_id))
+            # F7: confirmed hard abort — this sweep's data is erased instead of
+            # finalized. Baseline, other sweeps, wiki captures and the session
+            # itself are untouched; postprocess still runs so session-wide
+            # deltas/localization recompute without the erased rows.
+            erased = self.erase_on_abort and status in ("aborted", "error")
+            if erased:
+                try:
+                    self.db.execute("DELETE FROM signals WHERE sweep_id=?", (sweep_id,))
+                    self.db.execute("DELETE FROM segments WHERE sweep_id=?", (sweep_id,))
+                    self.db.execute("DELETE FROM sweeps WHERE id=?", (sweep_id,))
+                    log.info("sweep %s aborted — data erased at operator request", sweep_id)
+                except Exception:  # noqa: BLE001
+                    log.exception("sweep-data erase failed — rows kept")
+                    erased = False
+            if not erased:
+                self.db.execute("UPDATE sweeps SET status=?, finished_utc=? WHERE id=?",
+                                (status, time.time(), sweep_id))
             try:
                 postprocess_session(self.db, self.cfg, session_id)
             except Exception:  # noqa: BLE001
                 log.exception("postprocess failed")
-            try:
-                from ..sigcapture import archive_observations
-                sess = self.db.query_one("SELECT address FROM sessions WHERE id=?",
-                                         (session_id,))
-                added = archive_observations(
-                    self.db, self.cfg, session_id,
-                    self.cfg.abs_path("capture_images"),
-                    sess["address"] if sess else "")
-                log.info("archived %d signal observations to the wiki", added)
-            except Exception:  # noqa: BLE001
-                log.exception("observation archive failed")
-            try:
-                from ..novelty import mark_session_novelty
-                n_novel = mark_session_novelty(self.db, session_id)
-                log.info("novelty: %d signals new to this address", n_novel)
-            except Exception:  # noqa: BLE001
-                log.exception("novelty marking failed")
+            if not erased:
+                try:
+                    from ..sigcapture import archive_observations
+                    sess = self.db.query_one("SELECT address FROM sessions WHERE id=?",
+                                             (session_id,))
+                    added = archive_observations(
+                        self.db, self.cfg, session_id,
+                        self.cfg.abs_path("capture_images"),
+                        sess["address"] if sess else "")
+                    log.info("archived %d signal observations to the wiki", added)
+                except Exception:  # noqa: BLE001
+                    log.exception("observation archive failed")
+                try:
+                    from ..novelty import mark_session_novelty
+                    n_novel = mark_session_novelty(self.db, session_id)
+                    log.info("novelty: %d signals new to this address", n_novel)
+                except Exception:  # noqa: BLE001
+                    log.exception("novelty marking failed")
             self._set(running=False,
-                      message=f"{phase} sweep ({module}) {status}; "
-                              f"{self.state['signal_count']} signals detected")
+                      message=f"{phase} sweep ({module}) aborted — data erased" if erased
+                              else f"{phase} sweep ({module}) {status}; "
+                                   f"{self.state['signal_count']} signals detected")
             if on_done:
                 on_done(status)
 
@@ -272,6 +314,7 @@ class SweepController:
                   segment_index=0, segment_total=len(plan.segments), percent=0.0,
                   signal_count=0, sweep_id=sweep_id, awaiting_advance=False,
                   anomalies_found=[],
+                  sustain_requested=False, sustaining=False,
                   message=f"starting {phase} sweep on {module} module")
         self._thread.start()
         return sweep_id
@@ -321,6 +364,10 @@ class SweepController:
             remaining -= seg.avg_passes * sps + seg.maxhold_dwell_s + 0.9
             self._set(percent=round(100.0 * (idx + 1) / len(plan.segments), 1),
                       eta_seconds=max(int(remaining), 0))
+            # F6: operator sustained this segment — keep watching it live until
+            # RESUME. View-only: detection/storage for the segment already ran.
+            if self.sustain_flag and not self.abort_event.is_set():
+                self._sustain_segment(idx, len(plan.segments), seg)
             # F5: in custom manual mode, hold here until the operator advances.
             # Still wakes on abort (abort() sets advance_event). Last segment never waits.
             if (self.manual_advance and idx < len(plan.segments) - 1
@@ -332,6 +379,42 @@ class SweepController:
                 while not self.advance_event.is_set() and not self.abort_event.is_set():
                     self.advance_event.wait(0.25)
                 self._set(awaiting_advance=False)
+
+    def _sustain_segment(self, idx, total, seg):
+        """F6: re-sweep the sustained segment continuously, publishing live_trace
+        (realtime + running avg + max-hold) until the operator resumes. The device
+        is still tuned to this segment from _sweep_segment. Never raises — a
+        serial hiccup here just ends the hold and lets the sweep continue."""
+        dev = self.device
+        acc = None
+        self._set(sustaining=True,
+                  message=f"segment {idx + 1}/{total} SUSTAINED — live on "
+                          f"{seg.low_mhz:.3f}–{seg.high_mhz:.3f} MHz "
+                          "(view-only; RESUME to continue the sweep)")
+        try:
+            dev.set_calculator("maxhold")
+            while self.sustain_flag and not self.abort_event.is_set():
+                frame = dev.read_sweep(timeout_s=3.0)
+                if frame is None:
+                    continue
+                if acc is None or len(acc.freqs) != len(frame.freqs_mhz):
+                    acc = Accumulator(frame.freqs_mhz)
+                acc.add_sweep(frame.amps_dbm)
+                n = len(frame.amps_dbm)
+                self._set(live_trace={
+                    "freqs": [round(f, 4) for f in frame.freqs_mhz],
+                    "amps": [round(a, 1) for a in frame.amps_dbm],
+                    "avg": [round(a, 1) for a in acc.avg[:n]],
+                    "maxpeak": [round(a, 1) for a in acc.maxpeak[:n]],
+                    "low": seg.low_mhz, "high": seg.high_mhz, "ts": frame.ts})
+        except (DeviceError, OSError) as e:
+            log.warning("sustain loop ended by device error: %s", e)
+        finally:
+            try:
+                dev.set_calculator("normal")
+            except Exception:  # noqa: BLE001
+                pass
+            self._set(sustaining=False)
 
     def _sweep_segment(self, session_id, sweep_id, phase, module, room, seg, plan,
                        baseline_rows, threshold_db, merge_gap, seg_expected=None):
