@@ -1287,14 +1287,73 @@ def create_app(db, cfg, demo=False) -> Flask:
 
     @app.post("/api/sweep/abort")
     def sweep_abort():
-        st.controller.abort()
-        return jsonify({"aborted": True})
+        """F7: default = pause the radio, save everything. {'erase': true} is the
+        confirmed hard abort — the aborted sweep's data is deleted."""
+        body = request.get_json(force=True, silent=True) or {}
+        erase = bool(body.get("erase"))
+        st.controller.abort(erase=erase)
+        return jsonify({"aborted": True, "erase": erase})
 
     @app.post("/api/sweep/next_segment")
     def sweep_next_segment():
         """F5: release the manual-advance gate so the sweep moves to the next segment."""
         st.controller.advance()
         return jsonify({"ok": True})
+
+    @app.post("/api/sweep/sustain")
+    def sweep_sustain():
+        """F6: hold the current segment (keep re-sweeping it live) / release it."""
+        body = request.get_json(force=True) or {}
+        on = bool(body.get("on"))
+        if on and not st.controller.state.get("running"):
+            return err("no sweep running")
+        st.controller.set_sustain(on)
+        return jsonify({"ok": True, "sustain": on})
+
+    _catalog_cache = {}
+
+    @app.get("/api/catalog/segment")
+    def catalog_segment():
+        """F6: covert-device classes from the surveillance catalog whose signature
+        bands intersect [low, high] MHz — segment-local intel for the operator."""
+        try:
+            low = float(request.args.get("low", 0))
+            high = float(request.args.get("high", 0))
+        except ValueError:
+            return err("low/high must be numeric")
+        if "data" not in _catalog_cache:
+            path = os.path.join(os.path.dirname(__file__), "surveillance_catalog.json")
+            try:
+                with open(path, encoding="utf-8") as f:
+                    _catalog_cache["data"] = json.load(f)
+            except OSError:
+                _catalog_cache["data"] = {}
+        out = []
+        for dc in (_catalog_cache["data"].get("device_classes") or []):
+            hits = []
+            for s in dc.get("signatures", []):
+                try:
+                    if float(s["freq_min_mhz"]) <= high and float(s["freq_max_mhz"]) >= low:
+                        hits.append(s)
+                except (KeyError, TypeError, ValueError):
+                    continue
+            if not hits:
+                continue
+            out.append({
+                "device_class": dc.get("device_class", ""),
+                "summary": (dc.get("summary") or "")[:280],
+                "confirm_steps": (dc.get("confirm_steps") or [])[:3],
+                "false_positive_overlap": (dc.get("false_positive_overlap") or [])[:4],
+                "signatures": [{
+                    "name": s.get("name") or s.get("signature") or "",
+                    "freq_min_mhz": s.get("freq_min_mhz"),
+                    "freq_max_mhz": s.get("freq_max_mhz"),
+                    "bandwidth_khz": s.get("bandwidth_khz"),
+                    "class": s.get("class"), "duty": s.get("duty"),
+                } for s in hits[:8]],
+            })
+        out.sort(key=lambda d: -len(d["signatures"]))
+        return jsonify({"low": low, "high": high, "classes": out})
 
     # ---------- results ----------
 

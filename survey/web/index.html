@@ -4,30 +4,61 @@
 <meta charset="utf-8">
 <title>SHIELD TSCM — Spectrum Survey</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<script>try{var _t=localStorage.getItem('dcs-theme');if(_t)document.documentElement.className=_t;}catch(e){}</script>
 <style>
 :root {
   --bg:#0b0f14; --panel:#121922; --panel2:#0e141c; --line:#1f2a37;
-  --txt:#cfd8e3; --dim:#7b8794; --mono:'Consolas','Cascadia Mono',monospace;
+  --txt:#cfd8e3; --dim:#7b8794; --bright:#ffffff;
+  --mono:'Consolas','Cascadia Mono',monospace;
+  --ui-font:var(--mono);
   --green:#2ecc71; --amber:#f39c12; --red:#e74c3c; --blue:#3498db; --cyan:#1abc9c;
+  --hover:#15202b; --input-bg:#0d1319; --td-line:#16202b; --btn-bg:#1c2733;
+  --ok-bg:#103c2c; --warn-bg:#3b2c10; --err-bg:#3b1515; --info-bg:#0d2433; --neutral-bg:#1c2733;
+}
+/* ---- THEME: Daylight (clean corporate light) ---- */
+html.t-day {
+  --bg:#eef2f6; --panel:#ffffff; --panel2:#e7edf3; --line:#d0d9e2;
+  --txt:#23303d; --dim:#6b7a89; --bright:#101c28;
+  --ui-font:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+  --green:#188a4a; --amber:#b06f0a; --red:#c93a2b; --blue:#1c66c2; --cyan:#0d8474;
+  --hover:#f0f4f8; --input-bg:#fbfdfe; --td-line:#e4eaf0; --btn-bg:#f2f6fa;
+  --ok-bg:#ddf2e6; --warn-bg:#f7ead0; --err-bg:#f9ddd9; --info-bg:#dcebf9; --neutral-bg:#e7edf3;
+}
+/* ---- THEME: Case File (paper dossier) ---- */
+html.t-file {
+  --bg:#f4efe1; --panel:#fbf7eb; --panel2:#efe7d2; --line:#c9bc9d;
+  --txt:#2a2417; --dim:#8a7f66; --bright:#1d180d;
+  --mono:'Courier New','Courier',monospace;
+  --green:#33702f; --amber:#a3690e; --red:#a8271c; --blue:#1f4e79; --cyan:#33635a;
+  --hover:#f1ead6; --input-bg:#fdfaf1; --td-line:#e6ddc4; --btn-bg:#f1ead6;
+  --ok-bg:#e4e9d0; --warn-bg:#efe3c0; --err-bg:#f0d8d0; --info-bg:#dfe6ea; --neutral-bg:#efe7d2;
+}
+/* ---- THEME: Neon (spectrum violet) ---- */
+html.t-neon {
+  --bg:#0a0618; --panel:#160f2e; --panel2:#120b24; --line:#332a58;
+  --txt:#e6e0f5; --dim:#7f74a8; --bright:#ffffff;
+  --green:#37e08d; --amber:#ffb454; --red:#ff5d6c; --blue:#8f77ff; --cyan:#00e0c6;
+  --hover:#1d1440; --input-bg:#100a22; --td-line:#221a44; --btn-bg:#241b47;
+  --ok-bg:#0e3326; --warn-bg:#3a2a10; --err-bg:#3a1420; --info-bg:#1c1450; --neutral-bg:#241b47;
 }
 * { box-sizing:border-box; margin:0; padding:0; }
-body { background:var(--bg); color:var(--txt); font-family:var(--mono); font-size:14px;
+body { background:var(--bg); color:var(--txt); font-family:var(--ui-font); font-size:14px;
        display:flex; flex-direction:column; height:100vh; overflow:hidden; }
 
 header { display:flex; align-items:center; gap:16px; padding:10px 16px;
          background:var(--panel); border-bottom:1px solid var(--line); }
-header .brand { font-size:16px; font-weight:bold; letter-spacing:2px; color:#fff; }
+header .brand { font-size:16px; font-weight:bold; letter-spacing:2px; color:var(--bright); font-family:var(--mono); }
 header .brand span { color:var(--cyan); }
 header .addr { color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; }
-.btn { background:#1c2733; color:var(--txt); border:1px solid var(--line); padding:8px 14px;
+.btn { background:var(--btn-bg); color:var(--txt); border:1px solid var(--line); padding:8px 14px;
        font-family:var(--mono); font-size:13px; cursor:pointer; border-radius:3px; }
-.btn:hover { border-color:var(--cyan); color:#fff; }
+.btn:hover { border-color:var(--cyan); color:var(--bright); }
 .btn:disabled { opacity:.35; cursor:not-allowed; }
-.btn.primary { background:#103c2c; border-color:var(--green); color:var(--green); font-weight:bold; }
+.btn.primary { background:var(--ok-bg); border-color:var(--green); color:var(--green); font-weight:bold; }
 .btn.danger { border-color:var(--red); color:var(--red); }
 .btn.big { font-size:16px; padding:14px 26px; }
-#btn-report { background:#3b2c10; border-color:var(--amber); color:var(--amber); font-weight:bold; }
-a.report-ready { color:var(--green); background:#103c2c; border:1px solid var(--green);
+#btn-report { background:var(--warn-bg); border-color:var(--amber); color:var(--amber); font-weight:bold; }
+a.report-ready { color:var(--green); background:var(--ok-bg); border:1px solid var(--green);
   padding:2px 8px; font-weight:bold; text-decoration:none; border-radius:3px; }
 a.report-ready:hover { background:var(--green); color:#0b0f14; }
 #report-msg { white-space:nowrap; }
@@ -46,8 +77,8 @@ nav { width:230px; background:var(--panel2); border-right:1px solid var(--line);
       padding:14px 0; display:flex; flex-direction:column; gap:2px; }
 nav .step { padding:10px 16px; cursor:pointer; display:flex; align-items:center; gap:10px;
             border-left:3px solid transparent; color:var(--dim); }
-nav .step:hover { color:var(--txt); background:#15202b; }
-nav .step.active { border-left-color:var(--cyan); color:#fff; background:#15202b; }
+nav .step:hover { color:var(--txt); background:var(--hover); }
+nav .step.active { border-left-color:var(--cyan); color:var(--bright); background:var(--hover); }
 nav .dot { width:9px; height:9px; border-radius:50%; background:#2c3a49; flex:none; }
 nav .dot.done { background:var(--green); }
 nav .dot.live { background:var(--amber); animation:pulse 1s infinite; }
@@ -58,7 +89,7 @@ nav .sect { margin-top:14px; padding:4px 16px; font-size:11px; color:#42506033;
 
 #panel { flex:1; overflow-y:auto; padding:20px 24px; min-width:0; }
 .view { display:none; } .view.active { display:block; }
-h2 { font-size:15px; letter-spacing:2px; color:#fff; margin-bottom:14px; }
+h2 { font-size:15px; letter-spacing:2px; color:var(--bright); margin-bottom:14px; }
 h2 .tag { font-size:11px; color:var(--dim); letter-spacing:0; margin-left:10px; }
 h3 { font-size:13px; color:var(--cyan); margin:16px 0 8px; }
 p.note { color:var(--dim); margin:8px 0; line-height:1.5; }
@@ -67,7 +98,7 @@ p.note { color:var(--dim); margin:8px 0; line-height:1.5; }
         padding:16px; margin-bottom:14px; }
 .row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
 label { color:var(--dim); font-size:12px; }
-input, select { background:#0d1319; color:var(--txt); border:1px solid var(--line);
+input, select { background:var(--input-bg); color:var(--txt); border:1px solid var(--line);
                 padding:8px 10px; font-family:var(--mono); font-size:13px; border-radius:3px; }
 input[type=text] { width:380px; }
 input.small { width:90px; }
@@ -75,20 +106,20 @@ input.small { width:90px; }
 table { width:100%; border-collapse:collapse; font-size:12.5px; }
 th { text-align:left; color:var(--dim); font-weight:normal; border-bottom:1px solid var(--line);
      padding:6px 8px; position:sticky; top:0; background:var(--panel); cursor:pointer; }
-td { padding:5px 8px; border-bottom:1px solid #16202b; }
-tr:hover td { background:#15202b; }
+td { padding:5px 8px; border-bottom:1px solid var(--td-line); }
+tr:hover td { background:var(--hover); }
 .scroll { max-height:420px; overflow-y:auto; border:1px solid var(--line); }
 
 .pill { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; }
-.pill.ok, .pill.VERIFIED, .pill.IDENTIFIED, .pill.done { background:#0d3321; color:var(--green); }
-.pill.KNOWN_BAND, .pill.PLAUSIBLE { background:#3b2c10; color:var(--amber); }
-.pill.ANOMALY, .pill.UNVERIFIED { background:#3b1515; color:#ffb0a8; }
-.pill.SCANNING { background:#3b3510; color:#ffd24a; }
-.pill.cached, .pill.stale { background:#33270d; color:var(--amber); }
-.pill.PLAUSIBLE { background:#33270d; color:var(--amber); }
-.pill.failed, .pill.UNVERIFIED, .pill.error { background:#33120d; color:var(--red); }
-.pill.not_configured { background:#1c2733; color:var(--dim); }
-.pill.running { background:#0d2433; color:var(--blue); }
+.pill.ok, .pill.VERIFIED, .pill.IDENTIFIED, .pill.done { background:var(--ok-bg); color:var(--green); }
+.pill.KNOWN_BAND, .pill.PLAUSIBLE { background:var(--warn-bg); color:var(--amber); }
+.pill.ANOMALY, .pill.UNVERIFIED { background:var(--err-bg); color:var(--red); }
+.pill.SCANNING { background:var(--warn-bg); color:var(--amber); }
+.pill.cached, .pill.stale { background:var(--warn-bg); color:var(--amber); }
+.pill.PLAUSIBLE { background:var(--warn-bg); color:var(--amber); }
+.pill.failed, .pill.UNVERIFIED, .pill.error { background:var(--err-bg); color:var(--red); }
+.pill.not_configured { background:var(--neutral-bg); color:var(--dim); }
+.pill.running { background:var(--info-bg); color:var(--blue); }
 .caution { color:var(--amber); }
 .score-hi { color:var(--red); font-weight:bold; }
 .score-md { color:var(--amber); }
@@ -112,18 +143,37 @@ tr:hover td { background:#15202b; }
   background:rgba(8,12,18,.78); }
 .sweep-label.caution { box-shadow:0 0 0 1px #e74c3c inset; }
 .sweep-label .sub { display:block; font-size:9px; color:var(--dim); margin-top:1px; }
-.sweep-legend { font-size:11px; color:var(--dim); display:flex;
-  flex-direction:column; gap:8px; align-items:flex-start;
-  padding:8px 10px; background:rgba(8,12,18,.55); border:1px solid var(--line); border-radius:3px; }
-.sweep-legend label { display:inline-flex; gap:5px; align-items:center; cursor:pointer; }
-.sweep-legend .leg-row { align-items:flex-start; }
-.sweep-legend .sw { width:10px; height:10px; border:1px solid; display:inline-block; flex:0 0 auto; }
-.sweep-legend .leg-row .sw { margin-top:2px; }
-.sweep-legend .leg-title { font-size:9px; letter-spacing:.08em; color:var(--dim);
-  text-transform:uppercase; opacity:.8; }
-.sweep-legend .leg-def { display:flex; flex-direction:column; line-height:1.2; }
-.sweep-legend .leg-def b { font-weight:600; color:var(--txt); }
-.sweep-legend .leg-def small { color:var(--dim); font-size:9px; }
+/* F6: legend reworked into a slim chip bar under the chart — the old vertical
+   legend box ate a whole side-column; the chips free that space for the chart
+   and the segment intel panel. Same checkbox ids, same behaviour. */
+.chart-col { flex:1 1 auto; min-width:0; display:flex; flex-direction:column; gap:6px; }
+.legend-chips { display:flex; flex-wrap:wrap; gap:5px 8px; align-items:center;
+  font-size:10.5px; color:#7b8794; }
+.legend-chips .leg-title { font-size:9px; letter-spacing:.1em; text-transform:uppercase;
+  opacity:.8; margin-right:2px; }
+.legend-chips .chip { display:inline-flex; gap:5px; align-items:center; cursor:pointer;
+  border:1px solid #1f2a37; border-radius:999px; padding:2px 9px;
+  background:rgba(8,12,18,.55); white-space:nowrap; }
+.legend-chips .chip:hover { border-color:#2c3a49; color:#cfd8e3; }
+.legend-chips .sw { width:9px; height:9px; border:1px solid; display:inline-block; flex:0 0 auto; }
+/* F6: sustained-segment info area — tab bar + swappable panes where the
+   signal table lives; LIVE pane shades its window on the main chart */
+#live-shade { position:absolute; top:0; bottom:0; display:none; pointer-events:none;
+  background:rgba(255,210,74,.13); border-left:1px solid #ffd24a; border-right:1px solid #ffd24a; }
+.info-tabs { width:70%; display:none; gap:4px; align-items:center; }
+.info-tabs button { background:#1c2733; color:#7b8794; border:1px solid #1f2a37;
+  border-bottom:none; padding:5px 12px; font-family:'Consolas','Cascadia Mono',monospace;
+  font-size:11px; cursor:pointer; border-radius:3px 3px 0 0; letter-spacing:.06em; }
+.info-tabs button:hover { color:#cfd8e3; }
+.info-tabs button.on { color:#ffd24a; background:#0d1319; border-color:#3b2c10; }
+.info-tabs .note { margin-left:auto; font-size:10.5px; }
+.info-pane { width:70%; }
+#pane-live canvas { width:100%; height:150px; display:block; background:#04070c;
+  border:1px solid #26303d; }
+#pane-live .note, #pane-catalog .cat-item { font-size:11px; }
+#pane-catalog .cat-item { padding:7px 9px; border-bottom:1px solid #16202b; }
+#pane-catalog .cat-item b { color:#cfd8e3; font-size:11.5px; }
+#btn-sustain.on { background:#3b2c10; color:#ffd24a; border-color:#ffd24a; }
 .custom-tech { display:none; flex-wrap:wrap; gap:8px 14px; align-items:center; margin-top:6px; }
 .custom-tech.show { display:flex; }
 .manual-adv { display:inline-flex; gap:5px; align-items:center; color:var(--amber); cursor:pointer; }
@@ -147,7 +197,7 @@ tr:hover td { background:#15202b; }
 .seg-item .mute:hover { opacity:1; color:var(--amber); }
 .seg-item.muted { opacity:.4; text-decoration:line-through; }
 .focus-btn { font-size:10px; padding:3px 6px; align-self:stretch; }
-.focus-btn.on { background:#33270d; color:var(--amber); border-color:var(--amber); }
+.focus-btn.on { background:var(--warn-bg); color:var(--amber); border-color:var(--amber); }
 /* F4: single-RX (Pluto) shows ONE Main sweep step; RF Explorer keeps LEFT/RIGHT */
 body.single-rx nav .step.rfe-only { display:none; }
 body:not(.single-rx) nav .step.single-only { display:none; }
@@ -169,11 +219,11 @@ footer .sim { color:var(--red); font-weight:bold; }
                   width:0%; transition:width .5s; }
 .meter { font-size:46px; color:var(--green); text-align:center; padding:10px;
          font-weight:bold; }
-.bigfreq { font-size:22px; color:#fff; text-align:center; }
+.bigfreq { font-size:22px; color:var(--bright); text-align:center; }
 .kv { display:grid; grid-template-columns:auto 1fr; gap:4px 18px; font-size:13px; }
 .kv div:nth-child(odd) { color:var(--dim); }
 /* ---- public demo mode ---- */
-#demo-banner { display:none; background:#3b2c10; color:var(--amber); text-align:center;
+#demo-banner { display:none; background:var(--warn-bg); color:var(--amber); text-align:center;
   font-size:12.5px; padding:7px 16px; border-bottom:1px solid var(--amber); font-weight:bold; }
 body.demo #demo-banner { display:block; }
 body.demo nav .step[data-view="poi"],
@@ -186,7 +236,7 @@ body.demo #card-casefiles { display:none !important; }
 .sess-group summary::-webkit-details-marker { display: none; }
 .sess-group summary::before { content: "▸ "; color: var(--dim); }
 .sess-group[open] summary::before { content: "▾ "; }
-.sess-group summary:hover { color: #fff; }
+.sess-group summary:hover { color: var(--bright); }
 .sess-body { padding: 0 12px 12px; }
 .sess-body .card { margin-bottom: 10px; }
 .sess-body .card:last-child { margin-bottom: 0; }
@@ -203,6 +253,26 @@ body.demo #card-casefiles { display:none !important; }
 .smeter-peak { position:absolute; top:1px; width:5px; height:12px; background:#ffd24a; border-radius:1px;
   transform:translateX(-50%); box-shadow:0 0 6px #ffd24a88; transition:left .12s; }
 #insp-history { width:100%; height:56px; display:block; background:#04070c; border:1px solid #26303d; margin-top:4px; }
+/* ---- theme pinning: full-screen sweep overlays are instrument surfaces —
+   they keep the dark ops palette in every theme so live RF stays readable ---- */
+.overlay, #sweep-overlay {
+  --panel:#121922; --panel2:#0e141c; --line:#1f2a37;
+  --txt:#cfd8e3; --dim:#7b8794; --bright:#ffffff;
+  --ui-font:'Consolas','Cascadia Mono',monospace;
+  --green:#2ecc71; --amber:#f39c12; --red:#e74c3c; --blue:#3498db; --cyan:#1abc9c;
+  --hover:#15202b; --input-bg:#0d1319; --td-line:#16202b; --btn-bg:#1c2733;
+  --ok-bg:#103c2c; --warn-bg:#3b2c10; --err-bg:#3b1515; --info-bg:#0d2433; --neutral-bg:#1c2733;
+  font-family:'Consolas','Cascadia Mono',monospace;
+}
+/* ---- style switcher (footer) ---- */
+.themebar { display:flex; align-items:center; gap:3px; }
+.themebar .tb-lbl { font-size:10px; letter-spacing:.14em; color:var(--dim); margin-right:4px; }
+.themebar button { display:inline-flex; align-items:center; gap:5px; cursor:pointer;
+  background:transparent; color:var(--dim); border:1px solid transparent; border-radius:10px;
+  font-family:var(--mono); font-size:11px; padding:2px 8px; }
+.themebar button i { width:8px; height:8px; border-radius:50%; border:1px solid #ffffff44; display:inline-block; }
+.themebar button:hover { color:var(--txt); border-color:var(--line); }
+.themebar button.on { color:var(--txt); border-color:var(--cyan); background:var(--hover); }
 </style>
 </head>
 <body>
@@ -331,7 +401,7 @@ body.demo #card-casefiles { display:none !important; }
     <div class="row">
       <label>Client's stated concerns (goes in the client briefing)</label>
     </div>
-    <textarea id="eng-concerns" style="width:100%; height:48px; background:#0d1319; color:var(--txt); border:1px solid var(--line); font-family:var(--mono)"></textarea>
+    <textarea id="eng-concerns" style="width:100%; height:48px; background:var(--input-bg); color:var(--txt); border:1px solid var(--line); font-family:var(--mono)"></textarea>
     <div class="row" style="margin-top:8px">
       <label>Offsite intake meeting (neutral venue near the property)</label>
       <input type="text" id="eng-offsite" style="flex:1" placeholder="e.g. Mid-Continent Public Library — Liberty Branch, 1000 Kent St">
@@ -892,7 +962,7 @@ body.demo #card-casefiles { display:none !important; }
 <style>
 #view-poi textarea, #view-poi label, #view-cases textarea, #view-cases label { display:block; width:100%; }
 #view-poi label, #view-cases label { color:var(--dim); font-size:11px; margin-top:6px; }
-#view-poi textarea, #view-cases textarea { background:#0d1319; color:var(--txt); border:1px solid var(--line);
+#view-poi textarea, #view-cases textarea { background:var(--input-bg); color:var(--txt); border:1px solid var(--line);
   font-family:var(--mono); font-size:12px; padding:6px; }
 </style>
 <section class="view" id="view-wiki">
@@ -926,7 +996,7 @@ body.demo #card-casefiles { display:none !important; }
             <button class="btn" id="btn-wiki-ai">AI DESCRIBE</button>
             <button class="btn" id="btn-wiki-recapture">RECAPTURE (live)</button>
           </div>
-          <div class="row"><textarea id="wiki-notes" style="width:100%; height:70px; background:#0d1319; color:var(--txt); border:1px solid var(--line); font-family:var(--mono)" placeholder="analyst notes"></textarea></div>
+          <div class="row"><textarea id="wiki-notes" style="width:100%; height:70px; background:var(--input-bg); color:var(--txt); border:1px solid var(--line); font-family:var(--mono)" placeholder="analyst notes"></textarea></div>
         </div>
       </div>
     </div>
@@ -979,6 +1049,13 @@ body.demo #card-casefiles { display:none !important; }
   <div>BAT <b id="ft-bat">—</b></div>
   <div id="ft-sim"></div>
   <div style="flex:1"></div>
+  <div class="themebar" role="group" aria-label="UI style">
+    <span class="tb-lbl">STYLE</span>
+    <button data-t="" type="button" title="Ops — dark terminal"><i style="background:#0b0f14"></i>OPS</button>
+    <button data-t="t-day" type="button" title="Daylight — clean light"><i style="background:#f7f9fb"></i>DAY</button>
+    <button data-t="t-file" type="button" title="Case File — paper dossier"><i style="background:#efe7d2"></i>FILE</button>
+    <button data-t="t-neon" type="button" title="Neon — spectrum violet"><i style="background:#7c5cff"></i>NEON</button>
+  </div>
   <div id="ft-wake"></div>
   <div id="ft-msg">idle</div>
 </footer>
@@ -998,9 +1075,22 @@ body.demo #card-casefiles { display:none !important; }
   <div style="width:70%"><div class="progress"><div id="sweep-bar"></div></div></div>
   <div class="sub" id="sweep-overlay-detail"></div>
   <div class="sweep-stage">
-    <div class="chart-wrap">
-      <canvas id="livechart" style="width:100%"></canvas>
-      <div id="sweep-label-layer"></div>
+    <div class="chart-col">
+      <div class="chart-wrap">
+        <canvas id="livechart" style="width:100%"></canvas>
+        <div id="sweep-label-layer"></div>
+        <div id="live-shade"></div>
+      </div>
+      <!-- F6: legend as a slim chip bar — same checkboxes, a fraction of the space -->
+      <div class="legend-chips" id="sweep-legend">
+        <span class="leg-title">KEY</span>
+        <label class="chip" title="Show/hide the signal labels on the chart"><input type="checkbox" id="leg-show" checked> labels</label>
+        <label class="chip" title="Matched to a known transmitter"><input type="checkbox" id="leg-identified" checked><span class="sw" style="border-color:#2ecc71"></span>Identified</label>
+        <label class="chip" title="Known band — probably a legit device"><input type="checkbox" id="leg-known" checked><span class="sw" style="border-color:#f39c12"></span>Likely normal</label>
+        <label class="chip" title="Matches nothing — worth a look"><input type="checkbox" id="leg-anomaly" checked><span class="sw" style="border-color:#e74c3c"></span>Anomaly</label>
+        <label class="chip" title="Just found, still identifying"><input type="checkbox" id="leg-scanning" checked><span class="sw" style="border-color:#ffd24a"></span>Detecting…</label>
+        <label class="chip" title="Band that can mask a bug"><input type="checkbox" id="leg-caution" checked><span class="sw" style="border-color:#e74c3c;background:#e74c3c22"></span>⚠ Caution</label>
+      </div>
     </div>
     <div class="sweep-side">
       <!-- F2: what we expect in THIS segment, flipping looking… → found, + anomalies -->
@@ -1012,29 +1102,69 @@ body.demo #card-casefiles { display:none !important; }
         <div class="seg-sub">Anomalies <span id="seg-anom-count" class="seg-count"></span></div>
         <div id="seg-anomalies" class="seg-list"></div>
       </div>
-      <div class="sweep-legend" id="sweep-legend">
-        <div class="leg-title">SIGNAL KEY — tap to show/hide</div>
-        <label><input type="checkbox" id="leg-show" checked> Show labels</label>
-        <label class="leg-row"><input type="checkbox" id="leg-identified" checked><span class="sw" style="border-color:#2ecc71"></span><span class="leg-def"><b>Identified</b><small>Matched to a known transmitter</small></span></label>
-        <label class="leg-row"><input type="checkbox" id="leg-known" checked><span class="sw" style="border-color:#f39c12"></span><span class="leg-def"><b>Likely normal</b><small>Known band — probably a legit device</small></span></label>
-        <label class="leg-row"><input type="checkbox" id="leg-anomaly" checked><span class="sw" style="border-color:#e74c3c"></span><span class="leg-def"><b>Anomaly</b><small>Matches nothing — worth a look</small></span></label>
-        <label class="leg-row"><input type="checkbox" id="leg-scanning" checked><span class="sw" style="border-color:#ffd24a"></span><span class="leg-def"><b>Detecting…</b><small>Just found, still identifying</small></span></label>
-        <label class="leg-row"><input type="checkbox" id="leg-caution" checked><span class="sw" style="border-color:transparent"></span><span class="leg-def"><b>⚠ Caution</b><small>Band that can mask a bug</small></span></label>
-      </div>
     </div>
   </div>
   <canvas id="waterfall" style="width:70%; height:120px; background:#000208; border:1px solid var(--line)"></canvas>
-  <div class="scroll" style="width:70%; max-height:150px; background:var(--panel)">
+  <!-- F6: sustained-segment intel — tabs swap what lives in the table slot -->
+  <div class="info-tabs" id="sweep-info-tabs">
+    <button data-tab="signals" class="on" type="button">SIGNALS</button>
+    <button data-tab="live" type="button" title="Zoomed live view — drag on the chart above to pick the window">LIVE VIEW</button>
+    <button data-tab="expected" type="button" title="Licensed records expected in this segment">EXPECTED HERE</button>
+    <button data-tab="catalog" type="button" title="Covert-device classes known to use this band">BUG CATALOG</button>
+    <span class="note" id="sustain-hint">segment held — the radio keeps watching this span</span>
+  </div>
+  <div class="scroll info-pane" id="pane-signals" style="max-height:150px; background:var(--panel)">
     <table id="tbl-live-ledger"></table>
+  </div>
+  <div class="info-pane" id="pane-live" style="display:none">
+    <canvas id="livezoom" width="900" height="150"></canvas>
+    <div class="note">drag a span on the main chart to zoom the live window · double-click the chart to reset to the whole segment</div>
+  </div>
+  <div class="scroll info-pane" id="pane-expected" style="display:none; max-height:150px; background:var(--panel)">
+    <table id="tbl-seg-expected"></table>
+  </div>
+  <div class="scroll info-pane" id="pane-catalog" style="display:none; max-height:150px; background:var(--panel)">
+    <div id="catalog-body"></div>
   </div>
   <div class="row">
     <div class="sub" id="sweep-overlay-eta"></div>
+    <button class="btn" id="btn-sustain" title="Hold this segment — keep sweeping it live until you resume">⏸ SUSTAIN SEGMENT</button>
     <button class="btn primary" id="btn-next-segment" style="display:none">NEXT SEGMENT →</button>
     <button class="btn danger" id="btn-abort">ABORT PHASE (keep data)</button>
     <button class="btn" id="btn-hide-overlay">RUN IN BACKGROUND</button>
   </div>
 </div>
 
+<!-- F7: abort choice — pause & save vs confirmed abort & erase -->
+<div class="overlay" id="abort-dialog" style="z-index:60">
+  <div class="msg">Stop this sweep?</div>
+  <div class="sub">PAUSE keeps everything recorded so far in the session.<br>
+    ERASE deletes this sweep's signals and segments — the baseline, other rooms, and the session itself are kept.</div>
+  <div class="row">
+    <button class="btn primary big" id="abort-save">⏸ PAUSE RADIO — SAVE SESSION DATA</button>
+    <button class="btn danger big" id="abort-erase">✕ CONFIRM ABORT — ERASE SWEEP DATA</button>
+    <button class="btn big" id="abort-cancel">◂ KEEP SWEEPING</button>
+  </div>
+</div>
+
+<script>
+(function(){
+  var tbtns=document.querySelectorAll(".themebar button");
+  function mark(){
+    var cur=document.documentElement.className||"";
+    tbtns.forEach(function(b){b.classList.toggle("on",b.getAttribute("data-t")===cur);});
+  }
+  tbtns.forEach(function(b){
+    b.addEventListener("click",function(){
+      var t=b.getAttribute("data-t");
+      document.documentElement.className=t;
+      try{localStorage.setItem("dcs-theme",t);}catch(e){}
+      mark();
+    });
+  });
+  mark();
+})();
+</script>
 <script src="/static/app.js"></script>
 </body>
 </html>

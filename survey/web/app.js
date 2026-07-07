@@ -51,6 +51,10 @@ const App = {
   focusAnomalies: false,   // F3: hide expected/known, dampen+rescale chart to anomalies
   mutedKeys: {},           // F3: individually muted signals (key -> {lo,hi})
   wantWake: false, _wakeLock: null,   // F1: screen wake lock
+  // F6: sustained-segment info panes
+  infoTab: "signals",      // which pane sits in the table slot while sustained
+  liveWindow: null,        // {lo,hi} MHz zoom window for the LIVE pane (null = whole segment)
+  _sweepSt: null, _lastTrace: null, _catKey: null,
 };
 
 /* ---------- F1: keep the laptop screen awake while the app is open ----------
@@ -484,6 +488,28 @@ function render(st) {
     }
     refreshLiveSweepSignals(st.sweep.sweep_id);
     renderSegPanel(st);
+    // F6: sustain button + swappable info panes
+    App._sweepSt = st.sweep;
+    App._lastTrace = st.sweep.live_trace || App._lastTrace;
+    const sBtn = $("btn-sustain");
+    if (sBtn) {
+      const sus = !!st.sweep.sustaining, req = !!st.sweep.sustain_requested;
+      sBtn.style.display = st.sweep.phase === "capture" ? "none" : "";
+      sBtn.textContent = sus ? "▶ RESUME SWEEP"
+        : req ? "⏳ SUSTAIN — finishing passes…" : "⏸ SUSTAIN SEGMENT";
+      sBtn.classList.toggle("on", sus || req);
+    }
+    const tabs = $("sweep-info-tabs");
+    if (tabs) {
+      tabs.style.display = st.sweep.sustaining ? "flex" : "none";
+      // leaving sustain closes the extra panes — back to the signal table
+      if (!st.sweep.sustaining && App.infoTab !== "signals") setInfoTab("signals");
+    }
+    if (st.sweep.sustaining) {
+      if (App.infoTab === "live") renderLiveZoom(st.sweep.live_trace);
+      if (App.infoTab === "expected") renderExpandedExpected(st);
+      if (App.infoTab === "catalog") maybeLoadCatalog(st.sweep.current_segment);
+    }
   } else if (!st.sweep.running) {
     so.classList.remove("show");
     App.overlayHidden = false;
@@ -2028,7 +2054,7 @@ function renderAnalyze(j) {
   if (d && d.messages && d.messages.length) {
     rows.push(`<div class="note" style="margin-top:2px">DECODED — ${esc(d.protocol || "")}` +
               `${d.note ? " · " + esc(d.note) : ""}:</div>`);
-    rows.push("<pre style='white-space:pre-wrap;background:#04070c;border:1px solid #26303d;padding:6px;margin:2px 0'>" +
+    rows.push("<pre style='white-space:pre-wrap;background:#04070c;color:#cfd8e3;border:1px solid #26303d;padding:6px;margin:2px 0'>" +
       d.messages.map(m => esc(decodeMsgLine(d.protocol, m))).join("\n") + "</pre>");
   } else if (d && d.note) {
     rows.push(`<div class="note">${esc(d.note)}</div>`);
@@ -2684,6 +2710,98 @@ function renderSegPanel(st) {
     `<span class="n">${esc(a.label || a.reason || "")}</span></div>`).join("");
 }
 
+/* ---------- F6: sustained-segment info panes ---------- */
+function setInfoTab(name) {
+  App.infoTab = name;
+  document.querySelectorAll("#sweep-info-tabs button[data-tab]").forEach(b =>
+    b.classList.toggle("on", b.dataset.tab === name));
+  ["signals", "live", "expected", "catalog"].forEach(k => {
+    const p = $("pane-" + k);
+    if (p) p.style.display = k === name ? "" : "none";
+  });
+  if (name !== "live") hideLiveShade();
+}
+
+function hideLiveShade() {
+  const el = $("live-shade");
+  if (el) el.style.display = "none";
+}
+
+/* LIVE pane: shade the chosen window on the main chart and re-render just that
+   span, live, in the table slot. Window defaults to the whole segment. */
+function renderLiveZoom(t) {
+  const c = $("livezoom");
+  if (!c || !t) return;
+  const lo = t.low, hi = t.high;
+  let w = App.liveWindow;
+  if (!w || w.hi <= lo || w.lo >= hi) w = { lo, hi };
+  const chart = $("livechart"), shade = $("live-shade");
+  if (chart && shade && hi > lo) {
+    const W = chart.clientWidth;
+    const x1 = Math.max(0, (w.lo - lo) / (hi - lo)) * W;
+    const x2 = Math.min(1, (w.hi - lo) / (hi - lo)) * W;
+    shade.style.display = "";
+    shade.style.left = x1 + "px";
+    shade.style.width = Math.max(2, x2 - x1) + "px";
+  }
+  const f = t.freqs || [], idx = [];
+  for (let i = 0; i < f.length; i++) if (f[i] >= w.lo && f[i] <= w.hi) idx.push(i);
+  if (idx.length < 2) return;
+  const scale = App._traceScale;   // livechart's labels anchor to this — restore after
+  const slice = arr => (arr ? idx.map(i => arr[i]) : null);
+  drawTrace(c, { freqs: idx.map(i => f[i]), amps: slice(t.amps),
+                 avg: slice(t.avg), maxpeak: slice(t.maxpeak) });
+  App._traceScale = scale;
+}
+
+function renderExpandedExpected(st) {
+  const el = $("tbl-seg-expected");
+  if (!el) return;
+  const cs = st.sweep.current_segment;
+  const exp = (cs && cs.expected) || [];
+  el.innerHTML = "<tr><th>Status</th><th>Frequency</th><th>Label / service</th><th>Band</th></tr>" +
+    (exp.length ? exp.map(e =>
+      `<tr><td>${e.status === "found" ? '<span class="pill ok">RECEIVED</span>'
+                                       : '<span class="pill SCANNING">LOOKING…</span>'}</td>` +
+      `<td>${fmtF(e.center_mhz)}</td><td>${esc(e.label || e.service || "")}</td>` +
+      `<td>${e.freq_low_mhz != null ? fmtF(e.freq_low_mhz) + " – " + fmtF(e.freq_high_mhz) : ""}</td></tr>`
+    ).join("") :
+    `<tr><td colspan="4" class="note">nothing specific expected in this band</td></tr>`);
+}
+
+/* BUG CATALOG pane: which covert-device classes are known to transmit inside
+   the sustained segment — pulled from the surveillance catalog, cached per segment. */
+async function maybeLoadCatalog(cs) {
+  if (!cs || cs.low_mhz == null) return;
+  const key = cs.low_mhz + "-" + cs.high_mhz;
+  if (App._catKey === key) return;
+  App._catKey = key;
+  const el = $("catalog-body");
+  if (!el) return;
+  el.innerHTML = `<p class="note" style="padding:6px 9px">checking surveillance catalog…</p>`;
+  try {
+    const r = await api(`/api/catalog/segment?low=${cs.low_mhz}&high=${cs.high_mhz}`);
+    if (!r.classes || !r.classes.length) {
+      el.innerHTML = `<p class="note" style="padding:6px 9px">no catalogued covert-device class uses ${cs.low_mhz.toFixed(1)}–${cs.high_mhz.toFixed(1)} MHz.</p>`;
+      return;
+    }
+    el.innerHTML = r.classes.map(c =>
+      `<div class="cat-item"><b>${esc(c.device_class)}</b>` +
+      `<div class="note">${c.signatures.map(s =>
+        `${fmtF(s.freq_min_mhz)}–${fmtF(s.freq_max_mhz)}` +
+        (s.class ? ` · ${esc(s.class)}` : "") + (s.duty ? ` · ${esc(s.duty)}` : "")
+      ).join(" &nbsp;·&nbsp; ")}</div>` +
+      (c.confirm_steps && c.confirm_steps.length
+        ? `<div class="note" style="color:var(--cyan)">confirm: ${esc(c.confirm_steps[0])}</div>` : "") +
+      (c.false_positive_overlap && c.false_positive_overlap.length
+        ? `<div class="note">might innocently be: ${esc(c.false_positive_overlap.join("; "))}</div>` : "") +
+      `</div>`).join("");
+  } catch (e) {
+    App._catKey = null;
+    el.innerHTML = `<p class="note" style="padding:6px 9px">catalog unavailable: ${esc(e.message || e)}</p>`;
+  }
+}
+
 /* ---------- sigidwiki signal identification ---------- */
 // A matched catalog signature carries its parent device class + how to confirm it
 // + what it might innocently be. Render that as a compact profile card (empty for
@@ -2865,7 +2983,17 @@ if ($("seg-expected")) $("seg-expected").onclick = (e) => {
   App._lastLabelKey = "";
 };
 
-$("btn-abort").onclick = () => api("/api/sweep/abort", {});
+/* F7: aborting is a decision — pause & save (default-safe) or confirmed erase */
+$("btn-abort").onclick = () => $("abort-dialog").classList.add("show");
+$("abort-cancel").onclick = () => $("abort-dialog").classList.remove("show");
+$("abort-save").onclick = async () => {
+  $("abort-dialog").classList.remove("show");
+  await api("/api/sweep/abort", {});
+};
+$("abort-erase").onclick = async () => {
+  $("abort-dialog").classList.remove("show");
+  await api("/api/sweep/abort", { erase: true });
+};
 $("btn-hide-overlay").onclick = () => {
   App.overlayHidden = true; $("sweep-overlay").classList.remove("show");
 };
@@ -2909,7 +3037,7 @@ async function loadDirectional() {
     const top = App.dirQueue[0];
     const hidden = App.anomalies.length - App.dirQueue.length;
     $("dir-instruction").innerHTML =
-      `<b style="color:#fff">ATTACH THE DIRECTIONAL ANTENNA</b> and return to ` +
+      `<b style="color:var(--bright)">ATTACH THE DIRECTIONAL ANTENNA</b> and return to ` +
       `<b style="color:var(--amber)">${esc(top.strongest_room || top.room || "the premises")}</b>. ` +
       `Triage: hunting the top ${App.dirQueue.length} by anomaly score` +
       (hidden > 0 ? ` (${hidden} lower-scored hidden — clear them via baseline ` +
@@ -3073,7 +3201,7 @@ async function loadExpected() {
           : !x.swept ? '<span class="pill not_configured">NOT SWEPT</span>'
           : x.expectation === "strong" ? '<span class="pill failed">MISSING</span>'
           : '<span class="pill stale">SILENT</span>';
-        return `<tr${!x.found && x.expectation === "strong" ? ' style="background:#1f1212"' : ""}>` +
+        return `<tr${!x.found && x.expectation === "strong" ? ' style="background:var(--err-bg)"' : ""}>` +
           `<td>${f}</td><td>${esc(x.callsign || x.label)}</td>` +
           `<td>${x.distance_mi != null ? x.distance_mi.toFixed(0) : ""}</td>` +
           `<td>${esc(x.expectation)} — ${esc(x.basis)}</td>` +
@@ -3281,7 +3409,7 @@ async function loadInventory() {
         const loud = d.loud_unowned;
         const rssi = d.rssi_dbm != null ?
           `<span class="${loud ? "score-hi" : ""}">${d.rssi_dbm}</span>` : "—";
-        return `<tr${loud ? ' style="background:#1f1212"' : ""}>` +
+        return `<tr${loud ? ' style="background:var(--err-bg)"' : ""}>` +
           `<td>${d.kind.toUpperCase()}</td><td>${esc(d.name) || "<i>(no name)</i>"}</td>` +
           `<td>${esc(d.identifier)}</td><td>${rssi}${loud ? " ⚠ LOUD+UNOWNED" : ""}</td>` +
           `<td>${esc(d.channel)}${d.freq_mhz ? " / " + fmtF(d.freq_mhz) : ""}</td>` +
@@ -3348,6 +3476,36 @@ if ($("insp-ibw")) $("insp-ibw").onchange = () => {
 if ($("insp-block-s")) $("insp-block-s").onchange = () => {
   if (App.inspCenter != null) inspectByFreq(App.inspCenter, App.inspLabel, $("insp-mode").value);
 };
+
+/* ---------- F6: sustain + info-pane wiring ---------- */
+if ($("btn-sustain")) $("btn-sustain").onclick = async () => {
+  const s = App._sweepSt || {};
+  const on = !(s.sustaining || s.sustain_requested);
+  try { await api("/api/sweep/sustain", { on }); }
+  catch (e) { $("sweep-overlay-eta").textContent = "sustain failed: " + e.message; }
+};
+document.querySelectorAll("#sweep-info-tabs button[data-tab]").forEach(b =>
+  b.onclick = () => setInfoTab(b.dataset.tab));
+/* LIVE window: drag a span on the main chart; double-click resets to the segment */
+(() => {
+  const c = $("livechart");
+  if (!c) return;
+  let drag = null;
+  const canPick = () => App.infoTab === "live" && App._sweepSt && App._sweepSt.sustaining;
+  c.addEventListener("mousedown", e => { if (canPick()) drag = { x0: e.offsetX, x1: null }; });
+  c.addEventListener("mousemove", e => { if (drag) drag.x1 = e.offsetX; });
+  window.addEventListener("mouseup", () => {
+    if (!drag) return;
+    const t = App._lastTrace;
+    if (t && drag.x1 != null && Math.abs(drag.x1 - drag.x0) > 8) {
+      const W = c.clientWidth, lo = t.low, hi = t.high;
+      const a = Math.min(drag.x0, drag.x1) / W, b = Math.max(drag.x0, drag.x1) / W;
+      App.liveWindow = { lo: lo + a * (hi - lo), hi: lo + b * (hi - lo) };
+    }
+    drag = null;
+  });
+  c.addEventListener("dblclick", () => { if (canPick()) App.liveWindow = null; });
+})();
 
 initWakeLock();
 poll();
