@@ -17,25 +17,72 @@ Expectation levels (heuristic, distance/service based):
 Pure logic + DB reads; unit tested with synthetic data.
 """
 
+import re
+
 from .correlation import _matches  # same record-matching rules as classification
 
 BROADCAST_STRONG_MI = 30.0
 BROADCAST_MEDIUM_MI = 50.0
 AM_STRONG_MI = 15.0
 
+# ERP thresholds (kW). Below LOW_POWER a station is an LPFM/translator that is
+# faint even a few miles out; a full-power class-B/C is tens of kW. Distance-only
+# expectation over-flagged these tiny stations as "strong — investigate", so we
+# grade by POWER first (the FCC record carries ERP) and only then by distance.
+FULL_POWER_KW = 6.0
+LOW_POWER_KW = 1.0
+
+
+def parse_erp_kw(record: dict):
+    """Pull the ERP out of the FCC record (stored like '0.432  kW' / '8.3 kW').
+    Returns kW as float, or None if unknown/unparseable."""
+    raw = record.get("erp")
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, (int, float)):
+        return float(raw) or None
+    m = re.search(r"([\d.]+)", str(raw))
+    if not m:
+        return None
+    try:
+        val = float(m.group(1))
+    except ValueError:
+        return None
+    return val if val > 0 else None
+
 
 def expectation_level(record: dict) -> tuple[str, str]:
-    """Returns (level, basis). record = baseline row with confidence='record'."""
+    """Returns (level, basis). record = baseline row with confidence='record'.
+
+    POWER-AWARE: a distant full-power station is more expected than a nearby
+    low-power translator. The old distance-only version labelled every FM within
+    30 mi 'strong' — so 50-watt translators and LPFMs got flagged as strong action
+    items when they are genuinely faint, making the report cry wolf."""
     service = (record.get("service") or "").upper()
     dist = record.get("distance_mi")
     if service == "FM" or service == "TV":
+        erp = parse_erp_kw(record)
+        pwr = f", {erp:g} kW" if erp is not None else ""
+        # low-power translator / LPFM: faint even close; never a "strong" action item
+        if erp is not None and erp < LOW_POWER_KW:
+            if dist is not None and dist <= 8.0:
+                return "medium", f"low-power {service}{pwr} — only receivable close in ({dist:.0f} mi)"
+            return "weak", f"low-power {service}{pwr} translator/LPFM — faint at {dist:.0f} mi, absence expected" if dist \
+                else f"low-power {service}{pwr} — faint; absence expected"
+        # moderate power: expected close, fringe otherwise
+        if erp is not None and erp < FULL_POWER_KW:
+            if dist is not None and dist <= 15.0:
+                return "medium", f"moderate-power {service}{pwr} {dist:.0f} mi away"
+            return "weak", f"moderate-power {service}{pwr} at distance ({dist:.0f} mi)" if dist \
+                else f"moderate-power {service}{pwr}, distance unknown"
+        # full power (or unknown ERP): grade by distance as before
         if dist is None:
-            return "medium", f"{service} broadcast, distance unknown"
+            return "medium", f"{service} broadcast{pwr}, distance unknown"
         if dist <= BROADCAST_STRONG_MI:
-            return "strong", f"full-power {service} broadcast {dist:.0f} mi away"
+            return "strong", f"full-power {service} broadcast{pwr} {dist:.0f} mi away"
         if dist <= BROADCAST_MEDIUM_MI:
-            return "medium", f"{service} broadcast at the fringe ({dist:.0f} mi)"
-        return "weak", f"{service} broadcast beyond reliable range ({dist:.0f} mi)"
+            return "medium", f"{service} broadcast{pwr} at the fringe ({dist:.0f} mi)"
+        return "weak", f"{service} broadcast{pwr} beyond reliable range ({dist:.0f} mi)"
     if service == "AM":
         if dist is not None and dist <= AM_STRONG_MI:
             return "medium", (f"AM station {dist:.0f} mi away — receivable, but the "
@@ -93,11 +140,14 @@ def _absence_reason(record: dict, level: str, swept: bool) -> str:
                 "module not swept, phase aborted early, or range gap")
     service = (record.get("service") or "").upper()
     if service in ("FM", "TV") and level == "strong":
-        return ("swept but not detected — investigate: antenna/connector issue on this "
-                "band, severe local shielding, detection threshold too high, or the "
-                "station is actually off-air (verify with a car radio)")
+        return ("full-power station swept but not detected — most likely it fell under the "
+                "threshold of a wide first-look/ambient sweep (higher noise floor, coarser "
+                "resolution than a targeted pass). Re-run a NARROW sweep of just this band to "
+                "confirm; if still absent, check the antenna/connector on this band or the "
+                "station is off-air (verify with a car radio)")
     if service in ("FM", "TV"):
-        return "swept but below detection threshold — plausible at this distance"
+        return ("swept but below detection threshold — expected for a lower-power or fringe "
+                "station on a wide ambient sweep; a targeted band sweep would likely catch it")
     if service == "AM":
         return ("swept but not detected — expected with a short whip below 2 MHz; "
                 "use a loop antenna if AM verification matters for this job")

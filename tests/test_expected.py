@@ -5,7 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from survey.expected import (expectation_level, expected_for_range,  # noqa: E402
-                             expected_vs_found)
+                             expected_vs_found, parse_erp_kw)
 
 
 class FakeDB:
@@ -48,6 +48,37 @@ class TestExpectationLevels(unittest.TestCase):
         self.assertNotEqual(expectation_level(rec(0.98, "AM", 5))[0], "strong")
 
 
+class TestPowerAwareExpectation(unittest.TestCase):
+    def _rec(self, erp, dist=13.0):
+        r = rec(98.5, "FM", dist)
+        r["erp"] = erp
+        return r
+
+    def test_parse_erp_variants(self):
+        self.assertAlmostEqual(parse_erp_kw({"erp": "0.432  kW"}), 0.432)
+        self.assertAlmostEqual(parse_erp_kw({"erp": "8.3 kW"}), 8.3)
+        self.assertAlmostEqual(parse_erp_kw({"erp": 50.0}), 50.0)
+        self.assertIsNone(parse_erp_kw({"erp": ""}))
+        self.assertIsNone(parse_erp_kw({"erp": None}))
+
+    def test_low_power_translator_not_strong(self):
+        # a 50-watt translator 13 mi out must NOT be a 'strong — investigate' item
+        self.assertEqual(expectation_level(self._rec("0.05 kW", 13))[0], "weak")
+
+    def test_low_power_close_is_medium_not_strong(self):
+        self.assertEqual(expectation_level(self._rec("0.432 kW", 6))[0], "medium")
+
+    def test_full_power_close_stays_strong(self):
+        self.assertEqual(expectation_level(self._rec("8.3 kW", 13))[0], "strong")
+
+    def test_moderate_power_downgraded(self):
+        self.assertIn(expectation_level(self._rec("3 kW", 20))[0], ("weak", "medium"))
+
+    def test_unknown_erp_falls_back_to_distance(self):
+        r = rec(98.5, "FM", 12)          # no erp key -> distance-only, close -> strong
+        self.assertEqual(expectation_level(r)[0], "strong")
+
+
 class TestExpectedVsFound(unittest.TestCase):
     def make(self, signals, segments=None):
         baseline = [rec(98.5, "FM", 10, "KFND"),       # found
@@ -65,7 +96,7 @@ class TestExpectedVsFound(unittest.TestCase):
         self.assertIn("received at -50", by_call["KFND"]["reason"])
         self.assertFalse(by_call["KMISS"]["found"])
         self.assertTrue(by_call["KMISS"]["swept"])
-        self.assertIn("investigate", by_call["KMISS"]["reason"])
+        self.assertIn("NARROW sweep", by_call["KMISS"]["reason"])
         self.assertFalse(by_call["WQAB"]["found"])
         self.assertIn("intermittent", by_call["WQAB"]["reason"])
         self.assertFalse(by_call["KGAP"]["swept"])
