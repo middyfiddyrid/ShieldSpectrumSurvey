@@ -62,6 +62,13 @@ class SweepController:
         self.listen_spectrum = None            # latest live analyzer+waterfall from the audio stream
         self.record_stop = threading.Event()   # set to stop the active monitor recording
         self.recording = None                  # active/last recording descriptor
+        # F8 phase-interferometry DF (B220 dual-RX): dedicated stop event so
+        # /api/df/stop can't kill an unrelated sweep (abort() still sets it —
+        # the global panic button keeps working). Calibration is per-tune:
+        # df_cal holds {freq_hz, offset_deg} and any retune invalidates it.
+        self.df_stop = threading.Event()
+        self.df_cal = None
+        self.df_cal_request = False
         # F5 manual segment advance (custom mode): when on, the worker pauses
         # between segments until advance_event fires (still honouring abort_event).
         self.manual_advance = False
@@ -81,7 +88,8 @@ class SweepController:
                       "live_trace": None, "current_segment": None, "error": None,
                       "directional": None, "calibration": None, "capture": None,
                       "awaiting_advance": False, "anomalies_found": [],
-                      "sustain_requested": False, "sustaining": False}
+                      "sustain_requested": False, "sustaining": False,
+                      "df": None}
         self._lock = threading.Lock()
 
     # ---- device ----
@@ -213,6 +221,7 @@ class SweepController:
         self.erase_on_abort = bool(erase)
         self.abort_event.set()
         self.advance_event.set()   # wake a manually-paused sweep so it can stop
+        self.df_stop.set()         # the global panic button stops DF too
         self.sustain_flag = False  # a sustained segment must not outlive the sweep
         self._set(message="abort requested — erasing this sweep's data" if erase
                           else "abort requested — keeping data collected so far",
@@ -707,6 +716,127 @@ class SweepController:
         self._busy_source = self.active_source
         self._set(running=True, phase="directional", room=room, error=None,
                   message=f"directional lock on {center_mhz:.4f} MHz — sweep the antenna")
+        self._thread.start()
+
+    # ---- phase-interferometry DF (B220 dual-RX) ----
+
+    def df_calibrate(self):
+        """Flag the DF worker to take its NEXT good measurement as the broadside
+        zero. Field procedure: hold the antenna bar broadside to the emitter
+        (both antennas equidistant from it) and tap CALIBRATE."""
+        if not (self.state.get("df") or {}).get("running"):
+            raise RuntimeError("start the phase DF loop first")
+        self.df_cal_request = True
+
+    def stop_df(self):
+        self.df_stop.set()
+
+    def start_df(self, session_id: int, center_mhz: float, bw_khz: float,
+                 room: str, spacing_m: float | None = None):
+        """Continuous dual-RX bearing loop on the B220. Receive-only. Publishes
+        one atomic state dict per measurement into state['df']; logs a summary
+        row into df_log on exit. Needs a radio with capture_iq_dual (B220)."""
+        from ..df import measure
+
+        if self.busy():
+            raise RuntimeError("a sweep is already running")
+        # the B220 is the only dual-RX radio; prefer it wherever it's connected
+        dev = None
+        src = None
+        for s, d in self.devices.items():
+            if hasattr(d, "capture_iq_dual"):
+                dev, src = d, s
+                break
+        if dev is None and hasattr(self.device, "capture_iq_dual"):
+            dev, src = self.device, self.active_source
+        if dev is None:
+            raise RuntimeError("phase DF needs the B220 (dual coherent RX) — "
+                               "connect it as the device source first")
+        if getattr(dev, "channels", 1) < 2:
+            raise RuntimeError("the connected radio reports only one RX channel "
+                               "— phase DF needs both")
+        lock = self.device_locks.setdefault(src, threading.Lock()) \
+            if src in self.devices else self.device_lock
+        stop_stream = self.listen_stops.get(src, self.listen_stop)
+        stop_stream.set()               # free the radio from any live audio stream
+        time.sleep(0.4)
+
+        cfg = self.cfg
+        spacing = float(spacing_m or cfg.get("df", "spacing_m", default=0.35))
+        fs = float(cfg.get("df", "sample_rate", default=5_000_000))
+        n = int(cfg.get("df", "capture_samples", default=1 << 17))
+        nperseg = int(cfg.get("df", "nperseg", default=4096))
+        snr_gate = float(cfg.get("df", "snr_gate_db", default=6.0))
+        coh_gate = float(cfg.get("df", "coherence_gate", default=0.5))
+        center_hz = center_mhz * 1e6
+
+        # a retune always invalidates the previous calibration
+        if self.df_cal and abs(self.df_cal.get("freq_hz", 0) - center_hz) > 1.0:
+            self.df_cal = None
+        self.df_cal_request = False
+        self.df_stop.clear()
+
+        def work():
+            best = None
+            count = 0
+            try:
+                with lock:
+                    while not self.df_stop.is_set():
+                        try:
+                            pair = dev.capture_iq_dual(center_hz, fs, n)
+                        except Exception as e:  # noqa: BLE001 - keep trying briefly
+                            log.warning("DF capture failed: %s", e)
+                            self._set(df={"running": True, "center_mhz": center_mhz,
+                                          "room": room, "error": str(e)})
+                            if self.df_stop.wait(1.0):
+                                break
+                            continue
+                        cal = self.df_cal["offset_deg"] if self.df_cal else None
+                        m = measure(pair[0], pair[1], fs, center_hz, spacing,
+                                    cal_offset_deg=cal, nperseg=nperseg,
+                                    snr_gate_db=snr_gate, coherence_gate=coh_gate)
+                        # operator tapped CALIBRATE: the next good phase is zero
+                        if self.df_cal_request and m.verdict != "NO_SIGNAL":
+                            self.df_cal = {"freq_hz": center_hz,
+                                           "offset_deg": m.phase_deg}
+                            self.df_cal_request = False
+                            m.warnings.append("calibrated — broadside is now 0°")
+                        count += 1
+                        d = m.to_dict()
+                        d.update({"running": True, "center_mhz": center_mhz,
+                                  "room": room, "count": count,
+                                  "spacing_m": spacing})
+                        self._set(df=d)
+                        if m.verdict == "BEARING_OK" and (
+                                best is None or m.coherence > best["coherence"]):
+                            best = {"bearing_deg": m.bearing_deg,
+                                    "mirror_deg": m.mirror_deg,
+                                    "coherence": m.coherence,
+                                    "phase_deg": m.phase_cal_deg,
+                                    "snr_db": min(m.snr_a_db, m.snr_b_db)}
+                if best is not None:
+                    self.db.execute(
+                        "INSERT INTO df_log (session_id,center_mhz,room,bearing_deg,"
+                        "mirror_deg,phase_deg,coherence,snr_db,spacing_m,calibrated,"
+                        "notes,ts_utc) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (session_id, center_mhz, room, round(best["bearing_deg"], 1),
+                         round(best["mirror_deg"], 1), round(best["phase_deg"], 1),
+                         round(best["coherence"], 3), round(best["snr_db"], 1),
+                         spacing, int(self.df_cal is not None), "", time.time()))
+            except Exception as e:  # noqa: BLE001
+                log.exception("DF loop failed")
+                self._set(error=str(e))
+            finally:
+                self._set(running=False, df=None,
+                          message=(f"phase DF ended for {center_mhz:.4f} MHz"
+                                   + (" — best bearing logged" if best else
+                                      " — no reliable bearing to log")))
+
+        self._thread = threading.Thread(target=work, daemon=True)
+        self._busy_source = src
+        self._set(running=True, phase="df", room=room, error=None,
+                  df={"running": True, "center_mhz": center_mhz, "room": room},
+                  message=f"phase DF on {center_mhz:.4f} MHz — spacing {spacing:.2f} m")
         self._thread.start()
 
     # ---- monitor recording (WAV capture of one signal) ----

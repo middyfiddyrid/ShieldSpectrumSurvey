@@ -151,6 +151,19 @@ DEFAULTS = {
         "freq_max_hz": 6_000_000_000,
         "require_extended": False,
     },
+    # Phase-interferometry direction finding on the B220's two coherent RX
+    # chains. spacing_m is the physical antenna separation — MUST be <= half a
+    # wavelength at the target frequency for an unambiguous bearing (0.35 m is
+    # good to ~428 MHz; tighten for higher bands). sample_rate 4e6 fails this
+    # AD9361's VCO search — 5e6 is the safe floor.
+    "df": {
+        "spacing_m": 0.35,
+        "sample_rate": 5_000_000,
+        "capture_samples": 1 << 17,
+        "nperseg": 4096,
+        "snr_gate_db": 6.0,
+        "coherence_gate": 0.5,
+    },
     "cache": {"dir": "cache", "max_age_hours": 720},
     # monitor recordings (WAV of a received signal). Client-sensitive PII: the
     # dir is gitignored and purged per engagement (move-to-archive, never delete).
@@ -186,8 +199,10 @@ class Config:
         return self
 
     def get(self, *keys, default=None):
-        if keys in self._runtime_overrides:
-            return self._runtime_overrides[keys]
+        # getattr: test fakes subclass Config without running __init__
+        overrides = getattr(self, "_runtime_overrides", None)
+        if overrides and keys in overrides:
+            return overrides[keys]
         cur = self.data
         for k in keys:
             if not isinstance(cur, dict) or k not in cur:
@@ -199,6 +214,8 @@ class Config:
         """Override a setting for this process only. get(*keys) returns the
         override (full key path only), and it is never persisted — set_and_save()
         dumps self.data, which this does not touch."""
+        if getattr(self, "_runtime_overrides", None) is None:
+            self._runtime_overrides = {}
         self._runtime_overrides[tuple(keys)] = value
 
     def set_and_save(self, keys: tuple, value):

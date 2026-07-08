@@ -739,6 +739,44 @@ body.demo #card-casefiles { display:none !important; }
     <h3>LOGGED DIRECTIONAL READINGS</h3>
     <div class="scroll" style="max-height:200px"><table id="tbl-dir-log"></table></div>
   </div>
+
+  <!-- PHASE DF (B220 dual coherent RX) -->
+  <div class="card" id="df-card">
+    <h3>PHASE DIRECTION FINDING <span class="tag">B220 two-antenna bearing — coherent RX-A + RX-B</span></h3>
+    <p class="note">Unlike the amplitude "warmer/colder" hunt above, this reads the
+      <b>phase difference</b> of the wavefront across two antennas and computes an actual
+      bearing. Needs the <b>B220</b> (two RX chains, shared LO) and both antennas on a bar a
+      known distance apart.
+      <b>Two-element arrays have a front/back mirror</b> — the true bearing and its mirror are
+      both shown; rotate the bar to break the tie (the true one stays put).</p>
+    <div class="row">
+      <label>Frequency MHz</label><input class="small" id="df-center" style="width:110px" placeholder="e.g. 433.92">
+      <label>Antenna spacing m</label><input class="small" id="df-spacing" style="width:70px" value="0.35"
+        title="Centre-to-centre distance between the two antennas. Must be ≤ half a wavelength at the target frequency for an unambiguous angle.">
+      <label>Room</label><input class="small" id="df-room" style="width:130px" placeholder="optional">
+      <button class="btn primary" id="btn-df-start">START PHASE DF</button>
+      <span class="note" id="df-msg"></span>
+    </div>
+    <div id="df-live" style="display:none; margin-top:10px">
+      <div style="display:flex; gap:16px; align-items:center; flex-wrap:wrap">
+        <canvas id="df-compass" width="220" height="220"
+          style="background:#04070c; border:1px solid #26303d; border-radius:6px; flex:0 0 auto"></canvas>
+        <div style="flex:1; min-width:220px">
+          <div class="bigfreq" id="df-bearing">—</div>
+          <div class="note" id="df-verdict" style="margin:4px 0"></div>
+          <div class="kv" id="df-stats" style="font-size:12px"></div>
+          <div class="note caution" id="df-warn" style="margin-top:6px"></div>
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn primary" id="btn-df-cal"
+          title="Hold the antenna bar broadside to the suspected emitter (both antennas the same distance from it) and tap this to zero the phase">◎ CALIBRATE (broadside = 0°)</button>
+        <button class="btn danger" id="btn-df-stop">STOP</button>
+        <span class="note">Calibrate once per frequency — retuning resets it.</span>
+      </div>
+    </div>
+    <div class="scroll" style="max-height:180px; margin-top:10px"><table id="tbl-df-log"></table></div>
+  </div>
 </section>
 
 <!-- ============ RESULTS ============ -->

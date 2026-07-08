@@ -533,6 +533,10 @@ function render(st) {
     if (d.trace) drawTrace($("dirchart"), { freqs: d.trace.freqs, amps: d.trace.amps });
   }
 
+  // phase-DF live compass
+  if (st.sweep.df) renderDFLive(st.sweep.df);
+  else if (App._dfWasLive) { App._dfWasLive = false; const dl = $("df-live"); if (dl) dl.style.display = "none"; loadDFLog(); }
+
   // sequence advancement
   if (App.seq && !st.busy && !st.sweep.running) advanceSeq();
 
@@ -3075,6 +3079,7 @@ async function loadDirectional() {
         `<td>${fmtF(d.center_mhz)}</td><td>${esc(d.room)}</td>` +
         `<td>${d.peak_dbm != null ? d.peak_dbm.toFixed(0) : ""}</td><td>${esc(d.notes)}</td></tr>`).join("");
   } catch (e) {}
+  loadDFLog();
 }
 
 window.dirLock = async (i) => {
@@ -3109,13 +3114,139 @@ $("btn-dir-next").onclick = async () => {
   }, 900);
 };
 
+/* ---------- phase DF (B220 dual-RX) ---------- */
+const DF_VERDICT_TEXT = {
+  BEARING_OK: ["var(--green)", "bearing locked"],
+  AMBIGUOUS_SPACING: ["var(--amber)", "spacing too wide — rotate for null"],
+  LOW_COHERENCE: ["var(--amber)", "multipath — move & retry"],
+  NO_SIGNAL: ["var(--red)", "nothing above the floor"],
+};
+
+function renderDFLive(d) {
+  App._dfWasLive = true;
+  const live = $("df-live"); if (live) live.style.display = "";
+  if (d.error) { $("df-verdict").innerHTML = `<span style="color:var(--red)">capture error: ${esc(d.error)}</span>`; return; }
+  const [col, txt] = DF_VERDICT_TEXT[d.verdict] || ["var(--dim)", d.verdict || ""];
+  const bText = d.bearing_deg == null ? "—"
+    : `${d.bearing_deg > 0 ? "+" : ""}${d.bearing_deg.toFixed(0)}°`;
+  $("df-bearing").textContent = bText;
+  $("df-bearing").style.color = col;
+  $("df-verdict").innerHTML = `<b style="color:${col}">${esc(txt)}</b>` +
+    (d.calibrated ? "" : ` <span style="color:var(--amber)">· UNCALIBRATED</span>`);
+  $("df-stats").innerHTML =
+    `<div>Frequency</div><div>${fmtF(d.center_mhz)}</div>` +
+    `<div>Mirror bearing</div><div>${d.mirror_deg == null ? "—" : (d.mirror_deg > 0 ? "+" : "") + d.mirror_deg.toFixed(0) + "°"}</div>` +
+    `<div>Coherence</div><div>${(d.coherence != null ? d.coherence.toFixed(2) : "—")} ${cohBar(d.coherence)}</div>` +
+    `<div>SNR A / B</div><div>${d.snr_a_db != null ? d.snr_a_db.toFixed(0) : "—"} / ${d.snr_b_db != null ? d.snr_b_db.toFixed(0) : "—"} dB</div>` +
+    `<div>Unambiguous ≤</div><div>${d.max_unambiguous_mhz != null ? d.max_unambiguous_mhz.toFixed(0) + " MHz" : "—"}</div>`;
+  $("df-warn").innerHTML = (d.warnings || []).map(esc).join("<br>");
+  drawCompass($("df-compass"), d);
+}
+function cohBar(c) {
+  if (c == null) return "";
+  const n = Math.round((c || 0) * 10);
+  return `<span style="font-family:monospace;color:${c > 0.7 ? "var(--green)" : c > 0.5 ? "var(--amber)" : "var(--red)"}">${"█".repeat(n)}${"░".repeat(10 - n)}</span>`;
+}
+function drawCompass(cv, d) {
+  if (!cv) return;
+  const ctx = cv.getContext("2d");
+  const W = cv.width, H = cv.height, cx = W / 2, cy = H / 2, r = Math.min(cx, cy) - 14;
+  ctx.clearRect(0, 0, W, H);
+  // dial
+  ctx.strokeStyle = "#26303d"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, 2 * Math.PI); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx, cy - r); ctx.lineTo(cx, cy + r);
+  ctx.moveTo(cx - r, cy); ctx.lineTo(cx + r, cy); ctx.stroke();
+  ctx.fillStyle = "#52708a"; ctx.font = "10px monospace"; ctx.textAlign = "center";
+  ctx.fillText("BROADSIDE 0°", cx, cy - r - 4);
+  ctx.fillText("bar axis", cx + r - 18, cy - 4);
+  if (d.bearing_deg == null) return;
+  // bearing needle (0° = straight up/broadside; + to the right)
+  const needle = (deg, color, dash) => {
+    const rad = (deg - 90) * Math.PI / 180;
+    ctx.strokeStyle = color; ctx.lineWidth = 2.5;
+    ctx.setLineDash(dash || []);
+    ctx.beginPath(); ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + r * Math.cos(rad), cy + r * Math.sin(rad)); ctx.stroke();
+    ctx.setLineDash([]);
+  };
+  needle(d.bearing_deg, "#2ecc71");
+  if (d.mirror_deg != null) needle(d.mirror_deg, "#f39c12", [5, 4]);   // mirror twin
+  ctx.fillStyle = "#2ecc71"; ctx.beginPath(); ctx.arc(cx, cy, 4, 0, 2 * Math.PI); ctx.fill();
+}
+async function loadDFLog() {
+  try {
+    const log = await api("/api/df/log");
+    const t = $("tbl-df-log"); if (!t) return;
+    t.innerHTML = "<tr><th>Time</th><th>Frequency</th><th>Room</th><th>Bearing</th><th>Mirror</th><th>Coherence</th><th>Cal</th></tr>" +
+      log.map(d => `<tr><td>${new Date(d.ts_utc * 1000).toLocaleTimeString()}</td>` +
+        `<td>${fmtF(d.center_mhz)}</td><td>${esc(d.room || "")}</td>` +
+        `<td>${d.bearing_deg != null ? (d.bearing_deg > 0 ? "+" : "") + d.bearing_deg.toFixed(0) + "°" : "—"}</td>` +
+        `<td>${d.mirror_deg != null ? (d.mirror_deg > 0 ? "+" : "") + d.mirror_deg.toFixed(0) + "°" : "—"}</td>` +
+        `<td>${d.coherence != null ? d.coherence.toFixed(2) : "—"}</td>` +
+        `<td>${d.calibrated ? "✓" : "—"}</td></tr>`).join("");
+  } catch (e) {}
+}
+if ($("btn-df-start")) $("btn-df-start").onclick = async () => {
+  const c = parseFloat($("df-center").value);
+  if (isNaN(c)) { $("df-msg").textContent = "enter a frequency in MHz"; return; }
+  const spacing = parseFloat($("df-spacing").value) || 0.35;
+  $("df-msg").textContent = "";
+  try {
+    await api("/api/df/start", { center_mhz: c, spacing_m: spacing,
+      room: $("df-room").value || "" });
+    $("df-live").style.display = "";
+  } catch (e) { $("df-msg").textContent = e.message; }
+};
+if ($("btn-df-cal")) $("btn-df-cal").onclick = async () => {
+  try { await api("/api/df/calibrate", {}); $("df-msg").textContent = "hold broadside — zeroing on the next good read"; }
+  catch (e) { $("df-msg").textContent = e.message; }
+};
+if ($("btn-df-stop")) $("btn-df-stop").onclick = async () => {
+  await api("/api/df/stop", {});
+  setTimeout(loadDFLog, 600);
+};
+
+/* ---------- Signal ID chips + per-row identify ---------- */
+function idChip(s) {
+  if (!s.id_updated_utc && !s.id_top_name) {
+    return `<button class="btn" style="padding:3px 8px;font-size:11px" onclick="identifyRow(${s.id},${s.center_mhz},${s.bw_khz || "null"})">ID</button>`;
+  }
+  if (!s.id_top_name) {   // ran, no candidate
+    return `<span class="pill not_configured" title="matcher ran, no candidate">no match</span> ` +
+      `<a href="#" class="idredo" onclick="identifyRow(${s.id},${s.center_mhz},${s.bw_khz || "null"});return false" style="font-size:10px">↻</a>`;
+  }
+  const band = s.id_mode === "band";
+  const cls = s.id_device_class ? ` · ${esc(s.id_device_class)}` : "";
+  return `<span class="pill ${band ? "KNOWN_BAND" : "IDENTIFIED"}" ` +
+    `title="${band ? "frequency/bandwidth guess only — no SDR IQ" : "modulation-matched from live IQ"}">` +
+    `${esc(s.id_top_name)}${cls}${s.id_top_score != null ? " (" + s.id_top_score.toFixed(0) + ")" : ""}${band ? " ~band" : ""}</span> ` +
+    `<a href="#" onclick="identifyRow(${s.id},${s.center_mhz},${s.bw_khz || "null"});return false" style="font-size:10px" title="re-identify">↻</a>`;
+}
+window.identifyRow = async (sid, center, bw) => {
+  const cell = $("idcell-" + sid);
+  if (cell) cell.innerHTML = `<span class="note">identifying…</span>`;
+  try {
+    const r = await api("/api/identify", { signal_id: sid, center_mhz: center, bw_khz: bw });
+    const top = (r.candidates || [])[0];
+    if (cell) cell.innerHTML = idChip({
+      id: sid, center_mhz: center, bw_khz: bw, id_updated_utc: Date.now() / 1000,
+      id_top_name: top ? top.name : "", id_top_score: top ? top.score : null,
+      id_device_class: top ? top.device_class : "", id_mode: r.id_mode });
+    // surface the honesty note (band-only / empty channel) briefly
+    if (r.note && cell) cell.title = r.note;
+  } catch (e) {
+    if (cell) cell.innerHTML = `<span class="pill error" title="${esc(e.message)}">ID failed</span>`;
+  }
+};
+
 /* ---------- results ---------- */
 async function loadResults() {
   try {
     const anomalies = await api("/api/anomalies");
     $("tbl-anomalies").innerHTML =
       "<tr><th>Score</th><th>Frequency</th><th>Peak dBm</th><th>BW kHz</th><th>Persist</th>" +
-      "<th>In/Out Δ</th><th>Strongest room</th><th>Class</th><th>Why not verified</th><th></th></tr>" +
+      "<th>In/Out Δ</th><th>Strongest room</th><th>Class</th><th>Signal ID</th><th>Why not verified</th><th></th></tr>" +
       anomalies.map(s =>
         `<tr><td class="${s.anomaly_score >= 60 ? "score-hi" : "score-md"}" title="${esc(s.score_reason || "")}">${(s.anomaly_score || 0).toFixed(0)}</td>` +
         `<td><a href="#" class="freqlink" data-center="${s.center_mhz}" data-sid="${s.id}" ` +
@@ -3126,6 +3257,7 @@ async function loadResults() {
         `<td>${s.interior_delta_db != null ? "+" + s.interior_delta_db + " dB" : "—"}</td>` +
         `<td>${esc(s.strongest_room || "")}${s.localization_score ? ` (+${s.localization_score} dB)` : ""}</td>` +
         `<td><span class="pill ${s.classification}">${esc(statusLabel(s.classification))}</span>${s.caution ? " ⚠" : ""}</td>` +
+        `<td id="idcell-${s.id}">${idChip(s)}</td>` +
         `<td style="max-width:300px">${esc(s.match_reason)}` +
         (s.score_reason ? `<div class="note" style="margin-top:2px;color:#9fb2c9">${esc(s.score_reason)}</div>` : "") +
         `</td>` +

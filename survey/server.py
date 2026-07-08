@@ -629,15 +629,28 @@ def create_app(db, cfg, demo=False) -> Flask:
                 log.exception("identify IQ capture failed")
                 note = f"IQ capture failed ({e}); matched on frequency only"
         else:
-            note = ("connect the Pluto (SDR) for modulation-based identification — "
-                    "matched on frequency/bandwidth only")
+            note = ("BAND GUESS ONLY — no SDR connected for IQ capture (Pluto or "
+                    "B220); matched on frequency/bandwidth alone")
         candidates = identify(center_mhz * 1e6, feats, ref)
         from .pocsag import looks_like_pocsag
         pocsag_likely = bool(feats and looks_like_pocsag(feats))
+        # persist onto the originating detection so ID chips survive reloads
+        # and show up in Results/Triage. 'band' mode = frequency-only guess.
+        id_mode = "iq" if feats else "band"
+        persisted = False
+        session = st.session()
+        if body.get("signal_id") and session:
+            try:
+                persisted = db.set_signal_identification(
+                    int(body["signal_id"]), session["id"], candidates,
+                    id_mode) is not None
+            except Exception:  # noqa: BLE001 - persistence must not break the ID
+                log.exception("could not persist identify result")
         return jsonify({"center_mhz": center_mhz, "bw_khz": bw_khz,
                         "source": st.controller.active_source, "features": feats,
                         "note": note, "candidates": candidates, "spectrogram": spec,
-                        "pocsag_likely": pocsag_likely})
+                        "pocsag_likely": pocsag_likely,
+                        "id_mode": id_mode, "persisted": persisted})
 
     @app.post("/api/inspect")
     def inspect_signal():
@@ -1628,6 +1641,48 @@ def create_app(db, cfg, demo=False) -> Flask:
         if not session:
             return err("no session")
         return jsonify(db.query("SELECT * FROM directional WHERE session_id=? "
+                                "ORDER BY ts_utc", (session["id"],)))
+
+    # ---------- phase-interferometry DF (B220 dual coherent RX) ----------
+    # Receive-only, so not demo-blocked (emanations precedent). Live telemetry
+    # rides out through /api/state -> sweep.df; stop uses a DEDICATED event so
+    # it can never abort an unrelated sweep.
+
+    @app.post("/api/df/start")
+    def df_start():
+        session = st.session()
+        if not session:
+            return err("no session")
+        body = request.get_json(force=True)
+        try:
+            st.controller.start_df(
+                session["id"], float(body["center_mhz"]),
+                float(body.get("bw_khz") or 100.0), body.get("room", ""),
+                spacing_m=(float(body["spacing_m"])
+                           if body.get("spacing_m") else None))
+        except (RuntimeError, KeyError, ValueError) as e:
+            return err(e, 409)
+        return jsonify({"started": True})
+
+    @app.post("/api/df/stop")
+    def df_stop():
+        st.controller.stop_df()
+        return jsonify({"stopped": True})
+
+    @app.post("/api/df/calibrate")
+    def df_calibrate():
+        try:
+            st.controller.df_calibrate()
+        except RuntimeError as e:
+            return err(e, 409)
+        return jsonify({"calibrating": True})
+
+    @app.get("/api/df/log")
+    def df_log():
+        session = st.session()
+        if not session:
+            return err("no session")
+        return jsonify(db.query("SELECT * FROM df_log WHERE session_id=? "
                                 "ORDER BY ts_utc", (session["id"],)))
 
     # ---------- community / Discord ----------

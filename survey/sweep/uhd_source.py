@@ -137,6 +137,11 @@ class _UHDLib:
         d.uhd_usrp_set_rx_freq.restype = e
         d.uhd_usrp_get_rx_stream.argtypes = [H, ctypes.POINTER(_StreamArgs), H]
         d.uhd_usrp_get_rx_stream.restype = e
+        # device time — needed to time-align a multi-channel streamer (a
+        # stream_now=True command on 2 channels is rejected by UHD).
+        d.uhd_usrp_set_time_now.argtypes = [H, ctypes.c_int64, ctypes.c_double,
+                                            ctypes.c_size_t]
+        d.uhd_usrp_set_time_now.restype = e
         # rx streamer
         d.uhd_rx_streamer_make.argtypes = [ctypes.POINTER(H)]
         d.uhd_rx_streamer_make.restype = e
@@ -380,6 +385,95 @@ class UHDRadio:
         if got == 0:
             raise DeviceError("UHD capture returned no samples (timeout)")
         return out[:got]
+
+    # -- coherent dual-channel capture (phase-interferometry DF) --
+    #
+    # Both RX chains of the AD9361 share one LO; a SINGLE 2-channel streamer
+    # started with one stream command puts channel 0 and channel 1 on the same
+    # sample tick, which is what makes the pair phase-coherent. The 1-channel
+    # helpers above must never be pointed at this streamer (their buffs arrays
+    # carry one pointer where UHD would expect two).
+
+    _DUAL_KEY = ("dual", 0, 1)
+
+    def _ensure_streamer_dual(self):
+        if self._streamer is not None and self._streamer_chan == self._DUAL_KEY:
+            return
+        self.destroy_streamer()
+        st = ctypes.c_void_p()
+        self._check(self.lib.dll.uhd_rx_streamer_make(ctypes.byref(st)),
+                    "rx_streamer_make(dual)")
+        chan_list = (ctypes.c_size_t * 2)(0, 1)
+        args = _StreamArgs(cpu_format=b"fc32", otw_format=b"sc16", args=b"",
+                           channel_list=chan_list, n_channels=2)
+        err = self.lib.dll.uhd_usrp_get_rx_stream(self.h, ctypes.byref(args), st)
+        if err != 0:
+            self.lib.dll.uhd_rx_streamer_free(ctypes.byref(st))
+            self._check(err, "get_rx_stream(dual)")
+        self._streamer = st
+        self._streamer_chan = self._DUAL_KEY
+
+    def _recv_into_dual(self, out_a: np.ndarray, out_b: np.ndarray,
+                        timeout_s: float) -> int:
+        """Fill both channel buffers from the 2-channel streamer. UHD fc32 recv
+        is per-channel planar — one pointer per channel, both advance together
+        by items_recvd. Unlike the sweep path, an OVERFLOW here is a hard error:
+        a gap between the channels silently corrupts the phase measurement."""
+        got = 0
+        n = out_a.size
+        while got < n:
+            ptr_a = out_a[got:].ctypes.data_as(ctypes.c_void_p)
+            ptr_b = out_b[got:].ctypes.data_as(ctypes.c_void_p)
+            buffs = (ctypes.c_void_p * 2)(ptr_a, ptr_b)
+            rx = ctypes.c_size_t()
+            self._check(self.lib.dll.uhd_rx_streamer_recv(
+                self._streamer, buffs, n - got, ctypes.byref(self._md),
+                ctypes.c_double(timeout_s), False, ctypes.byref(rx)),
+                "rx_streamer_recv(dual)")
+            code = ctypes.c_int()
+            self.lib.dll.uhd_rx_metadata_error_code(self._md, ctypes.byref(code))
+            if code.value == RX_METADATA_ERROR_TIMEOUT:
+                break
+            if code.value not in (RX_METADATA_ERROR_NONE,):
+                raise DeviceError(
+                    f"dual-RX stream error (metadata code {code.value}) — "
+                    "an overflow would corrupt the phase pair")
+            got += int(rx.value)
+            if rx.value == 0:
+                break
+        return got
+
+    def capture_dual(self, nsamps: int, timeout_s: float = 5.0,
+                     retries: int = 3) -> np.ndarray:
+        """One coherent (2, n) complex64 capture across RX channels 0+1.
+        Overflow/short reads get a clean streamer rebuild and a retry rather
+        than a tolerate-and-continue (phase integrity beats throughput here)."""
+        last: Exception | None = None
+        for _ in range(max(1, retries)):
+            try:
+                self._ensure_streamer_dual()
+                # UHD rejects stream_now=True on a multi-channel streamer ("will
+                # fail to time align"). Zero the device clock, then schedule the
+                # NUM_SAMPS_AND_DONE start a hair in the future so BOTH channels
+                # begin on the same tick — that shared start is the coherence.
+                self._check(self.lib.dll.uhd_usrp_set_time_now(
+                    self.h, 0, 0.0, 0), "set_time_now")
+                cmd = _StreamCmd(stream_mode=STREAM_MODE_NUM_SAMPS_AND_DONE,
+                                 num_samps=int(nsamps), stream_now=False,
+                                 time_spec_full_secs=0, time_spec_frac_secs=0.05)
+                self._check(self.lib.dll.uhd_rx_streamer_issue_stream_cmd(
+                    self._streamer, ctypes.byref(cmd)), "issue_stream_cmd(dual)")
+                a = np.empty(int(nsamps), dtype=np.complex64)
+                b = np.empty(int(nsamps), dtype=np.complex64)
+                # first recv must wait out the 0.05 s scheduling delay
+                got = self._recv_into_dual(a, b, timeout_s + 0.2)
+                if got == 0:
+                    raise DeviceError("dual capture returned no samples (timeout)")
+                return np.stack([a[:got], b[:got]])
+            except DeviceError as e:
+                last = e
+                self.destroy_streamer()   # clean slate for the retry
+        raise last if last else DeviceError("dual capture failed")
 
     def start_continuous(self, chan: int):
         self._ensure_streamer(chan)
@@ -797,6 +891,56 @@ class B220Source(AD936xSource):
                    n_samples: int) -> np.ndarray:
         iq = super().capture_iq(center_hz, sample_rate, n_samples)
         return iq  # fc32 already ±1 (ADC_FULL_SCALE = 1.0)
+
+    def capture_iq_dual(self, center_hz: float, sample_rate: float,
+                        n_samples: int) -> np.ndarray:
+        """Coherent (2, n) IQ off RX-A + RX-B for phase-interferometry DF.
+
+        Both chains get IDENTICAL MANUAL gain — AGC would let them drift
+        independently and wreck the relative phase/amplitude, so unlike
+        _set_gain there is no AGC fallback: if no ladder step takes on BOTH
+        channels this fails loudly. Restores the sweep configuration on exit
+        exactly like capture_iq. Re-checks the channel count at call time
+        (a radio that enumerated single-RX must not half-work here)."""
+        if self.channels < 2:
+            raise DeviceError("dual-RX capture needs both RX channels — this "
+                              f"radio reported {self.channels}")
+        fs = float(sample_rate)
+        try:
+            # LO FIRST, then rate: the AD9361 derives its baseband VCO from the
+            # current LO, and changing the sample rate while the LO sits at a
+            # stale value makes the VCO search fail ("RFVCO can't find valid VCO
+            # rate"). Tune both channels, THEN set the rate/bandwidth.
+            for ch in (0, 1):
+                self.sdr.set_freq(float(center_hz), ch)
+            for ch in (0, 1):
+                self.sdr.set_rate(fs, ch)
+                self.sdr.set_bandwidth(fs, ch)
+            applied = None
+            for g in (float(self._gain_db), 60.0, 50.0, 40.0):
+                try:
+                    for ch in (0, 1):
+                        self.sdr.set_agc(False, ch)
+                        self.sdr.set_gain(g, ch)
+                    applied = g
+                    break
+                except DeviceError:
+                    continue
+            if applied is None:
+                raise DeviceError("could not set identical manual gain on both "
+                                  "RX channels — refusing AGC for interferometry")
+            if self._settle_s > 0:
+                time.sleep(self._settle_s)
+            return self.sdr.capture_dual(int(n_samples))  # fc32 already ±1
+        finally:
+            try:
+                for ch in range(min(self.channels, 2)):
+                    self.sdr.set_rate(self._fs, ch)
+                    self.sdr.set_bandwidth(self._fs, ch)
+                self._set_buffer_size(self._nsamp)
+                self._set_gain(self._gain_mode, self._gain_db)
+            except DeviceError:
+                pass
 
     # ================= active-stimulation protocol (survey.stimulate) ===========
     # Consumed by StimulationEngine. The B220 is the CONCURRENT radio: TX-A (TX/RX

@@ -215,6 +215,24 @@ CREATE TABLE IF NOT EXISTS decode_overrides (
     reason TEXT DEFAULT '',
     created_utc REAL
 );
+-- Phase-interferometry DF (B220 dual-RX): best bearing per lock, logged when
+-- the loop stops. Receive-only; bearings are relative to the antenna bar.
+CREATE TABLE IF NOT EXISTS df_log (
+    id INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL,
+    center_mhz REAL NOT NULL,
+    room TEXT DEFAULT '',
+    bearing_deg REAL,                  -- from broadside; NULL if never resolved
+    mirror_deg REAL,                   -- the front/back twin (2-element ambiguity)
+    phase_deg REAL,                    -- calibrated cross-spectrum phase
+    coherence REAL,                    -- 0..1 same-wavefront confidence
+    snr_db REAL,
+    spacing_m REAL,
+    calibrated INTEGER DEFAULT 0,
+    notes TEXT DEFAULT '',
+    ts_utc REAL
+);
+CREATE INDEX IF NOT EXISTS idx_df_log_session ON df_log(session_id);
 CREATE INDEX IF NOT EXISTS idx_baseline_session ON baseline(session_id);
 CREATE INDEX IF NOT EXISTS idx_signals_session ON signals(session_id);
 CREATE INDEX IF NOT EXISTS idx_segments_sweep ON segments(sweep_id);
@@ -288,6 +306,22 @@ class Database:
             # Plain-language explanation of how anomaly_score was reached.
             if "score_reason" not in cols:
                 c.execute("ALTER TABLE signals ADD COLUMN score_reason TEXT DEFAULT ''")
+            # Persisted Signal ID (sigidwiki/catalog matcher) results. Candidates
+            # only — never merged into matched_label/classification, which the
+            # baseline correlation path owns. id_mode records match quality:
+            # 'iq' = live modulation features, 'band' = frequency-only guess.
+            if "id_top_name" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN id_top_name TEXT DEFAULT ''")
+            if "id_top_score" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN id_top_score REAL")
+            if "id_device_class" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN id_device_class TEXT DEFAULT ''")
+            if "id_mode" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN id_mode TEXT DEFAULT ''")
+            if "id_candidates_json" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN id_candidates_json TEXT DEFAULT ''")
+            if "id_updated_utc" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN id_updated_utc REAL")
 
     def _conn(self):
         conn = sqlite3.connect(self.path, timeout=30)
@@ -370,6 +404,27 @@ class Database:
         return self.query_one(
             "SELECT id, attribution_status, attribution_notes, attribution_updated_utc "
             "FROM signals WHERE id=? AND session_id=?", (signal_id, session_id))
+
+    def set_signal_identification(self, signal_id, session_id, candidates,
+                                  mode):
+        """Persist Signal ID matcher results on a detection. `candidates` is the
+        identify() list (may be empty — stored as '[]' to distinguish 'ran, no
+        match' from 'never ran'); mode is 'iq' (live modulation features) or
+        'band' (frequency-only guess, RF Explorer). Session-scoped; returns the
+        updated row or None. Deliberately does NOT touch matched_label/
+        classification — those belong to the baseline correlation path."""
+        top = candidates[0] if candidates else {}
+        self.execute(
+            "UPDATE signals SET id_top_name=?, id_top_score=?, id_device_class=?, "
+            "id_mode=?, id_candidates_json=?, id_updated_utc=? "
+            "WHERE id=? AND session_id=?",
+            (top.get("name", ""), top.get("score"),
+             top.get("device_class") or "", mode,
+             json.dumps(candidates), time.time(), signal_id, session_id))
+        return self.query_one(
+            "SELECT id, id_top_name, id_top_score, id_device_class, id_mode, "
+            "id_updated_utc FROM signals WHERE id=? AND session_id=?",
+            (signal_id, session_id))
 
     def add_decode_override(self, session_id, signal_id, center_mhz, mode,
                             operator, reason):

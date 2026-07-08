@@ -111,6 +111,25 @@ class FakeUHDRadio:
         self.calls.append(("capture", chan))
         return self._make_iq(int(nsamps), chan)
 
+    def capture_dual(self, nsamps, timeout_s=5.0, retries=3):
+        """Coherent (2, n): channel 1 carries `phase_b_rad` extra phase on each
+        carrier, simulating a wavefront that reaches antenna B later."""
+        self.calls.append(("capture_dual", None))
+        n = int(nsamps)
+        a = self._make_iq(n, 0)
+        # rebuild B with the same carriers but a phase shift, shared noise seed
+        # would be ideal; here independent noise is fine for the phase test
+        fs = self.rate[1] or 5e6
+        t = np.arange(n) / fs
+        b = self.noise * (self._rng.standard_normal(n)
+                          + 1j * self._rng.standard_normal(n))
+        for c in self.carriers:
+            off = c - self.lo[1]
+            if abs(off) < fs / 2:
+                b = b + 0.5 * np.exp(2j * np.pi * off * t
+                                     + 1j * getattr(self, "phase_b_rad", 0.0))
+        return np.stack([a, b.astype(np.complex64)])
+
     def start_continuous(self, chan):
         self.streaming = True
         self.calls.append(("start_continuous", chan))
@@ -258,6 +277,50 @@ class TestSweepAndStream(unittest.TestCase):
         self.assertFalse(radio.streaming)
         # sweep config restored after the stream ends
         self.assertEqual(radio.rate[0], src._fs)
+
+
+class TestDualCapture(unittest.TestCase):
+    """capture_iq_dual: the coherent (2, n) primitive that feeds phase DF."""
+
+    def test_returns_two_channels_normalised(self):
+        radio = FakeUHDRadio(carriers_hz=[100e6])
+        src = FakeB220(CFG, radio)
+        src.connect()
+        pair = src.capture_iq_dual(100e6, 4e6, 8192)
+        self.assertEqual(pair.shape, (2, 8192))
+        self.assertEqual(pair.dtype, np.complex64)
+        self.assertTrue(any(c[0] == "capture_dual" for c in radio.calls))
+
+    def test_both_channels_tuned_and_manual_gain(self):
+        radio = FakeUHDRadio(carriers_hz=[100e6])
+        src = FakeB220(CFG, radio)
+        src.connect()
+        src.capture_iq_dual(100e6, 4e6, 8192)
+        # both LOs on the target; both channels at identical MANUAL gain (AGC off)
+        self.assertAlmostEqual(radio.lo[0], 100e6)
+        self.assertAlmostEqual(radio.lo[1], 100e6)
+        self.assertEqual(radio.gain[0], radio.gain[1])
+        self.assertFalse(radio.agc[0])
+        self.assertFalse(radio.agc[1])
+
+    def test_restores_sweep_config(self):
+        radio = FakeUHDRadio(carriers_hz=[100e6])
+        src = FakeB220(CFG, radio)
+        src.connect()
+        src.capture_iq_dual(100e6, 4e6, 8192)
+        # after the dual capture the sweep sample rate is back on both channels
+        self.assertEqual(radio.rate[0], src._fs)
+        self.assertEqual(radio.rate[1], src._fs)
+
+    def test_refuses_single_channel_radio(self):
+        radio = FakeUHDRadio(num_channels=1)
+        src = FakeB220(CFG, radio)
+        try:
+            src.connect()
+            with self.assertRaises(DeviceError):
+                src.capture_iq_dual(100e6, 4e6, 8192)
+        finally:
+            type(src).channels = 2
 
 
 class TestGainPolicy(unittest.TestCase):

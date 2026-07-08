@@ -74,6 +74,41 @@ class TestMigration(unittest.TestCase):
         for col in ("session_id", "center_mhz", "file_path", "kind", "duration_s"):
             self.assertIn(col, cols)
 
+    def test_signals_gains_identify_columns(self):
+        db = Database(self.path)
+        cols = self._cols("signals")
+        for col in ("id_top_name", "id_top_score", "id_device_class",
+                    "id_mode", "id_candidates_json", "id_updated_utc"):
+            self.assertIn(col, cols, f"migration did not add signals.{col}")
+        # existing legacy row gets the TEXT default, not NULL
+        row = db.query_one("SELECT id_top_name, id_mode FROM signals "
+                           "WHERE center_mhz=915.0")
+        self.assertEqual(row["id_top_name"], "")
+        self.assertEqual(row["id_mode"], "")
+
+    def test_df_log_table_created(self):
+        Database(self.path)
+        self.assertIn("df_log", self._table_names())
+        cols = self._cols("df_log")
+        for col in ("session_id", "center_mhz", "bearing_deg", "mirror_deg",
+                    "coherence", "spacing_m", "calibrated", "ts_utc"):
+            self.assertIn(col, cols)
+
+    def test_set_signal_identification_roundtrip(self):
+        db = Database(self.path)
+        row = db.query_one("SELECT id FROM signals WHERE center_mhz=915.0")
+        cands = [{"name": "BLE tracker", "score": 88.0,
+                  "device_class": "ble_tracker", "reasons": ["in band"]}]
+        updated = db.set_signal_identification(row["id"], 1, cands, "iq")
+        self.assertEqual(updated["id_top_name"], "BLE tracker")
+        self.assertEqual(updated["id_device_class"], "ble_tracker")
+        self.assertEqual(updated["id_mode"], "iq")
+        # empty candidate list persists as '[]', not NULL
+        db.set_signal_identification(row["id"], 1, [], "band")
+        raw = db.query_one("SELECT id_candidates_json FROM signals WHERE id=?",
+                           (row["id"],))
+        self.assertEqual(raw["id_candidates_json"], "[]")
+
     def test_idempotent_reopen(self):
         Database(self.path)
         # Re-open twice more; must not raise (duplicate-column / table errors).
