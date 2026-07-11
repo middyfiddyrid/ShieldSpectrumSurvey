@@ -135,12 +135,14 @@ class SweepController:
             self.device = dev
             self.active_source = src
         # dual mode: the Pluto is ALWAYS the monitor (see monitor_target), so once
-        # both radios are open make the RF Explorer the sweeper regardless of the
-        # order the operator connected them — but never yank a sweep in flight.
+        # the Pluto plus ANY other radio (RFE or B220) are open, make the other
+        # radio the sweeper regardless of the order the operator connected them —
+        # but never yank a sweep in flight.
         if (self.concurrent_enabled() and not self.busy()
-                and "rfexplorer" in self.devices and "pluto" in self.devices):
-            self.device = self.devices["rfexplorer"]
-            self.active_source = "rfexplorer"
+                and "pluto" in self.devices and len(self.devices) > 1):
+            sweeper = next(s for s in self.devices if s != "pluto")
+            self.device = self.devices[sweeper]
+            self.active_source = sweeper
         return dev.info
 
     def _ensure_device(self):
@@ -196,6 +198,33 @@ class SweepController:
             return (self.devices[src], self.device_locks.setdefault(src, threading.Lock()),
                     self.listen_stops.setdefault(src, threading.Event()), src)
         return self.device, self.device_lock, self.listen_stop, self.active_source
+
+    def ensure_monitor(self):
+        """Monitor-ACTION entry point (inspect / analyze / listen / record): like
+        monitor_target(), but if the sweeper radio (B220/RFE) is busy mid-sweep,
+        concurrent mode is on, and the Pluto isn't open yet, try to open the
+        Pluto on the spot so the operator's 'quick background look at this
+        signal' lands on the second radio instead of a 409. Failure is non-fatal
+        (radio unplugged, drivers missing): logged once with a 60 s retry
+        cooldown, then falls back to plain monitor_target(). Read-only pollers
+        (device_roles, /api/state) keep calling monitor_target() so a status
+        poll can never spin up hardware."""
+        if (self.concurrent_enabled() and "pluto" not in self.devices
+                and self.active_source not in (None, "pluto")
+                and self.busy(self.active_source)
+                and time.time() - getattr(self, "_pluto_auto_fail_ts", 0.0) > 60.0):
+            try:
+                from .device import open_device
+                dev = open_device(self.cfg, source="pluto")
+                self.devices["pluto"] = dev
+                self.device_locks.setdefault("pluto", threading.Lock())
+                self.listen_stops.setdefault("pluto", threading.Event())
+                log.info("auto-connected the Pluto as the concurrent monitor "
+                         "(sweep continues on %s)", self.active_source)
+            except Exception as e:  # noqa: BLE001
+                self._pluto_auto_fail_ts = time.time()
+                log.warning("could not auto-connect the Pluto monitor: %s", e)
+        return self.monitor_target()
 
     def device_roles(self) -> dict:
         """What each connected radio is doing — for the UI to show 'RFE sweeping +
@@ -851,10 +880,10 @@ class SweepController:
         encrypted content, but the raw capture + identification + location is the
         evidence package). Worker mirrors start_directional: a daemon thread holds
         the radio lock and streams live IQ until stop_recording() or max length."""
-        dev, lock, stop_evt, src = self.monitor_target()
+        dev, lock, stop_evt, src = self.ensure_monitor()
         concurrent = self.concurrent_enabled() and src == "pluto"
         if concurrent:
-            # dual-device: only the monitor radio must be free; the RFE may sweep
+            # dual-device: only the monitor radio must be free; the sweeper may sweep
             if self.busy(src):
                 raise RuntimeError("the monitor radio is already busy")
         elif self.busy():
@@ -869,8 +898,10 @@ class SweepController:
         if not (dev is not None and hasattr(dev, "stream_iq")
                 and getattr(dev, "is_swept_sdr", False)):
             raise RuntimeError("connect the Pluto (SDR) to record")
-        fs = float(self.cfg.get("pluto", "stream_sample_rate", default=2_400_000))
-        n_block = int(fs * float(self.cfg.get("pluto", "listen_block_seconds", default=0.5)))
+        sect = src if (src and self.cfg.get(src, "stream_sample_rate", default=None)
+                       is not None) else "pluto"
+        fs = float(self.cfg.get(sect, "stream_sample_rate", default=2_400_000))
+        n_block = int(fs * float(self.cfg.get(sect, "listen_block_seconds", default=0.5)))
         max_secs = float(self.cfg.get("recordings", "max_seconds", default=120.0))
         sess_dir = os.path.join(recordings_dir, str(session_id))
         os.makedirs(sess_dir, exist_ok=True)

@@ -94,6 +94,11 @@ DEFAULTS = {
         "listen_wf_floor_ema": 0.1,        # noise-floor EMA for a stable color map
         "listen_wf_span_lo_db": -5.0,      # color span: [floor+lo, floor+hi]
         "listen_wf_span_hi_db": 40.0,
+        # LIVE-stream squelch (dB of in-band peak-over-median SNR): below this the
+        # audio is muted instead of AGC-amplifying an empty channel into full-scale
+        # fuzz — the sm-demod diagnostic still shows SNR + "why muted". Set null
+        # (None) to disable and hear raw noise.
+        "listen_squelch_snr_db": 5.0,
         # ~approximate~ dBFS -> dBm calibration offset. NOT lab-grade; lean on
         # baseline-delta detection. Tune per-unit in calibration mode.
         "cal_offset_db": -30.0,
@@ -104,19 +109,21 @@ DEFAULTS = {
         # set true to HARD-FAIL at connect if the radio can't reach freq_min/max
         # (i.e. you expect the frequency extension to be applied)
         "require_extended": False,
-        # DUAL-DEVICE (Phase 2): when true, the app holds the RF Explorer (sweeper)
+        # DUAL-DEVICE (Phase 2): when true, the app holds the sweeper (B220/RFE)
         # and the Pluto (monitor) at once, each on its own lock, so a sweep and a
-        # live monitor/analyze/record run concurrently. Default OFF — enable only
-        # after a two-radio bench check (HANDOFF: full simultaneous sweep+monitor
-        # on ONE radio waits for the July 2RX/2TX B220).
+        # live monitor/analyze/record run concurrently. Monitor actions arriving
+        # mid-sweep AUTO-CONNECT the Pluto if it's plugged in (ensure_monitor).
+        # Code default OFF for a byte-identical legacy path; the operator's
+        # config.yaml turns it on.
         "concurrent_monitor": False,
     },
     # SUOGOEST B220 Mini (USRP B210-compatible, AD9361 2R2T) via UHD. Only used
     # when device.source == "b220". Sweep-engine knobs mirror the pluto section
     # (same stepped-sweep code in sdr_source.py, bound through uhd_source.py).
-    # NOTE: the listen/analyze/identify DSP tuning in server.py currently reads
-    # pluto.* regardless of which SDR is connected — those paths see normalised
-    # IQ from both radios, so the shared values stay consistent.
+    # NOTE: listen/analyze knobs in server.py resolve per monitor radio (_mcfg):
+    # this section first when the B220 is the monitor, then pluto.* as the
+    # fallback — so cal_offset_db here (+36 vs the Pluto's -30) is honoured, and
+    # any listen_* key added here overrides the shared pluto values.
     "b220": {
         "device_args": "type=b200",   # UHD device args; add ,serial=... for two units
         "uhd_dir": "",                # dir with uhd.dll; "" => C:\\Program Files\\UHD\\bin

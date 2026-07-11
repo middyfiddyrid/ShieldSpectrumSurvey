@@ -4,6 +4,68 @@ Continuation brief for a fresh Fable/Claude Code session. Read this first, then 
 
 ---
 
+# ⚡⚡ NEXT-SESSION HANDOFF — 2026-07-11 — Pluto auto-monitor during B220 sweeps + demod fuzz honesty + DISSEMINATE row (READ FIRST)
+
+Operator voice dump (2026-07-11): (1) during a B220 sweep, a "cursory glance at a signal"
+should hand off to the Pluto automatically for listen/demod; (2) demod after the
+attribution step plays only FUZZ — "I should be hearing something"; (3) "there's no
+dissemination."
+
+## SHIPPED (on `main`, tests 361 green)
+1. **Pluto auto-handoff** — `runner.ensure_monitor()`: monitor ACTIONS (inspect /
+   analyze / listen / record) arriving while the sweeper is busy auto-OPEN the Pluto
+   as the monitor (60 s retry cooldown on failure, non-fatal fallback). Sweeper-role
+   promotion generalized: any non-Pluto radio (B220 **or** RFE) becomes the sweeper
+   when both are open, regardless of connect order. `config.yaml` now has
+   `pluto.concurrent_monitor: true` (code default stays false).
+2. **Fuzz cause #1 — live squelch was OFF by default.** `listen_squelch_snr_db: 5.0`
+   now defaults on (config.py + config.yaml): an empty/mistuned channel MUTES instead
+   of AGC-amplifying noise to full scale; the sm-demod readout shows SNR + why.
+   Set `null` to hear raw noise again.
+3. **Fuzz cause #2 — one-shot ANALYZE audio.** `/api/analyze/signal` no longer returns
+   an audio clip when `signal_present` is false (the legacy peak-normalize path turns
+   noise into full-scale fuzz); the note says "audio muted — check antenna/gain".
+4. **Fuzz cause #3 — wrong config section.** All listen/analyze knobs in server.py now
+   resolve per MONITOR radio via `_mcfg(msrc, key, default)`: the monitor source's own
+   config section first, then `pluto:`. Critically `cal_offset_db` (B220 +36 vs Pluto
+   −30 — a 66 dB analyzer display error when the B220 was the single radio).
+   `runner.start_recording` resolves `stream_sample_rate`/`listen_block_seconds` the same way.
+5. **DISSEMINATE row (minimal §4c of DEMOD_ANALYZE_DISSEMINATE_DESIGN.md)** — after
+   ◎ ANALYZE the card now ends with a per-class next action: analog → "▶ LISTEN ·
+   NFM · 12 kHz" (auto mode from modulation_class, auto channel width from
+   occupied_bw → `setDemodBw`) + record audio evidence; decodable → "⟲ DECODE ·
+   <proto>" + IQ evidence; encrypted/unknown → capture IQ evidence + locate note;
+   empty channel → honest "nothing here". Plus an attribution reminder when
+   unassessed. New app.js: `dissemRow/dissemListen/dissemDecode/suggestedModeFor/
+   nearestBwStep`, `App.lastAnalyze`.
+
+## VERIFIED vs NOT
+- **Verified headless:** 361 unit tests green (7 new: ensure_monitor auto-connect /
+  off-or-idle / failure-cooldown / connect-order promotion; analyze audio-mute gate;
+  b220 per-source knob resolution). Live UI in --simulate preview: no JS errors, all
+  five dissemRow variants render, `/api/device/roles` reports `concurrent_enabled:true`.
+- **NEEDS THE BENCH (Matt, both radios plugged in):**
+  1. Start a B220 sweep → click a signal → audio should come FROM THE PLUTO without a
+     "radio busy" 409 (DEVICE card roles: b220=sweeper, pluto=monitor).
+  2. Tune a known-good analog signal (FM broadcast, wfm) → real audio, squelch OPEN.
+     Empty channel → SILENCE + "SQ muted" in the DEMOD readout (not fuzz).
+  3. If a REAL signal squelches: the sm-demod line shows measured SNR — lower
+     `pluto.listen_squelch_snr_db` (or null) and tell the next session; that points at
+     RX gain staging / antenna, not the DSP.
+  4. ◎ ANALYZE on a strong signal → DISSEMINATE row appears → "▶ LISTEN" retunes with
+     the measured width and you HEAR it.
+- config.yaml got re-dumped by a Config.set during the preview boot (comments
+  stripped — known behavior); both new keys survived, values intact.
+
+## Still open (carried forward)
+- Continuous gapless listen-while-sweeping on ONE radio (B220 2RX could in principle
+  sweep on RX-A and monitor on RX-B; the stream path still binds one channel).
+- FLEX real-world constants; the FULL §4c dispatcher + session-level SIGN gate
+  (P2–P4 of DEMOD_ANALYZE_DISSEMINATE_DESIGN.md) — `session_authorizations` is still
+  NOT built; what exists is per-signal attribution + the per-decode ECPA override.
+
+---
+
 # ⚡⚡ 2026-07-06 (covert-device-detection stream) — active-ping TX + PASSIVE EMANATION detector
 
 On `b220-mini-source` (shared tree w/ the B220 + BeenVerified sessions — commit tight).

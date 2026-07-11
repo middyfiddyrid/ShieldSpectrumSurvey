@@ -127,6 +127,65 @@ class TestConcurrency(unittest.TestCase):
         self.assertEqual(by_src["rfexplorer"]["role"], "sweeper")
         self.assertEqual(by_src["pluto"]["role"], "monitor")
 
+    # ---- ensure_monitor: mid-sweep Pluto auto-connect (B220 sweeper) ----
+
+    def test_ensure_monitor_autoconnects_pluto_mid_sweep(self):
+        self.cfg.data["pluto"]["concurrent_monitor"] = True
+        c = SweepController(self.db, self.cfg)
+        c.connect_device("b220")
+        c._thread = _AliveThread()          # a sweep is running on the B220
+        c._busy_source = "b220"
+        dev, lock, _stop, src = c.ensure_monitor()
+        self.assertEqual(src, "pluto")                      # handed off to the Pluto
+        self.assertIn("pluto", c.devices)                   # ...which was auto-opened
+        self.assertIn("b220", c.devices)                    # sweeper stays open
+        self.assertIs(dev, c.devices["pluto"])
+        self.assertIsNot(lock, c.device_lock)               # its own lock
+        self.assertEqual(c.active_source, "b220")           # sweep untouched
+
+    def test_ensure_monitor_no_autoconnect_when_off_or_idle(self):
+        # flag OFF -> plain monitor_target, never opens hardware
+        c = SweepController(self.db, self.cfg)
+        c.connect_device("b220")
+        _dev, _l, _s, src = c.ensure_monitor()
+        self.assertEqual(src, "b220")
+        self.assertNotIn("pluto", c.devices)
+        # flag ON but the sweeper is idle -> single-radio monitor is fine as-is
+        self.cfg.data["pluto"]["concurrent_monitor"] = True
+        c2 = SweepController(self.db, self.cfg)
+        c2.connect_device("b220")
+        _dev, _l, _s, src = c2.ensure_monitor()
+        self.assertEqual(src, "b220")
+        self.assertNotIn("pluto", c2.devices)
+
+    def test_ensure_monitor_failure_is_nonfatal_with_cooldown(self):
+        self.cfg.data["pluto"]["concurrent_monitor"] = True
+        c = SweepController(self.db, self.cfg)
+        c.connect_device("b220")
+        c._thread = _AliveThread()
+        c._busy_source = "b220"
+        calls = {"n": 0}
+
+        def boom(cfg, source=None):
+            calls["n"] += 1
+            raise RuntimeError("no Pluto plugged in")
+        device_mod.open_device = boom
+        _dev, _l, _s, src = c.ensure_monitor()      # falls back to the sweeper target
+        self.assertEqual(src, "b220")
+        c.ensure_monitor()                          # inside the 60 s cooldown
+        self.assertEqual(calls["n"], 1)             # -> no second open attempt
+
+    def test_b220_sweeper_promotion_regardless_of_connect_order(self):
+        # generalized role rule: with the Pluto + ANY other radio open, the other
+        # radio is the sweeper — even when the Pluto was connected first.
+        self.cfg.data["pluto"]["concurrent_monitor"] = True
+        c = SweepController(self.db, self.cfg)
+        c.connect_device("pluto")
+        c.connect_device("b220", keep_other=True)
+        self.assertEqual(c.active_source, "b220")
+        _dev, _l, _s, src = c.monitor_target()
+        self.assertEqual(src, "pluto")
+
 
 if __name__ == "__main__":
     unittest.main()

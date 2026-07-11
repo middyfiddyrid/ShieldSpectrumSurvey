@@ -2016,6 +2016,7 @@ async function analyzeSignal() {
   let j;
   try { j = await api("/api/analyze/signal", { center_mhz: center, label: App.inspLabel || "", mode }); }
   catch (e) { out.innerHTML = `<span class='note'>analyze failed: ${esc(e.message || e)}</span>`; return; }
+  App.lastAnalyze = j;                     // the DISSEMINATE actions read this
   renderAnalyze(j);
   if (j.audio) { const au = $("insp-audio"); au.src = j.audio; }
 }
@@ -2090,8 +2091,87 @@ function renderAnalyze(j) {
     const topCat = cands.find(c => c.device_class);
     if (topCat) rows.push(catalogDetail(topCat));
   }
+  rows.push(dissemRow(j));
   out.innerHTML = rows.join("");
   out.style.display = "";
+}
+
+/* ---------- DISSEMINATE — the per-class next action after ANALYZE ---------- */
+// (DEMOD_ANALYZE_DISSEMINATE_DESIGN.md §4c, minimal field version.) Turns the
+// interpret() verdict into the concrete next move instead of leaving the card a
+// dead end: analog -> auto-tuned LISTEN (mode + channel width set from the
+// measured features), decodable -> re-analyze in the protocol mode, encrypted /
+// unknown -> capture IQ evidence + locate. Receive-only throughout.
+
+function nearestBwStep(hz) {
+  for (const s of DEMOD_BW_STEPS) if (s >= hz) return s;
+  return DEMOD_BW_STEPS[DEMOD_BW_STEPS.length - 1];
+}
+
+// features -> suggested analog demod mode (null = not an analog-listen signal)
+function suggestedModeFor(j) {
+  const f = j.features || {};
+  const mc = f.modulation_class || "";
+  const bwK = f.occupied_bw_khz || 0;
+  if (mc === "analog_voice") return bwK > 80 ? "wfm" : "nfm";
+  if (mc === "analog_video") return "wfm";     // audio subcarrier listen
+  const c = (j.center_mhz || 0);
+  if (mc === "unknown" && c >= 0.5 && c <= 1.71) return "am";
+  return null;
+}
+
+function dissemRow(j) {
+  if (!j.in_range || !j.features) return "";   // freq-only analyze: nothing was received
+  const r = ((j.interpretation || {}).readable) || "unknown";
+  const f = j.features || {};
+  const d = j.decode;
+  const btns = [], notes = [];
+  const mode = suggestedModeFor(j);
+  const bwHz = f.occupied_bw_khz ? nearestBwStep(f.occupied_bw_khz * 1000) : null;
+  if (!f.signal_present) {
+    return "<div class='note' style='margin-top:6px'>DISSEMINATE: nothing here — empty channel " +
+           "(no audio played; fuzz would only mean amplified noise). Re-ANALYZE while the emitter is active.</div>";
+  }
+  if (App.inspAttribution === "unassessed" || !App.inspAttribution) {
+    notes.push("set the ATTRIBUTION above first — it is the legal line for listening to / decoding content");
+  }
+  if (r === "listen" || mode) {
+    btns.push(`<button class="btn primary" onclick="dissemListen()">▶ LISTEN` +
+              `${mode ? " · " + mode.toUpperCase() : ""}${bwHz ? " · " + (bwHz / 1000) + " kHz" : ""}</button>`);
+    btns.push(`<button class="btn" onclick="toggleRecord('audio')">● RECORD AUDIO EVIDENCE</button>`);
+  }
+  if (r === "decoded" || r === "maybe_decode") {
+    const proto = (d && d.protocol) || (f.modulation_class === "fsk" ? "pocsag" : "ook");
+    btns.push(`<button class="btn" onclick="dissemDecode('${esc(proto.toLowerCase())}')">⟲ DECODE · ${esc(proto.toUpperCase())}</button>`);
+    btns.push(`<button class="btn" onclick="toggleRecord('iq')">⦿ IQ EVIDENCE</button>`);
+  }
+  if (r === "encrypted" || r === "identify_only" || r === "unknown") {
+    btns.push(`<button class="btn" onclick="toggleRecord('iq')">⦿ CAPTURE IQ EVIDENCE</button>`);
+    notes.push("content is not readable — identify + LOCATE (directional / DF bearing) + capture, never decrypt");
+  }
+  return "<div style='margin-top:6px;border-top:1px solid #26303d;padding-top:4px'>" +
+         "<div class='note'>DISSEMINATE — next action for this class:</div>" +
+         "<div class='row' style='gap:6px;margin:3px 0'>" + btns.join(" ") + "</div>" +
+         (notes.length ? "<div class='note'>" + notes.map(esc).join(" · ") + "</div>" : "") +
+         "</div>";
+}
+
+// Start the live listen tuned the way ANALYZE measured it: suggested mode +
+// channel width from occupied_bw. inspectByFreq resets the width, so set it after.
+function dissemListen() {
+  const j = App.lastAnalyze;
+  if (!j) return;
+  const mode = suggestedModeFor(j) || undefined;
+  const f = j.features || {};
+  if (mode && $("insp-mode")) $("insp-mode").value = mode;
+  inspectByFreq(j.center_mhz, App.inspLabel || j.label || "", mode);
+  if (f.occupied_bw_khz) setDemodBw(nearestBwStep(f.occupied_bw_khz * 1000));
+}
+
+// Re-run the fused analyze locked to a decode protocol (pocsag/ook/dtmf/cw).
+function dissemDecode(proto) {
+  if ($("insp-mode")) $("insp-mode").value = proto;
+  analyzeSignal();
 }
 
 // RECORD the inspected signal to a per-session file (toggle). kind='audio' -> WAV
@@ -2219,7 +2299,7 @@ async function loadTriage() {
     const roles = await api("/api/device/roles");
     const pill = $("triage-mode");
     if (pill) pill.textContent = roles.concurrent_enabled
-      ? "LIVE triage (dual-device: Pluto monitors while the RFE sweeps)"
+      ? "LIVE triage (dual-device: the Pluto monitors while the sweeper runs)"
       : "post-hoc (review the last sweep — radio free)";
   } catch (e) {}
   let d;

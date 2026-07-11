@@ -33,14 +33,21 @@ class StubSDR:
     """Minimal swept-SDR stand-in: enough surface for /api/analyze/signal."""
     is_swept_sdr = True
 
-    def __init__(self):
+    def __init__(self, noise_only=False):
         self.capture_calls = 0
+        self.noise_only = noise_only
+        self.last_fs = None
         self.info = types.SimpleNamespace(
             modules=[types.SimpleNamespace(min_mhz=70.0, max_mhz=6000.0, side="right")],
             simulated=True)
 
     def capture_iq(self, center_hz, fs, n):
         self.capture_calls += 1
+        self.last_fs = float(fs)
+        if self.noise_only:
+            rng = np.random.default_rng(7)
+            return (0.01 * (rng.standard_normal(int(n))
+                            + 1j * rng.standard_normal(int(n)))).astype(np.complex64)
         return _synth_fsk(int(n), float(fs))
 
 
@@ -101,6 +108,31 @@ class TestAnalyzeFuse(unittest.TestCase):
 
     def test_requires_center(self):
         self.assertEqual(self.c.post("/api/analyze/signal", json={}).status_code, 400)
+
+    def test_empty_channel_mutes_audio_honestly(self):
+        # the one-shot demod peak-normalizes, so noise would come back as
+        # full-scale fuzz — the honesty gate must return NO audio + say why
+        self.st.controller.device = StubSDR(noise_only=True)
+        r = self.c.post("/api/analyze/signal",
+                        json={"center_mhz": 433.92, "mode": "nfm"})
+        d = r.get_json()
+        self.assertTrue(d["in_range"])
+        self.assertFalse(d["signal_present"])
+        self.assertIsNone(d["audio"])                        # no fuzz clip
+        self.assertIn("audio muted", d["note"])
+
+    def test_b220_monitor_reads_its_own_config_section(self):
+        # per-source knob resolution (_mcfg): when the B220 is the monitor radio,
+        # b220.listen_sample_rate wins over pluto.listen_sample_rate
+        self.cfg.data.setdefault("b220", {})["listen_sample_rate"] = 96000
+        self.cfg.data["b220"]["analyze_seconds"] = 0.2
+        stub = StubSDR()
+        self.st.controller.device = stub
+        self.st.controller.active_source = "b220"
+        r = self.c.post("/api/analyze/signal",
+                        json={"center_mhz": 433.92, "mode": "nfm"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(stub.last_fs, 96000.0)
 
 
 if __name__ == "__main__":

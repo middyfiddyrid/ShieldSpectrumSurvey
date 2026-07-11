@@ -652,6 +652,18 @@ def create_app(db, cfg, demo=False) -> Flask:
                         "pocsag_likely": pocsag_likely,
                         "id_mode": id_mode, "persisted": persisted})
 
+    def _mcfg(msrc, key, default):
+        """Monitor-radio config knob. Every listen/analyze tunable historically
+        lived under the `pluto:` section; now that the B220 can be the monitor
+        (single-radio mode), read the monitor source's OWN section first —
+        critically cal_offset_db, which differs by ~66 dB between the two radios
+        — and fall back to the pluto section, then the given default."""
+        if msrc and msrc != "pluto":
+            v = cfg.get(msrc, key, default=None)
+            if v is not None:
+                return v
+        return cfg.get("pluto", key, default=default)
+
     @app.post("/api/inspect")
     def inspect_signal():
         """Tune the Pluto to a frequency and return an analyzer trace + waterfall
@@ -668,7 +680,7 @@ def create_app(db, cfg, demo=False) -> Flask:
         label = body.get("label", "")
         mode = (body.get("mode") or pick_mode(center_mhz, label)).lower()
 
-        dev, mlock, mstop, msrc = st.controller.monitor_target()
+        dev, mlock, mstop, msrc = st.controller.ensure_monitor()
         is_sdr = dev is not None and hasattr(dev, "capture_iq") and \
             getattr(dev, "is_swept_sdr", False)
         base = {"center_mhz": center_mhz, "label": label, "mode": mode, "in_range": False}
@@ -683,13 +695,13 @@ def create_app(db, cfg, demo=False) -> Flask:
             return jsonify({**base, "note": f"{center_mhz:.3f} MHz is outside the radio's "
                             f"{lo_mhz:.0f}-{hi_mhz:.0f} MHz range — apply the AD9364 extension to reach it"})
         try:
-            fs = float(cfg.get("pluto", "listen_sample_rate", default=2_400_000))
+            fs = float(_mcfg(msrc, "listen_sample_rate", 2_400_000))
             # POCSAG needs preamble+batch (~2.2 s at 512 baud) plus alignment slack
             # -> a longer one-shot capture (default 3 s; baud-agnostic, the decoder
             # tries all bauds on the same buffer)
-            secs = (float(cfg.get("pluto", "pocsag_seconds", default=3.0))
+            secs = (float(_mcfg(msrc, "pocsag_seconds", 3.0))
                     if mode == "pocsag"
-                    else float(cfg.get("pluto", "listen_seconds", default=0.5)))
+                    else float(_mcfg(msrc, "listen_seconds", 0.5)))
             n = int(fs * secs)
             mstop.set()                            # preempt any live audio stream on this radio
             with mlock:                            # serialise this radio's access
@@ -698,7 +710,7 @@ def create_app(db, cfg, demo=False) -> Flask:
             log.exception("inspect capture failed")
             return jsonify({**base, "note": f"capture failed: {e}"})
 
-        cal = float(cfg.get("pluto", "cal_offset_db", default=-30.0))
+        cal = float(_mcfg(msrc, "cal_offset_db", -30.0))
         bb, psd_db = welch_psd(iq, fs, nperseg=2048)
         step = max(1, bb.size // 480)
         analyzer = {"freqs_mhz": [round((center_mhz * 1e6 + f) / 1e6, 5) for f in bb[::step]],
@@ -762,11 +774,12 @@ def create_app(db, cfg, demo=False) -> Flask:
         feats = spec = analyzer = audio = decode = interpretation = None
         in_range = False
         note = ""
-        cal = float(cfg.get("pluto", "cal_offset_db", default=-30.0))
         # Monitor target: in dual-device mode this is the Pluto + its OWN lock, so
-        # ANALYZE runs while the RFE keeps sweeping. In single-device mode it's the
-        # active device + the legacy lock and busy(msrc) == busy() — unchanged.
-        dev, mlock, mstop, msrc = st.controller.monitor_target()
+        # ANALYZE runs while the B220/RFE keeps sweeping — ensure_monitor even
+        # auto-opens the Pluto mid-sweep. In single-device mode it's the active
+        # device + the legacy lock and busy(msrc) == busy() — unchanged.
+        dev, mlock, mstop, msrc = st.controller.ensure_monitor()
+        cal = float(_mcfg(msrc, "cal_offset_db", -30.0))
         is_sdr = dev is not None and hasattr(dev, "capture_iq") and \
             getattr(dev, "is_swept_sdr", False)
         if not is_sdr:
@@ -783,13 +796,13 @@ def create_app(db, cfg, demo=False) -> Flask:
                         f"{lo_mhz:.0f}-{hi_mhz:.0f} MHz range — apply the AD9364 extension")
             else:
                 try:
-                    fs = float(cfg.get("pluto", "listen_sample_rate", default=2_400_000))
+                    fs = float(_mcfg(msrc, "listen_sample_rate", 2_400_000))
                     # ANALYZE is a deliberate "interrogate this" action — capture a
                     # bit longer than the live listen so the decoders have enough
                     # symbols (paging frames, repeated device packets).
-                    secs = (float(cfg.get("pluto", "pocsag_seconds", default=3.0))
+                    secs = (float(_mcfg(msrc, "pocsag_seconds", 3.0))
                             if mode in DATA_MODES
-                            else float(cfg.get("pluto", "analyze_seconds", default=2.0)))
+                            else float(_mcfg(msrc, "analyze_seconds", 2.0)))
                     n = int(fs * secs)
                     mstop.set()                            # preempt any live stream on this radio
                     with mlock:                            # serialise this radio's access
@@ -815,8 +828,11 @@ def create_app(db, cfg, demo=False) -> Flask:
                         decode = routed
                     interpretation = interpret(feats, routed.get("protocol"))
                     # AUDIO: analog modes are listenable (hear the room); data modes
-                    # would just be hash, so skip audio for them.
-                    if mode not in DATA_MODES:
+                    # would just be hash, so skip audio for them. HONESTY GATE: an
+                    # empty channel gets NO audio clip — the one-shot demod path
+                    # peak-normalizes, which turns pure noise into full-scale fuzz
+                    # that reads as "demod is broken". Say "empty channel" instead.
+                    if mode not in DATA_MODES and feats.get("signal_present"):
                         try:
                             pcm, arate = demodulate(iq, fs, mode,
                                                     float(body.get("offset_hz") or 0.0))
@@ -826,7 +842,10 @@ def create_app(db, cfg, demo=False) -> Flask:
                             log.exception("analyze demod failed")
                     if not feats.get("signal_present"):
                         note = (f"no clear signal above the noise floor at {center_mhz:.3f} "
-                                f"MHz (SNR {feats['snr_db']} dB) — likely an empty channel")
+                                f"MHz (SNR {feats['snr_db']} dB) — likely an empty channel; "
+                                f"audio muted (nothing to demodulate). If a signal should be "
+                                f"here: check the antenna is on the monitor radio's RX port "
+                                f"and its gain setting")
                 except Exception as e:  # noqa: BLE001
                     log.exception("analyze capture failed")
                     note = f"capture failed: {e}"
@@ -870,13 +889,16 @@ def create_app(db, cfg, demo=False) -> Flask:
         center_mhz = float(request.args["center_mhz"])
         mode = (request.args.get("mode") or pick_mode(center_mhz)).lower()
         # dual mode: listen on the MONITOR radio (the Pluto) so a sweep can keep
-        # running on the RF Explorer; single-device behaviour is unchanged.
-        dev, _mlock, _mstop, msrc = st.controller.monitor_target()
+        # running on the B220/RFE — ensure_monitor auto-opens the Pluto mid-sweep
+        # if it isn't connected yet; single-device behaviour is unchanged.
+        dev, _mlock, _mstop, msrc = st.controller.ensure_monitor()
         if not (dev is not None and hasattr(dev, "stream_iq")
                 and getattr(dev, "is_swept_sdr", False)):
             return err("connect the Pluto (SDR) to listen", 409)
         if st.controller.busy(msrc):
-            return err("the monitor radio is busy — stop its sweep to listen", 409)
+            return err("the monitor radio is busy — stop its sweep to listen "
+                       "(or plug in the Pluto: it takes over monitoring "
+                       "automatically while the sweep runs)", 409)
         mods = dev.info.modules
         lo_mhz, hi_mhz = min(m.min_mhz for m in mods), max(m.max_mhz for m in mods)
         if not (lo_mhz <= center_mhz <= hi_mhz):
@@ -887,19 +909,19 @@ def create_app(db, cfg, demo=False) -> Flask:
                 ibw_mhz = max(1.0, min(20.0, float(ibw)))
                 fs = ibw_mhz * 1_000_000
             except (TypeError, ValueError):
-                fs = float(cfg.get("pluto", "stream_sample_rate", default=2_400_000))
+                fs = float(_mcfg(msrc, "stream_sample_rate", 2_400_000))
         else:
-            fs = float(cfg.get("pluto", "stream_sample_rate", default=2_400_000))
+            fs = float(_mcfg(msrc, "stream_sample_rate", 2_400_000))
         block_s = request.args.get("block_s")
         if block_s is not None:
             try:
                 block_s = max(0.1, min(1.0, float(block_s)))
             except (TypeError, ValueError):
-                block_s = float(cfg.get("pluto", "listen_block_seconds", default=0.5))
+                block_s = float(_mcfg(msrc, "listen_block_seconds", 0.5))
         else:
-            block_s = float(cfg.get("pluto", "listen_block_seconds", default=0.5))
+            block_s = float(_mcfg(msrc, "listen_block_seconds", 0.5))
         n_block = max(1024, int(fs * block_s))
-        cal = float(cfg.get("pluto", "cal_offset_db", default=-30.0))
+        cal = float(_mcfg(msrc, "cal_offset_db", -30.0))
         return center_mhz, mode, dev, fs, n_block, cal
 
     def _audio_blocks(center_mhz, mode, dev, fs, n_block, cal):
@@ -917,15 +939,16 @@ def create_app(db, cfg, demo=False) -> Flask:
         from .demod import demodulate
         from .identify import waterfall_stft
         from .sweep.sdr_source import welch_psd
+        _mdev, mlock, mstop, msrc = st.controller.monitor_target()
         # live-spectrum tunables (read once; the client owns the scroll history)
-        an_nperseg = int(cfg.get("pluto", "listen_analyzer_nperseg", default=2048))
-        an_bins = int(cfg.get("pluto", "listen_analyzer_bins", default=512))
-        an_ema = float(cfg.get("pluto", "listen_analyzer_ema", default=0.4))
-        wf_nperseg = int(cfg.get("pluto", "listen_wf_nperseg", default=512))
-        wf_rows = int(cfg.get("pluto", "listen_wf_rows_per_block", default=8))
-        fl_ema = float(cfg.get("pluto", "listen_wf_floor_ema", default=0.1))
-        span_lo = float(cfg.get("pluto", "listen_wf_span_lo_db", default=-5.0))
-        span_hi = float(cfg.get("pluto", "listen_wf_span_hi_db", default=40.0))
+        an_nperseg = int(_mcfg(msrc, "listen_analyzer_nperseg", 2048))
+        an_bins = int(_mcfg(msrc, "listen_analyzer_bins", 512))
+        an_ema = float(_mcfg(msrc, "listen_analyzer_ema", 0.4))
+        wf_nperseg = int(_mcfg(msrc, "listen_wf_nperseg", 512))
+        wf_rows = int(_mcfg(msrc, "listen_wf_rows_per_block", 8))
+        fl_ema = float(_mcfg(msrc, "listen_wf_floor_ema", 0.1))
+        span_lo = float(_mcfg(msrc, "listen_wf_span_lo_db", -5.0))
+        span_hi = float(_mcfg(msrc, "listen_wf_span_hi_db", 40.0))
         psd_ema = nf_ema = None
         wf_seq = 0
         # live demod strengthening (DEMOD_ANALYZE_DISSEMINATE_DESIGN.md §4a): ONE
@@ -942,16 +965,15 @@ def create_app(db, cfg, demo=False) -> Flask:
             agc_max_gain=float(_dnum("agc_max_gain", 40.0)),
             squelch_hang_blocks=int(_dnum("squelch_hang_blocks", 3)),
             deemphasis_us=float(_dnum("deemphasis_us", 75.0)))
-        sq_default = cfg.get("pluto", "listen_squelch_snr_db", default=None)
+        sq_default = _mcfg(msrc, "listen_squelch_snr_db", 5.0)
         last_off, last_bw = 0.0, None
-        _mdev, mlock, mstop, _msrc = st.controller.monitor_target()
         mstop.set()                           # preempt whatever stream is running now
         with mlock:                           # wait for the previous user of THIS radio to release
             mstop.clear()
             st.controller.listening = True
             st.controller.listen_offset_hz = 0.0   # new tune -> demod band center until clicked
             st.controller.listen_chan_bw_hz = None # new tune -> per-mode default channel width
-            st.controller.listen_squelch_snr_db = sq_default  # OFF by default (config)
+            st.controller.listen_squelch_snr_db = sq_default  # ON by default (5 dB; config listen_squelch_snr_db, null=off)
             st.controller.listen_spectrum = None
             stop = mstop
             try:
@@ -1090,7 +1112,8 @@ def create_app(db, cfg, demo=False) -> Flask:
             off = float(body.get("offset_hz", 0.0))
         except (TypeError, ValueError):
             return err("offset_hz must be a number")
-        fs = float(cfg.get("pluto", "stream_sample_rate", default=2_400_000))
+        _d, _l, _s, _msrc = st.controller.monitor_target()
+        fs = float(_mcfg(_msrc, "stream_sample_rate", 2_400_000))
         lim = fs * 0.48                        # stay inside the captured band edges
         st.controller.listen_offset_hz = max(-lim, min(lim, off))
         return jsonify({"offset_hz": st.controller.listen_offset_hz})
