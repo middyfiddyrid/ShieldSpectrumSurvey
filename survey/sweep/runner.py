@@ -272,7 +272,7 @@ class SweepController:
             self.state.update(kw)
 
     def start_sweep(self, session_id: int, phase: str, module: str, room: str,
-                    plan, manual_advance: bool = False, on_done=None):
+                    plan, manual_advance: bool = False, rbw_khz=None, on_done=None):
         if self.busy():
             raise RuntimeError("a sweep is already running")
         self.listen_stop.set()           # stop any live audio stream and let it release the radio
@@ -280,6 +280,9 @@ class SweepController:
         self._ensure_device()
         self.abort_event.clear()
         self.manual_advance = bool(manual_advance)
+        # operator RBW override for THIS sweep (SDR only; None restores config
+        # defaults so a previous sweep's override never leaks into the next)
+        self.rbw_khz = float(rbw_khz) if rbw_khz else None
         self.advance_event.clear()
         self.sustain_flag = False
         self.erase_on_abort = False
@@ -300,6 +303,17 @@ class SweepController:
                 log.exception("sweep failed")
                 status = "error"
                 self._set(error=str(e), message=f"sweep error: {e}")
+            finally:
+                # the RBW override is PER-SWEEP: clear it the moment the worker
+                # exits so it can't leak into signal captures, directional
+                # passes, or calibration on the same device handle (adversarial
+                # review 2026-07-11: a leaked 500 kHz override collapsed a
+                # 0.8 MHz fingerprint zoom to 16 grid points)
+                try:
+                    if self.device is not None:
+                        self.device.set_rbw_khz(None)
+                except Exception:  # noqa: BLE001
+                    pass
             # F7: confirmed hard abort — this sweep's data is erased instead of
             # finalized. Baseline, other sweeps, wiki captures and the session
             # itself are untouched; postprocess still runs so session-wide
@@ -362,6 +376,13 @@ class SweepController:
         if hasattr(dev, "environment"):
             dev.environment = {"phase": phase, "room": room}
         dev.select_module(module if module in ("left", "right") else "right")
+        # Operator RBW override (SDR only). ALWAYS called: None restores the
+        # config defaults so the previous sweep's setting can't leak in.
+        rbw_req = getattr(self, "rbw_khz", None)
+        analysis_rbw = dev.set_rbw_khz(rbw_req)
+        if rbw_req and analysis_rbw is None:
+            self._set(message="RBW is fixed on the RF Explorer (span/112) — "
+                              "use the Seg MHz control instead")
         sps = float(self.cfg.get("sweep", "seconds_per_sweep", default=0.35))
         threshold_db = float(self.cfg.get("detection", "threshold_db", default=12.0))
         merge_gap = int(self.cfg.get("detection", "merge_gap_bins", default=2))
@@ -375,18 +396,37 @@ class SweepController:
             # F2: what licensed records do we EXPECT in this segment's range —
             # published as status='looking', flipped to 'found' in _sweep_segment.
             seg_expected = expected_for_range(baseline_rows, seg.low_mhz, seg.high_mhz)
+            # real delivered RBW: the SDR path knows (grid + FFT under any
+            # override); the RFE falls back to the firmware span/112
+            dev_rbw = dev.predicted_rbw_khz(seg.span_mhz)
+            seg_rbw = dev_rbw if dev_rbw else seg.rbw_khz(plan.sweep_points)
+            # merge_gap_bins is denominated in GRID BINS: at a finer-than-default
+            # grid the same Hz gap spans more bins, so one modulated signal would
+            # split into several detections — scale the gap to keep it constant
+            # in Hz relative to the default grid.
+            seg_gap = merge_gap
+            if rbw_req and hasattr(dev, "grid_points") and analysis_rbw is not None:
+                span_hz = seg.span_mhz * 1e6
+                n_now = dev.grid_points(span_hz)
+                sweep_bins = int(self.cfg.get(
+                    getattr(dev, "CFG_SECTION", "pluto"), "sweep_bins", default=2048))
+                n_default = max(16, min(sweep_bins, 1 + int(span_hz / 1e3)))
+                if n_now > n_default:
+                    seg_gap = max(merge_gap,
+                                  int(round(merge_gap * (n_now - 1) / (n_default - 1))))
             self._set(segment_index=idx + 1,
                       current_segment={"low_mhz": seg.low_mhz, "high_mhz": seg.high_mhz,
                                        "band_tag": seg.band_tag,
-                                       "rbw_khz": round(seg.rbw_khz(plan.sweep_points), 1),
+                                       "rbw_khz": round(seg_rbw, 1),
                                        "expected": seg_expected},
                       eta_seconds=int(remaining),
                       message=f"segment {idx + 1}/{len(plan.segments)}: "
-                              f"{seg.low_mhz:.3f}-{seg.high_mhz:.3f} MHz [{seg.band_tag}]")
+                              f"{seg.low_mhz:.3f}-{seg.high_mhz:.3f} MHz [{seg.band_tag}]"
+                              + (f" · RBW {seg_rbw:.1f} kHz" if dev_rbw else ""))
             for attempt in range(1, MAX_SEGMENT_RETRIES + 1):
                 try:
                     self._sweep_segment(session_id, sweep_id, phase, module, room, seg,
-                                        plan, baseline_rows, threshold_db, merge_gap,
+                                        plan, baseline_rows, threshold_db, seg_gap,
                                         seg_expected)
                     break
                 except (DeviceError, OSError) as e:
@@ -399,6 +439,7 @@ class SweepController:
                     if hasattr(dev, "environment"):
                         dev.environment = {"phase": phase, "room": room}
                     dev.select_module(module if module in ("left", "right") else "right")
+                    dev.set_rbw_khz(rbw_req)     # a fresh handle loses the override
             remaining -= seg.avg_passes * sps + seg.maxhold_dwell_s + 0.9
             self._set(percent=round(100.0 * (idx + 1) / len(plan.segments), 1),
                       eta_seconds=max(int(remaining), 0))
@@ -406,32 +447,51 @@ class SweepController:
             # RESUME. View-only: detection/storage for the segment already ran.
             if self.sustain_flag and not self.abort_event.is_set():
                 self._sustain_segment(idx, len(plan.segments), seg)
-            # F5: in custom manual mode, hold here until the operator advances.
-            # Still wakes on abort (abort() sets advance_event). Last segment never waits.
+            # F5: in custom manual mode, hold here until the operator advances —
+            # but KEEP SWEEPING the finished segment live (operator ask
+            # 2026-07-11: "it just continues to sweep until the NEXT button is
+            # hit"). Reuses the sustain live-watch loop with an advance-gated
+            # predicate. Still wakes on abort (abort() sets advance_event too).
+            # Last segment never waits.
             if (self.manual_advance and idx < len(plan.segments) - 1
                     and not self.abort_event.is_set()):
                 self.advance_event.clear()
                 self._set(awaiting_advance=True,
                           message=f"segment {idx + 1}/{len(plan.segments)} done — "
+                                  f"live on {seg.low_mhz:.3f}-{seg.high_mhz:.3f} MHz; "
                                   "tap NEXT SEGMENT to continue")
+                self._sustain_segment(
+                    idx, len(plan.segments), seg,
+                    keep=lambda: not self.advance_event.is_set(),
+                    set_sustaining=False)
+                # A device hiccup ends the live watch, but it must NOT advance
+                # past the operator's gate — fall back to the idle wait.
                 while not self.advance_event.is_set() and not self.abort_event.is_set():
                     self.advance_event.wait(0.25)
                 self._set(awaiting_advance=False)
 
-    def _sustain_segment(self, idx, total, seg):
+    def _sustain_segment(self, idx, total, seg, keep=None, set_sustaining=True):
         """F6: re-sweep the sustained segment continuously, publishing live_trace
         (realtime + running avg + max-hold) until the operator resumes. The device
         is still tuned to this segment from _sweep_segment. Never raises — a
-        serial hiccup here just ends the hold and lets the sweep continue."""
+        serial hiccup here just ends the hold and lets the sweep continue.
+
+        `keep` generalizes the hold predicate so the F5 manual-advance gate can
+        reuse this exact loop (keep = "NEXT not pressed yet"); the F6 default is
+        the sustain flag. `set_sustaining=False` keeps the F6 UI (RESUME button,
+        info tabs) out of the manual gate, which is driven by awaiting_advance."""
         dev = self.device
         acc = None
-        self._set(sustaining=True,
-                  message=f"segment {idx + 1}/{total} SUSTAINED — live on "
-                          f"{seg.low_mhz:.3f}–{seg.high_mhz:.3f} MHz "
-                          "(view-only; RESUME to continue the sweep)")
+        if keep is None:
+            keep = lambda: self.sustain_flag                       # noqa: E731
+        if set_sustaining:
+            self._set(sustaining=True,
+                      message=f"segment {idx + 1}/{total} SUSTAINED — live on "
+                              f"{seg.low_mhz:.3f}–{seg.high_mhz:.3f} MHz "
+                              "(view-only; RESUME to continue the sweep)")
         try:
             dev.set_calculator("maxhold")
-            while self.sustain_flag and not self.abort_event.is_set():
+            while keep() and not self.abort_event.is_set():
                 frame = dev.read_sweep(timeout_s=3.0)
                 if frame is None:
                     continue
@@ -452,7 +512,8 @@ class SweepController:
                 dev.set_calculator("normal")
             except Exception:  # noqa: BLE001
                 pass
-            self._set(sustaining=False)
+            if set_sustaining:
+                self._set(sustaining=False)
 
     def _sweep_segment(self, session_id, sweep_id, phase, module, room, seg, plan,
                        baseline_rows, threshold_db, merge_gap, seg_expected=None):
@@ -486,7 +547,8 @@ class SweepController:
         avg_passes, dwell = seg.avg_passes, seg.maxhold_dwell_s
         if getattr(dev, "is_swept_sdr", False):
             avg_passes = min(avg_passes,
-                             int(self.cfg.get("pluto", "sweep_avg_passes", default=2)))
+                             int(self.cfg.get(getattr(dev, "CFG_SECTION", "pluto"),
+                                              "sweep_avg_passes", default=2)))
         # Pass 1 — AVERAGE
         dev.set_calculator("average")
         dev.collect(avg_passes, on_frame, abort=self.abort_event)
@@ -558,6 +620,7 @@ class SweepController:
         self.listen_stop.set()           # stop any live audio stream and let it release the radio
         time.sleep(0.4)
         self._ensure_device()
+        self.device.set_rbw_khz(None)    # fingerprints always run at config RBW
         self.abort_event.clear()
         os.makedirs(images_dir, exist_ok=True)
         cfg = self.cfg
@@ -702,6 +765,7 @@ class SweepController:
         self.listen_stop.set()           # stop any live audio stream and let it release the radio
         time.sleep(0.4)
         self._ensure_device()
+        self.device.set_rbw_khz(None)    # directional always runs at config RBW
         self.abort_event.clear()
         span_mhz = max(2.0, (bw_khz / 1000.0) * 4)
         lo, hi = center_mhz - span_mhz / 2, center_mhz + span_mhz / 2

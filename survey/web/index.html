@@ -572,6 +572,7 @@ body.demo #card-casefiles { display:none !important; }
       <label>Seg MHz <input class="small" id="ambient-seg" type="number" min="2" step="1" placeholder="auto" style="width:62px"></label>
       <label>Avg passes <input class="small" id="ambient-avg" type="number" min="3" step="1" placeholder="auto" style="width:52px"></label>
       <label>MaxHold s <input class="small" id="ambient-mh" type="number" min="2" step="0.5" placeholder="auto" style="width:52px"></label>
+      <label title="Resolution bandwidth (SDR only) — finer RBW separates close signals but sweeps slower to display. RF Explorer: fixed at segment span / 112.">RBW kHz <input class="small" id="ambient-rbw" type="number" min="1" step="1" placeholder="auto" style="width:56px"></label>
       <label class="manual-adv"><input type="checkbox" id="manual-ambient"> Manual advance — I step each segment</label>
       <span class="note">Narrower segments = smoother live chart, longer scan</span>
     </div>
@@ -608,6 +609,7 @@ body.demo #card-casefiles { display:none !important; }
       <label>Seg MHz <input class="small" id="bug-seg" type="number" min="2" step="1" placeholder="auto" style="width:62px"></label>
       <label>Avg passes <input class="small" id="bug-avg" type="number" min="3" step="1" placeholder="auto" style="width:52px"></label>
       <label>MaxHold s <input class="small" id="bug-mh" type="number" min="2" step="0.5" placeholder="auto" style="width:52px"></label>
+      <label title="Resolution bandwidth (SDR only) — finer RBW separates close signals. RF Explorer: fixed at segment span / 112.">RBW kHz <input class="small" id="bug-rbw" type="number" min="1" step="1" placeholder="auto" style="width:56px"></label>
       <label class="manual-adv"><input type="checkbox" id="manual-bug"> Manual advance — I step each segment</label>
     </div>
     <div class="row">
@@ -637,6 +639,7 @@ body.demo #card-casefiles { display:none !important; }
       <label>Seg MHz <input class="small" id="seg-L" type="number" min="2" step="1" placeholder="auto" style="width:62px"></label>
       <label>Avg passes <input class="small" id="avg-L" type="number" min="3" step="1" placeholder="auto" style="width:52px"></label>
       <label>MaxHold s <input class="small" id="mh-L" type="number" min="2" step="0.5" placeholder="auto" style="width:52px"></label>
+      <label title="Resolution bandwidth (SDR only) — finer RBW separates close signals. RF Explorer: fixed at segment span / 112.">RBW kHz <input class="small" id="rbw-L" type="number" min="1" step="1" placeholder="auto" style="width:56px"></label>
       <label class="manual-adv"><input type="checkbox" id="manual-L"> Manual advance — I step each segment</label>
     </div>
     <div class="row"><button class="btn primary big" id="btn-sweep-L">START PHASE A — LEFT MODULE</button></div>
@@ -663,6 +666,7 @@ body.demo #card-casefiles { display:none !important; }
       <label>Seg MHz <input class="small" id="seg-R" type="number" min="2" step="1" placeholder="auto" style="width:62px"></label>
       <label>Avg passes <input class="small" id="avg-R" type="number" min="3" step="1" placeholder="auto" style="width:52px"></label>
       <label>MaxHold s <input class="small" id="mh-R" type="number" min="2" step="0.5" placeholder="auto" style="width:52px"></label>
+      <label title="Resolution bandwidth (SDR only) — finer RBW separates close signals. RF Explorer: fixed at segment span / 112.">RBW kHz <input class="small" id="rbw-R" type="number" min="1" step="1" placeholder="auto" style="width:56px"></label>
       <label class="manual-adv"><input type="checkbox" id="manual-R"> Manual advance — I step each segment</label>
     </div>
     <div class="row"><button class="btn primary big" id="btn-sweep-R">START PHASE B — RIGHT MODULE</button></div>
@@ -692,6 +696,7 @@ body.demo #card-casefiles { display:none !important; }
       <label>Seg MHz <input class="small" id="seg-main" type="number" min="2" step="1" placeholder="auto" style="width:62px"></label>
       <label>Avg passes <input class="small" id="avg-main" type="number" min="3" step="1" placeholder="auto" style="width:52px"></label>
       <label>MaxHold s <input class="small" id="mh-main" type="number" min="2" step="0.5" placeholder="auto" style="width:52px"></label>
+      <label title="Resolution bandwidth (SDR only) — finer RBW separates close signals. RF Explorer: fixed at segment span / 112.">RBW kHz <input class="small" id="rbw-main" type="number" min="1" step="1" placeholder="auto" style="width:56px"></label>
       <label class="manual-adv"><input type="checkbox" id="manual-main"> Manual advance — I step each segment</label>
     </div>
     <div id="sweep-radio-ready" class="note" style="margin:6px 0"></div>
@@ -1163,6 +1168,11 @@ body.demo #card-casefiles { display:none !important; }
         <div id="sweep-label-layer"></div>
         <div id="live-shade"></div>
       </div>
+      <!-- the waterfall lives INSIDE chart-col so it gets the exact same
+           flex-computed width as the chart above it: as a sibling of
+           .sweep-stage at width:70% it was 262px wider (the 250px seg-panel +
+           12px gap), so waterfall columns drifted right of their chart peaks -->
+      <canvas id="waterfall" style="width:100%; height:120px; background:#000208; border:1px solid var(--line)"></canvas>
       <!-- F6: legend as a slim chip bar — same checkboxes, a fraction of the space -->
       <div class="legend-chips" id="sweep-legend">
         <span class="leg-title">KEY</span>
@@ -1186,7 +1196,6 @@ body.demo #card-casefiles { display:none !important; }
       </div>
     </div>
   </div>
-  <canvas id="waterfall" style="width:70%; height:120px; background:#000208; border:1px solid var(--line)"></canvas>
   <!-- F6: sustained-segment intel — tabs swap what lives in the table slot -->
   <div class="info-tabs" id="sweep-info-tabs">
     <button data-tab="signals" class="on" type="button">SIGNALS</button>

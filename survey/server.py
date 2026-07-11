@@ -1273,19 +1273,49 @@ def create_app(db, cfg, demo=False) -> Flask:
         return plan_full_sweep(modules, pcfg, profile, custom_minutes, targets=targets,
                              custom_avg_passes=avg_p, custom_maxhold_s=mh)
 
+    def _plan_rbw(plans, rbw_khz):
+        """Annotate each plan dict with the REAL delivered RBW per segment (and
+        the requested override): the connected device knows (SDR grid + FFT);
+        the RFE falls back to the firmware span/sweep_points. Purely advisory —
+        the UI 'RBW' readout was hardcoded to span/112 which is wrong for SDRs."""
+        dev = st.controller.device
+        out = {}
+        for side, p in plans.items():
+            d = p.to_dict()
+            for s, seg in zip(d["segments"], p.segments):
+                # pure preview — never mutates the device (a mutate-and-restore
+                # here would briefly distort a LIVE sweep, which re-reads the
+                # FFT size every frame while the operator types in the RBW box)
+                pred = (dev.predicted_rbw_khz(seg.span_mhz, rbw_khz)
+                        if dev is not None else None)
+                s["rbw_khz"] = round(pred if pred else seg.rbw_khz(p.sweep_points), 1)
+            d["rbw_adjustable"] = bool(dev is not None
+                                       and getattr(dev, "is_swept_sdr", False))
+            d["rbw_khz_requested"] = rbw_khz
+            out[side] = d
+        return out
+
+    def _num_or_none(v):
+        try:
+            f = float(v)
+            return f if f > 0 else None
+        except (TypeError, ValueError):
+            return None
+
     @app.get("/api/plan")
     def plan_preview():
         profile = request.args.get("profile", "standard")
         minutes = float(request.args.get("custom_minutes", 45))
         scan_mode = request.args.get("scan_mode", "full")
         seg = request.args.get("segment_width_mhz")
+        rbw_khz = _num_or_none(request.args.get("rbw_khz"))
         try:
             plans = _plans(profile, minutes, scan_mode, seg,
                            request.args.get("custom_avg_passes"),
                            request.args.get("custom_maxhold_s"))
         except Exception as e:  # noqa: BLE001 - device absent/dead included
             return err(e)
-        return jsonify({side: p.to_dict() for side, p in plans.items()})
+        return jsonify(_plan_rbw(plans, rbw_khz))
 
     @app.post("/api/sweep/start")
     def sweep_start():
@@ -1300,6 +1330,10 @@ def create_app(db, cfg, demo=False) -> Flask:
         minutes = float(body.get("custom_minutes") or 45)
         scan_mode = body.get("scan_mode", "full")        # full | bug
         seg = body.get("segment_width_mhz")               # optional segment-width override
+        # operator RBW override (kHz, SDR only) — clamped to a sane field range
+        rbw_khz = _num_or_none(body.get("rbw_khz"))
+        if rbw_khz:
+            rbw_khz = max(1.0, min(1000.0, rbw_khz))
         # F5: manual segment advance is a custom-mode-only behaviour
         manual_advance = bool(body.get("manual_advance")) and profile == "custom"
         try:
@@ -1314,7 +1348,8 @@ def create_app(db, cfg, demo=False) -> Flask:
             if plan is None or not plan.segments:
                 return err(f"no plan for module {module}")
             sweep_id = st.controller.start_sweep(session["id"], phase, module, room, plan,
-                                                 manual_advance=manual_advance)
+                                                 manual_advance=manual_advance,
+                                                 rbw_khz=rbw_khz)
         except Exception as e:  # noqa: BLE001 - busy, device dead, plan failure
             log.exception("sweep start failed")
             return err(e, 409)

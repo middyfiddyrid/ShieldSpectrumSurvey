@@ -175,17 +175,48 @@ def plan_substeps(lo_hz: float, hi_hz: float, inst_bw_hz: float,
     return centers
 
 
+def _peak_reduce_db(grid_hz: np.ndarray, f: np.ndarray, p_db: np.ndarray
+                    ) -> np.ndarray:
+    """Reduce a FINER-resolution PSD onto grid CELLS by MAX (peak detector).
+
+    Cell edges sit midway between grid points; every fine bin lands in exactly
+    one cell and each cell keeps its loudest bin. This is how a real spectrum
+    analyzer displays with fewer pixels than filter bins — a narrow carrier can
+    NEVER disappear because it fell between grid points. Returns NaN for cells
+    no fine bin covered."""
+    edges = np.empty(grid_hz.size + 1, dtype=np.float64)
+    edges[1:-1] = (grid_hz[:-1] + grid_hz[1:]) / 2.0
+    edges[0] = grid_hz[0] - (grid_hz[1] - grid_hz[0]) / 2.0
+    edges[-1] = grid_hz[-1] + (grid_hz[-1] - grid_hz[-2]) / 2.0
+    idx = np.searchsorted(edges, f, side="right") - 1
+    ok = (idx >= 0) & (idx < grid_hz.size)
+    out = np.full(grid_hz.size, np.nan, dtype=np.float64)
+    np.fmax.at(out, idx[ok], p_db[ok])
+    return out
+
+
 def stitch_psd(grid_hz: np.ndarray, segments: list[tuple[np.ndarray, np.ndarray]]
                ) -> np.ndarray:
     """Stitch per-segment (kept_freqs_hz, kept_psd_db) onto a common grid.
 
-    Overlapping contributions are averaged in the POWER domain (correct for noise
-    floor) then converted back to dB. Grid points with no contributor are filled
-    by interpolation across the gap so the returned trace is contiguous.
+    When the grid is COARSER than a segment's PSD bins, each grid cell takes the
+    MAX of the fine bins it covers (peak detector) — point-sampling with
+    np.interp there would let a narrowband emitter vanish between grid points
+    (adversarial review 2026-07-11: a carrier 79 dB over the floor became
+    invisible under a coarse operator RBW; the milder pre-existing case was a
+    wide default segment whose 2048-point grid point-sampled ~19.5 kHz analysis
+    bins). When the grid is finer or comparable, interpolation is correct and
+    keeps the noise floor honest.
+
+    Overlapping contributions are averaged in the POWER domain (correct for the
+    noise floor; a carrier peaked by both neighbours averages to itself) then
+    converted back to dB. Grid points with no contributor are filled by
+    interpolation across the gap so the returned trace is contiguous.
     """
     grid_hz = np.asarray(grid_hz, dtype=np.float64)
     power = np.zeros(grid_hz.size, dtype=np.float64)
     count = np.zeros(grid_hz.size, dtype=np.float64)
+    grid_step = (float(np.median(np.diff(grid_hz))) if grid_hz.size > 1 else 0.0)
     for f_keep, p_keep in segments:
         if f_keep.size == 0:
             continue
@@ -193,6 +224,14 @@ def stitch_psd(grid_hz: np.ndarray, segments: list[tuple[np.ndarray, np.ndarray]
         f_keep, p_keep = f_keep[order], p_keep[order]
         mask = (grid_hz >= f_keep[0]) & (grid_hz <= f_keep[-1])
         if not np.any(mask):
+            continue
+        src_step = (float(np.median(np.diff(f_keep))) if f_keep.size > 1 else 0.0)
+        if grid_hz.size > 1 and src_step > 0 and grid_step > src_step * 1.5:
+            # grid coarser than the analysis bins -> peak-preserving reduction
+            reduced = _peak_reduce_db(grid_hz, f_keep, p_keep)
+            m2 = mask & ~np.isnan(reduced)
+            power[m2] += 10.0 ** (reduced[m2] / 10.0)
+            count[m2] += 1.0
             continue
         interp_db = np.interp(grid_hz[mask], f_keep, p_keep)
         power[mask] += 10.0 ** (interp_db / 10.0)
@@ -243,6 +282,9 @@ class AD936xSource(BaseDevice):
         self._sweep_bins = int(cfg.get(self.CFG_SECTION, "sweep_bins", default=2048))
         self._gain_mode = str(cfg.get(self.CFG_SECTION, "gain_mode", default="manual"))
         self._gain_db = float(cfg.get(self.CFG_SECTION, "gain_db", default=64.0))
+        # operator RBW override (set_rbw_khz): None = the config defaults above
+        self._nperseg_cfg = self._nperseg
+        self._rbw_hz = None
         # per-set_range state (a stable grid so every read_sweep frame matches)
         self._range_hz = None
         self._grid_hz = None
@@ -350,6 +392,64 @@ class AD936xSource(BaseDevice):
         dwell, not a device mode."""
         return
 
+    # operator-adjustable RBW (kHz). Two knobs must move together: the Welch FFT
+    # length (analysis bin = fs/nperseg) and the output-grid density (delivered
+    # bin = span/(n-1)); the effective RBW is the coarser of the two.
+    _RBW_MIN_NPERSEG = 256       # coarsest analysis: fs/256 = 78 kHz @ 20 MS/s
+    _RBW_GRID_MAX = 8192         # host-cost cap on grid points at a fine RBW
+
+    def _rbw_nperseg(self, rbw_hz: float) -> int:
+        """Welch FFT length for a requested RBW: nearest power of two to
+        fs/rbw, clamped so each capture still yields >=4 Welch segments
+        (averaging keeps the noise floor stable). Pure — no state touched."""
+        max_nperseg = max(self._RBW_MIN_NPERSEG, int(self._nsamp) // 4)
+        n = 2 ** int(round(np.log2(max(1.0, self._fs / rbw_hz))))
+        return int(np.clip(n, self._RBW_MIN_NPERSEG, max_nperseg))
+
+    def _rbw_grid_points(self, span_hz: float, rbw_hz) -> int:
+        """Output-grid points for a segment span. No override: the legacy
+        sweep_bins cap at 1 point/kHz. With an override: 1 point per RBW step,
+        capped for host cost. Pure — no state touched."""
+        if rbw_hz:
+            return max(16, min(self._RBW_GRID_MAX,
+                               1 + int(span_hz / max(rbw_hz, 100.0))))
+        return max(16, min(self._sweep_bins, 1 + int(span_hz / 1e3)))
+
+    def set_rbw_khz(self, rbw_khz):
+        """Set (or clear) the operator RBW override for SWEEPS. Returns the
+        achieved ANALYSIS RBW in kHz (the per-segment delivered RBW can be
+        coarser — see predicted_rbw_khz)."""
+        if not rbw_khz:
+            self._rbw_hz = None
+            self._nperseg = self._nperseg_cfg
+            return None
+        rbw_hz = max(100.0, float(rbw_khz) * 1e3)
+        self._nperseg = self._rbw_nperseg(rbw_hz)
+        self._rbw_hz = rbw_hz
+        return round(self._fs / self._nperseg / 1e3, 2)
+
+    def grid_points(self, span_hz: float) -> int:
+        """Output-grid points for a segment span under the CURRENT RBW setting."""
+        return self._rbw_grid_points(span_hz, self._rbw_hz)
+
+    def predicted_rbw_khz(self, span_mhz: float, rbw_khz=None):
+        """Effective delivered RBW for a segment of `span_mhz`: the coarser of
+        the Welch analysis bin and the output-grid spacing. With `rbw_khz` it
+        previews a HYPOTHETICAL override WITHOUT mutating device state — safe
+        to call from /api/plan while a sweep is live (read_sweep re-reads
+        _nperseg every frame, so a mutate-and-restore preview would briefly
+        distort a running sweep)."""
+        span_hz = float(span_mhz) * 1e6
+        if span_hz <= 0:
+            return None
+        if rbw_khz:
+            rbw_hz = max(100.0, float(rbw_khz) * 1e3)
+            nperseg = self._rbw_nperseg(rbw_hz)
+        else:
+            rbw_hz, nperseg = self._rbw_hz, self._nperseg
+        n = self._rbw_grid_points(span_hz, rbw_hz)
+        return round(max(self._fs / nperseg, span_hz / (n - 1)) / 1e3, 2)
+
     def set_range(self, start_mhz: float, end_mhz: float):
         lo_hz, hi_hz = start_mhz * 1e6, end_mhz * 1e6
         if hi_hz <= lo_hz:
@@ -357,7 +457,7 @@ class AD936xSource(BaseDevice):
         self._range_hz = (lo_hz, hi_hz)
         self._centers = plan_substeps(lo_hz, hi_hz, self._fs, self._keep,
                                       self._overlap)
-        n = max(16, min(self._sweep_bins, 1 + int((hi_hz - lo_hz) / 1e3)))
+        n = self.grid_points(hi_hz - lo_hz)
         self._grid_hz = np.linspace(lo_hz, hi_hz, n)
 
     def read_sweep(self, timeout_s: float = 5.0) -> Optional[SweepFrame]:

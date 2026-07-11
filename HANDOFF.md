@@ -4,6 +4,87 @@ Continuation brief for a fresh Fable/Claude Code session. Read this first, then 
 
 ---
 
+# ⚡⚡ 2026-07-11 (later) — manual sweep keeps sweeping + operator RBW + waterfall alignment + SIMULATE-B220 guard
+
+Second operator voice dump today: (1) manual mode should KEEP SWEEPING until NEXT is
+hit (it idled the radio); (2) technician-adjustable RBW; (3) "the waterfall appears
+longer in width than the graph."
+
+## SHIPPED (on `main`, tests 370 green)
+1. **Manual gate re-sweeps live** — `_sustain_segment` gained `keep`/`set_sustaining`
+   params; the F5 between-segment gate now runs that live-watch loop with
+   keep="NEXT not pressed" (awaiting_advance still drives the button; `sustaining`
+   stays false so the F6 UI is untouched). A device hiccup during the gate falls
+   back to the old idle wait — it never auto-advances past the operator. New
+   tests/test_manual_gate.py (radio keeps reading + live_trace keeps moving while
+   gated; abort during gate stops promptly).
+2. **Operator RBW** — "RBW kHz" input on all five scan cards' custom-tech panels
+   (ambient-rbw/bug-rbw/rbw-L/rbw-R/rbw-main) → /api/plan `rbw_khz` (preview) +
+   /api/sweep/start → `start_sweep(rbw_khz=)` → `dev.set_rbw_khz()` per sweep
+   (ALWAYS called; None restores config so overrides never leak). SDR implementation
+   (AD936xSource, covers Pluto+B220): nperseg = pow2(fs/rbw) clamped
+   [256, capture_samples//4] (>=4 Welch averages), output grid 1 pt/RBW capped 8192
+   (legacy: 1 pt/kHz capped sweep_bins). `predicted_rbw_khz(span, rbw?)` is a PURE
+   preview (never mutates — a live sweep re-reads _nperseg every frame). RFE:
+   BaseDevice no-op + UI note "RBW fixed at span/112 — use Seg MHz". merge_gap_bins
+   is auto-scaled when the grid is finer than default so one signal doesn't split
+   into many detections. The plan ETA line now shows the REAL device RBW (the old
+   span/112 display was RFE-only and wrong for SDRs). tests/test_rbw.py.
+   ⚠ Baseline-comparability caveat: sweeps at a non-default RBW shift narrowband
+   SNR (density-normalised PSD) — compare baseline-deltas at matching RBW.
+3. **Waterfall/chart alignment (the reported mismatch)** — ROOT CAUSE: `#waterfall`
+   was a SIBLING of `.sweep-stage` at width:70% while the chart sat inside
+   `.chart-col` (70% minus the 250px seg-panel + 12px gap) → waterfall exactly 262px
+   wider, columns drifting right of chart peaks. FIX: the canvas moved INSIDE
+   `.chart-col` directly under the chart at width:100% (identical flex width).
+   Also pushWaterfall now samples bin CENTERS (round(x/(W-1)*(n-1))) matching
+   drawTrace's i/(n-1) mapping (the old floor(x/W*n) skewed a half-bin). The
+   monitor-panel pair (insp-analyzer/insp-waterfall) was measured aligned to
+   <0.5 px — untouched.
+4. **SIMULATE-B220 guard (found during verify)** — `open_device` checked
+   `device.simulate` AFTER the pluto/b220 branches, so a `--simulate` run with
+   `device.source: b220` opened AND TRIED TO FLASH THE REAL B220. The simulate
+   check now comes first (a demo run can never touch hardware). Also fixed:
+   the SDR avg-passes cap read `pluto.sweep_avg_passes` even for the B220
+   (now dev.CFG_SECTION).
+
+## ADVERSARIAL REVIEW (7-agent, 4 confirmed) — both root causes FIXED + regression-tested
+- **CRITICAL — coarse grids point-sampled the PSD and could HIDE a narrowband
+  emitter** (np.interp in stitch_psd; a carrier 79 dB over the floor vanished under
+  a 500 kHz operator RBW; a milder PRE-EXISTING version affected wide default
+  segments: 2048-pt grid vs 19.5 kHz analysis bins). FIX: `stitch_psd` now does
+  PEAK-PRESERVING reduction (`_peak_reduce_db`, per-grid-cell MAX — real-SA peak-
+  detector semantics) whenever the grid is coarser than the analysis bins; interp
+  stays for fine grids (honest noise floor). Verified: the review's repro carrier
+  now reads ~78 dB above floor at EVERY rbw (was 0.7 dB = invisible).
+- **MAJOR — the per-sweep RBW override LEAKED into wiki fingerprint captures,
+  directional passes, calibration, and /api/plan previews** (a leaked 500 kHz
+  override collapsed a 0.8 MHz capture zoom to 16 grid points = junk evidence).
+  FIX: work() clears it in a finally; start_captures/start_directional/
+  run_calibration also reset to config RBW on entry.
+
+## VERIFIED ON REAL HARDWARE (B220 Mini, session 67, sweep erased after)
+- Ran the operator's own scenario on the REAL radio: bug-scan, custom, manual
+  advance, RBW 10 → gate opened with "live on 300.000-348.000 MHz", live_trace
+  advanced every ~2 s DURING the gate (radio kept sweeping), segment banner showed
+  RBW 10 kHz, live frame carried 4801 grid points (48 MHz / 10 kHz — vs the old
+  2048 cap), chart & waterfall measured pixel-identical (365 px @ left 134),
+  NEXT advanced to the next segment, abort{erase} left no rows.
+- The app process was restarted to load this code (old PID predated the changes;
+  the one-segment demo sweep Matt had stuck at the old idle gate was erase-aborted
+  first). NOTE: a stale `python app.py` predating 2026-07-11 lacks ALL of this.
+
+## Bench notes for Matt
+- Manual sweep: start a custom sweep with "Manual advance" → after each segment the
+  chart+waterfall KEEP MOVING ("▶ LIVE — still sweeping this segment") until NEXT.
+- RBW: set e.g. 10 in the RBW kHz box (custom profile) on the B220 → the ETA line
+  and the live segment banner show the achieved RBW; finer RBW = more grid points,
+  same sweep time (dwell governs time, not RBW). Coarse RBW can no longer hide a
+  narrow signal (peak-detector stitch).
+- Waterfall: signal columns should now sit exactly under their chart peaks.
+
+---
+
 # ⚡⚡ NEXT-SESSION HANDOFF — 2026-07-11 — Pluto auto-monitor during B220 sweeps + demod fuzz honesty + DISSEMINATE row (READ FIRST)
 
 Operator voice dump (2026-07-11): (1) during a B220 sweep, a "cursory glance at a signal"

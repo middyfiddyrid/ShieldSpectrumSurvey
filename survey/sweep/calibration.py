@@ -27,6 +27,7 @@ def run_calibration(controller, cfg, test_freq_mhz: float = 433.92,
     """Blocking; call on a worker thread. controller: SweepController with a
     connected device. Returns the results table and writes the winner to config."""
     dev = controller.device
+    dev.set_rbw_khz(None)   # calibration must run at config RBW, never a leftover override
     threshold_db = float(cfg.get("detection", "threshold_db", default=12.0))
     side = "left" if any(m.side == "left" and m.min_mhz <= test_freq_mhz <= m.max_mhz
                          for m in dev.info.modules) else "right"

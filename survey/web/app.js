@@ -476,7 +476,7 @@ function render(st) {
     const eta = st.sweep.eta_seconds || 0;
     // F5: ETA is meaningless while paused for manual advance
     $("sweep-overlay-eta").textContent = st.sweep.awaiting_advance
-      ? "⏸ PAUSED — tap NEXT SEGMENT to continue"
+      ? "▶ LIVE — still sweeping this segment; tap NEXT SEGMENT to continue"
       : `${st.sweep.percent || 0}%  ·  ETA ${Math.floor(eta / 60)}m ${eta % 60}s`;
     const nextBtn = $("btn-next-segment");
     if (nextBtn) nextBtn.style.display = st.sweep.awaiting_advance ? "" : "none";
@@ -981,7 +981,10 @@ function pushWaterfall(canvas, t) {
   const row = ctx.createImageData(W, 2);
   const n = t.amps.length;
   for (let x = 0; x < W; x++) {
-    const [r, g, b] = wfColor(t.amps[Math.floor(x / W * n)]);
+    // bin-CENTER sampling (round over x/(W-1)) to match drawTrace's i/(n-1)
+    // x-mapping — the old floor(x/W*n) edge sampling skewed the waterfall a
+    // half-bin right of the chart peaks
+    const [r, g, b] = wfColor(t.amps[Math.min(n - 1, Math.round(x / Math.max(1, W - 1) * (n - 1)))]);
     for (let y = 0; y < 2; y++) {
       const o = (y * W + x) * 4;
       row.data[o] = r; row.data[o + 1] = g; row.data[o + 2] = b; row.data[o + 3] = 255;
@@ -2611,16 +2614,16 @@ const CUSTOM_PANELS = [
 ];
 
 function customTechFor(profileId) {
-  // [seg, avg, maxhold, manual-advance checkbox]
+  // [seg, avg, maxhold, manual-advance checkbox, rbw]
   const map = {
-    "ambient-profile": ["ambient-seg", "ambient-avg", "ambient-mh", "manual-ambient"],
-    "bug-profile": ["bug-seg", "bug-avg", "bug-mh", "manual-bug"],
-    "profile-L": ["seg-L", "avg-L", "mh-L", "manual-L"],
-    "profile-R": ["seg-R", "avg-R", "mh-R", "manual-R"],
-    "profile-main": ["seg-main", "avg-main", "mh-main", "manual-main"],
+    "ambient-profile": ["ambient-seg", "ambient-avg", "ambient-mh", "manual-ambient", "ambient-rbw"],
+    "bug-profile": ["bug-seg", "bug-avg", "bug-mh", "manual-bug", "bug-rbw"],
+    "profile-L": ["seg-L", "avg-L", "mh-L", "manual-L", "rbw-L"],
+    "profile-R": ["seg-R", "avg-R", "mh-R", "manual-R", "rbw-R"],
+    "profile-main": ["seg-main", "avg-main", "mh-main", "manual-main", "rbw-main"],
   };
   const ids = map[profileId] || [];
-  const seg = $(ids[0]), avg = $(ids[1]), mh = $(ids[2]), man = $(ids[3]);
+  const seg = $(ids[0]), avg = $(ids[1]), mh = $(ids[2]), man = $(ids[3]), rbw = $(ids[4]);
   const out = {};
   const sw = seg && parseFloat(seg.value);
   if (sw && sw >= 2) out.segment_width_mhz = sw;
@@ -2629,6 +2632,8 @@ function customTechFor(profileId) {
   const md = mh && parseFloat(mh.value);
   if (md && md >= 2) out.custom_maxhold_s = md;
   if (man && man.checked) out.manual_advance = true;   // F5 (server honors only for custom)
+  const rk = rbw && parseFloat(rbw.value);
+  if (rk && rk >= 1) out.rbw_khz = rk;                 // SDR-only; RFE ignores with a note
   return out;
 }
 
@@ -2652,6 +2657,7 @@ function planQuery(profile, minutes, scanMode, profileId) {
   if (tech.segment_width_mhz) q += `&segment_width_mhz=${tech.segment_width_mhz}`;
   if (tech.custom_avg_passes) q += `&custom_avg_passes=${tech.custom_avg_passes}`;
   if (tech.custom_maxhold_s) q += `&custom_maxhold_s=${tech.custom_maxhold_s}`;
+  if (tech.rbw_khz) q += `&rbw_khz=${tech.rbw_khz}`;
   return q;
 }
 
@@ -2663,10 +2669,15 @@ async function updateEta(profileSel, minutesInput, etaEl, scanMode) {
     const plans = await api(planQuery(profile, minutesInput.value || 45, scanMode, profileSel.id));
     const totalMin = Object.values(plans).reduce((a, p) => a + p.estimated_minutes, 0);
     const segs = Object.values(plans).reduce((a, p) => a + p.segment_count, 0);
-    const rbw = Object.values(plans).flatMap(p => p.segments.map(s =>
-      (s.high_mhz - s.low_mhz) * 1000 / 112));
+    // real per-segment RBW from the server (device-aware: SDR FFT+grid, or the
+    // RFE's span/112) — replaces the old hardcoded span/112 which was wrong for SDRs
+    const rbw = Object.values(plans).flatMap(p => p.segments.map(s => s.rbw_khz))
+      .filter(v => v != null);
+    const fixed = Object.values(plans).some(p => p.rbw_khz_requested && !p.rbw_adjustable);
+    const lo = Math.min(...rbw), hi = Math.max(...rbw);
     etaEl.textContent = `est. ${totalMin.toFixed(0)} min total · ${segs} segments · ` +
-      `RBW ${Math.min(...rbw).toFixed(0)}–${Math.max(...rbw).toFixed(0)} kHz/bin`;
+      `RBW ${lo === hi ? lo.toFixed(1) : lo.toFixed(0) + "–" + hi.toFixed(0)} kHz/bin` +
+      (fixed ? " (RBW fixed on the RF Explorer — use Seg MHz)" : "");
   } catch (e) { etaEl.textContent = e.message; }
 }
 const ETA_CARDS = [["ambient-profile", "ambient-minutes", "ambient-eta", "full"],
@@ -2678,8 +2689,9 @@ ETA_CARDS.forEach(([p, m, e, mode]) => {
   $(p).onchange = () => updateEta($(p), $(m), $(e), mode);
   $(m).oninput = () => updateEta($(p), $(m), $(e), mode);
 });
-["ambient-seg", "ambient-avg", "ambient-mh", "bug-seg", "bug-avg", "bug-mh",
- "seg-L", "avg-L", "mh-L", "seg-R", "avg-R", "mh-R", "seg-main", "avg-main", "mh-main"].forEach(id => {
+["ambient-seg", "ambient-avg", "ambient-mh", "ambient-rbw", "bug-seg", "bug-avg", "bug-mh", "bug-rbw",
+ "seg-L", "avg-L", "mh-L", "rbw-L", "seg-R", "avg-R", "mh-R", "rbw-R",
+ "seg-main", "avg-main", "mh-main", "rbw-main"].forEach(id => {
   const el = $(id);
   if (el) el.oninput = () => ETA_CARDS.forEach(([p, m, e, mode]) => {
     if ($(p)) updateEta($(p), $(m), $(e), mode);

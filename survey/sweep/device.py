@@ -153,6 +153,21 @@ class BaseDevice:
         raise NotImplementedError(
             f"{type(self).__name__} is amplitude-only and cannot capture IQ")
 
+    def set_rbw_khz(self, rbw_khz):
+        """Operator RBW override for sweeps. SDR sources implement it (Welch FFT
+        size + output-grid density); the RF Explorer's 112-point sweep is
+        firmware-fixed, so the base implementation is a no-op that returns None
+        ("not adjustable — RBW = segment span / 112; use the Seg MHz control").
+        Pass None/0 to restore the configured default."""
+        return None
+
+    def predicted_rbw_khz(self, span_mhz: float, rbw_khz=None):
+        """Effective RBW (kHz) a sweep of `span_mhz` will deliver under the
+        current settings (or a hypothetical `rbw_khz` override, computed
+        WITHOUT mutating state), or None when the device can't say (RFE: the
+        runner falls back to span/sweep_points)."""
+        return None
+
 
     def stream(self, seconds: float, on_sweep: Callable[[SweepFrame], None],
                abort: Optional[threading.Event] = None) -> int:
@@ -568,6 +583,15 @@ def open_device(cfg, source=None) -> BaseDevice:
     Within RF Explorer: simulator (explicit only) -> official lib -> raw UART."""
     source = (source or os.environ.get("SWEEP_SOURCE")
               or cfg.get("device", "source", default="rfexplorer")).strip().lower()
+    # SIMULATE WINS OVER EVERY SOURCE. This check used to sit below the SDR
+    # branches, so `--simulate` with device.source=b220/pluto configured opened
+    # (and tried to FLASH) the REAL radio — a demo run must never touch hardware.
+    if cfg.get("device", "simulate", default=False):
+        from .simulator import SimulatedDevice
+        dev = SimulatedDevice()
+        dev.connect()
+        return dev
+
     if source in ("pluto", "sdr", "ad936x"):
         from .sdr_source import PlutoSource
         dev = PlutoSource(cfg)
@@ -577,12 +601,6 @@ def open_device(cfg, source=None) -> BaseDevice:
     if source in ("b220", "usrp", "uhd"):
         from .uhd_source import B220Source
         dev = B220Source(cfg)
-        dev.connect()
-        return dev
-
-    if cfg.get("device", "simulate", default=False):
-        from .simulator import SimulatedDevice
-        dev = SimulatedDevice()
         dev.connect()
         return dev
     port = cfg.get("device", "port", default="") or ""
