@@ -264,6 +264,27 @@ body.demo #card-casefiles { display:none !important; }
   --ok-bg:#103c2c; --warn-bg:#3b2c10; --err-bg:#3b1515; --info-bg:#0d2433; --neutral-bg:#1c2733;
   font-family:'Consolas','Cascadia Mono',monospace;
 }
+/* ---- mid-sweep split monitor: sweep keeps running in one pane, the live
+   monitor (reparented #inspect-panel) opens in the other. split off = layout
+   byte-identical to before (pane-main recreates the overlay's column+gap). ---- */
+#sweep-split { display:flex; flex-direction:row; justify-content:center; width:100%; min-height:0; }
+#sweep-pane-main { display:flex; flex-direction:column; align-items:center; gap:26px;
+                   flex:1 1 auto; min-width:0; width:100%; }
+#sweep-pane-monitor { display:none; min-width:0; }
+#sweep-overlay.split-on { justify-content:flex-start; overflow:auto; padding:18px 0; }
+#sweep-overlay.split-on #sweep-split { gap:14px; padding:0 1%; }
+#sweep-overlay.split-on #sweep-pane-main { flex:1 1 56%; }
+#sweep-overlay.split-on #sweep-pane-monitor { display:block; flex:0 0 42%; max-height:78vh;
+  overflow:auto; background:var(--panel); border:1px solid var(--line); border-radius:4px; padding:10px; }
+#sweep-overlay.split-on #sweep-pane-main .sweep-stage,
+#sweep-overlay.split-on #sweep-pane-main .info-pane { width:100%; }
+/* stacked variant (⇅): sweep on top, monitor below */
+#sweep-overlay.split-h #sweep-split { flex-direction:column; align-items:center; }
+#sweep-overlay.split-h.split-on #sweep-pane-monitor { flex:0 0 auto; width:96%; max-height:46vh; }
+#sweep-mon-head { display:flex; gap:8px; align-items:center; margin-bottom:8px; }
+#sweep-monitor-slot > .card { margin:0; }
+.seg-item.freqlink { cursor:pointer; }
+.seg-item.freqlink:hover { background:var(--hover); }
 /* ---- style switcher (footer) ---- */
 .themebar { display:flex; align-items:center; gap:3px; }
 .themebar .tb-lbl { font-size:10px; letter-spacing:.14em; color:var(--dim); margin-right:4px; }
@@ -1161,6 +1182,12 @@ body.demo #card-casefiles { display:none !important; }
   <div class="msg" id="sweep-overlay-title">SWEEPING</div>
   <div style="width:70%"><div class="progress"><div id="sweep-bar"></div></div></div>
   <div class="sub" id="sweep-overlay-detail"></div>
+  <!-- mid-sweep SPLIT (2026-07-11): clicking any frequency while sweeping splits
+       this overlay — the sweep keeps running in pane-main, the live monitor
+       (the #inspect-panel, reparented by SweepSplit in app.js) opens beside or
+       below it. Orientation is an operator toggle (⇄ / ⇅), persisted. -->
+  <div id="sweep-split">
+  <div id="sweep-pane-main">
   <div class="sweep-stage">
     <div class="chart-col">
       <div class="chart-wrap">
@@ -1217,6 +1244,18 @@ body.demo #card-casefiles { display:none !important; }
   <div class="scroll info-pane" id="pane-catalog" style="display:none; max-height:150px; background:var(--panel)">
     <div id="catalog-body"></div>
   </div>
+  </div><!-- /sweep-pane-main -->
+  <div id="sweep-pane-monitor">
+    <div id="sweep-mon-head">
+      <b style="color:var(--cyan);letter-spacing:1px">LIVE MONITOR</b>
+      <span class="note" id="sweep-mon-note"></span>
+      <span style="flex:1 1 auto"></span>
+      <button class="btn" id="btn-split-orient" title="flip the split: side-by-side ⇄ stacked">⇅</button>
+      <button class="btn" id="btn-split-close" title="close the monitor pane (stops listening)">✕</button>
+    </div>
+    <div id="sweep-monitor-slot"></div>
+  </div>
+  </div><!-- /sweep-split -->
   <div class="row">
     <div class="sub" id="sweep-overlay-eta"></div>
     <button class="btn" id="btn-sustain" title="Hold this segment — keep sweeping it live until you resume">⏸ SUSTAIN SEGMENT</button>

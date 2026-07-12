@@ -4,6 +4,34 @@ Continuation brief for a fresh Fable/Claude Code session. Read this first, then 
 
 ---
 
+# ⚡ 2026-07-11 (third ask) — mid-sweep SPLIT-SCREEN monitor
+
+Operator: "when sweeping — no matter what kind of sweep — when I click a frequency
+(an anomaly for example), the screen should split horizontally or vertically (code
+in the option)." Confirmed via Q&A: second pane = the FULL live monitor; default
+side-by-side with a persisted ⇄/⇅ toggle; one-radio clicks still split (degraded,
+honest note); split is a sweep-overlay behavior only.
+
+- `SweepSplit` (app.js, after liftInspectPanel): REPARENTS `#inspect-panel` into
+  `#sweep-monitor-slot` inside the overlay; `inspectByFreq` auto-splits whenever
+  the overlay is visible + a sweep is running, so EVERY freqlink source (live
+  ledger, seg-panel anomalies — now clickable — hunt/triage rows) gets it free.
+- Panes: `#sweep-split` > `#sweep-pane-main` (stage+tabs+panes, layout
+  byte-identical when split is off) + `#sweep-pane-monitor` (head: LIVE MONITOR ·
+  note · ⇄/⇅ orientation toggle persisted in localStorage `sweepSplitOrient` ·
+  ✕ close). CSS `split-on`/`split-v`/`split-h` on `#sweep-overlay`.
+- Lifecycle: ✕ = stop listen + hide panel; sweep END or RUN IN BACKGROUND =
+  `detach()` — the panel returns to the page STILL PLAYING (a Pluto listen
+  survives the overlay). One radio: the monitor panel opens degraded with
+  "the sweep holds the radio — plug in the Pluto to hear it live".
+- Verified in --simulate preview: click → split-v side-by-side (panes 714px/527px),
+  toggle → stacked, persisted; ✕ → restored+hidden; sweep-end → detached+visible;
+  no JS errors; 373 tests green (no Python changes).
+- NOT yet verified on hardware: the dual-radio case (B220 sweeping + Pluto audio
+  in the split) — bench-check next time both radios are up.
+
+---
+
 # ⚡⚡ 2026-07-11 (later) — manual sweep keeps sweeping + operator RBW + waterfall alignment + SIMULATE-B220 guard
 
 Second operator voice dump today: (1) manual mode should KEEP SWEEPING until NEXT is

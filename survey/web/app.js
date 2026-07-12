@@ -512,6 +512,7 @@ function render(st) {
     }
   } else if (!st.sweep.running) {
     so.classList.remove("show");
+    SweepSplit.detach();       // give the monitor panel back to the page (keeps playing)
     App.overlayHidden = false;
     App.liveSweepSignals = [];
     // F3 focus/mute are sweep-overlay-only — clear them so they don't bleed into
@@ -1416,7 +1417,8 @@ function freqLinkDelegate(e) {
   const sid = a.dataset.sid ? parseInt(a.dataset.sid, 10) : null;
   listenAt(parseFloat(a.dataset.center), a.dataset.label || "", a.dataset.mode || undefined, sid, a.dataset.attr || null);
 }
-["tbl-anomalies", "tbl-signals", "tbl-wiki", "tbl-hunt", "tbl-triage", "tbl-live-ledger"].forEach(id => {
+["tbl-anomalies", "tbl-signals", "tbl-wiki", "tbl-hunt", "tbl-triage", "tbl-live-ledger",
+ "seg-anomalies"].forEach(id => {
   const el = $(id);
   if (el) el.addEventListener("click", freqLinkDelegate, true);  // capture: beat the row onclick
 });
@@ -1614,6 +1616,15 @@ function drawSignalHistory(cv) {
 // pick_mode / the <select> decide. The `tuneId` guards against a stale async
 // fallback stomping a newer tune (multiple lists can drive the same panel).
 function inspectByFreq(center, label, mode, sid, attr) {
+  // mid-sweep: any frequency click SPLITS the sweep overlay so the sweep stays
+  // on screen while the monitor tunes (SweepSplit reparents this panel). Only
+  // when the overlay is actually visible — backgrounded sweeps keep the normal
+  // inline monitor.
+  const _ov = $("sweep-overlay");
+  if (_ov && _ov.classList.contains("show")
+      && App.state && App.state.sweep && App.state.sweep.running) {
+    SweepSplit.open();
+  }
   const tuneId = (App.tuneId = (App.tuneId || 0) + 1);
   App.inspCenter = center; App.inspLabel = label;   // for mode <select> re-tune
   App.demodMhz = center;                             // demod tuner starts at band center (offset 0)
@@ -2003,6 +2014,66 @@ if ($("insp-analyzer")) $("insp-analyzer").addEventListener("wheel", (e) => { e.
   const sec = p && p.closest("section.view");
   if (p && sec && sec.parentElement) sec.parentElement.appendChild(p);
 })();
+
+/* ---------- mid-sweep SPLIT monitor (operator ask 2026-07-11) ---------- */
+// Clicking any frequency while a sweep is running splits the sweep overlay:
+// the sweep keeps drawing in one pane, the live monitor (#inspect-panel,
+// reparented into the overlay) opens in the other. Orientation is a persisted
+// toggle: split-v = side-by-side (default), split-h = stacked. With only one
+// radio the monitor degrades honestly (the sweeper holds it) — plug in the
+// Pluto and the same click gives live audio while the sweep continues.
+const SweepSplit = {
+  active: false, _home: null, _homeNext: null,
+  orient() { return localStorage.getItem("sweepSplitOrient") || "v"; },
+  setOrient(o) {
+    localStorage.setItem("sweepSplitOrient", o);
+    const ov = $("sweep-overlay");
+    ov.classList.toggle("split-v", o === "v");
+    ov.classList.toggle("split-h", o === "h");
+    const b = $("btn-split-orient");
+    if (b) b.textContent = o === "v" ? "⇅" : "⇄";     // icon shows what it flips TO
+  },
+  open() {
+    const ov = $("sweep-overlay"), p = $("inspect-panel");
+    if (!ov || !p) return false;
+    if (this.active) return true;                      // already split — just retune
+    this._home = p.parentNode; this._homeNext = p.nextSibling;
+    $("sweep-monitor-slot").appendChild(p);
+    ov.classList.add("split-on");
+    this.setOrient(this.orient());
+    const roles = (App.state && App.state.roles && App.state.roles.roles) || [];
+    const plutoMon = roles.some(r => r.source === "pluto" && r.role === "monitor");
+    const note = $("sweep-mon-note");
+    if (note) note.textContent = plutoMon
+      ? "on the Pluto — the sweep keeps running"
+      : "the sweep holds the radio — plug in the Pluto to hear it live";
+    this.active = true;
+    return true;
+  },
+  // ✕ button: operator is done with the monitor — stop the stream, hide the panel
+  close() {
+    if (!this.active) return;
+    try { listenStop(); stopSpectrumPoll(); } catch (e) {}
+    this._restore();
+    const p = $("inspect-panel");
+    if (p) p.style.display = "none";
+  },
+  // overlay going away (sweep ended / RUN IN BACKGROUND): give the panel back to
+  // the page but KEEP it open — a live listen on the Pluto survives the overlay
+  detach() {
+    if (!this.active) return;
+    this._restore();
+  },
+  _restore() {
+    const p = $("inspect-panel"), ov = $("sweep-overlay");
+    if (p && this._home) this._home.insertBefore(p, this._homeNext);
+    if (ov) ov.classList.remove("split-on", "split-v", "split-h");
+    this.active = false;
+  },
+};
+if ($("btn-split-close")) $("btn-split-close").onclick = () => SweepSplit.close();
+if ($("btn-split-orient")) $("btn-split-orient").onclick = () =>
+  SweepSplit.setOrient(SweepSplit.orient() === "v" ? "h" : "v");
 
 /* ---------- monitor: fused ANALYZE ("what is it?") + RECORD ---------- */
 
@@ -2813,7 +2884,10 @@ function renderSegPanel(st) {
   if (cEl) cEl.textContent = anoms.length ? `(${anoms.length})` : "";
   const anEl = $("seg-anomalies");
   if (anEl) anEl.innerHTML = anoms.slice(-40).reverse().map(a =>
-    `<div class="seg-item anom"><span class="f">${fmtF(a.center_mhz)}</span>` +
+    `<div class="seg-item anom freqlink" data-center="${a.center_mhz}" ` +
+    `data-label="${esc(a.label || a.reason || "anomaly")}" ` +
+    `title="click to monitor this signal (splits the screen)">` +
+    `<span class="f">${fmtF(a.center_mhz)}</span>` +
     `<span class="n">${esc(a.label || a.reason || "")}</span></div>`).join("");
 }
 
@@ -3103,6 +3177,7 @@ $("abort-erase").onclick = async () => {
 };
 $("btn-hide-overlay").onclick = () => {
   App.overlayHidden = true; $("sweep-overlay").classList.remove("show");
+  SweepSplit.detach();   // monitor panel returns to the page and keeps playing
 };
 
 /* ---------- rooms ---------- */
