@@ -1,6 +1,7 @@
 # runtime artifacts — sweep data and client reports are SENSITIVE, never commit
 data/
 reports/
+logs/
 cache/
 capture_images/
 case_files/

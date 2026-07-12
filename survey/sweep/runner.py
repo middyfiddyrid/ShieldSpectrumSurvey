@@ -140,7 +140,10 @@ class SweepController:
         self.listen_stops.setdefault(src, threading.Event())
         # self.device is the SWEEPER: in dual mode keep the existing sweeper so a
         # sweep stays on the RFE while the just-added Pluto becomes the monitor.
-        if not (keep_other and self.concurrent_enabled()) or self.device is None:
+        # src == active_source: a same-source RECONNECT of the sweeper must take
+        # over the handle, or self.device keeps pointing at the dead radio.
+        if (not (keep_other and self.concurrent_enabled()) or self.device is None
+                or src == self.active_source):
             self.device = dev
             self.active_source = src
         # dual mode: default the Pluto to monitor — so once the Pluto plus ANY
@@ -159,7 +162,12 @@ class SweepController:
     def _ensure_device(self):
         if self.device is None or not self.device.is_alive():
             log.warning("device missing or dead — reconnecting")
-            self.connect_device()
+            # reconnect the radio we were actually using, NOT the config-file
+            # default (roles may differ from device.source after a promotion or
+            # swap), and keep the concurrent monitor open instead of closing
+            # every radio for a sweeper-only hiccup
+            self.connect_device(source=self.active_source,
+                                keep_other=self.active_source is not None)
 
     def module_ranges(self) -> list[dict]:
         """Module list with REAL frequency ranges. The connect-time read of the
@@ -183,7 +191,10 @@ class SweepController:
     def _reconnect(self):
         log.warning("Serial problem — attempting reconnect")
         time.sleep(2.0)
-        self.connect_device()
+        # same rule as _ensure_device: mid-sweep reconnects go to the radio the
+        # sweep was running on and never tear down the other radio's stream
+        self.connect_device(source=self.active_source,
+                            keep_other=self.active_source is not None)
 
     # ---- sweep lifecycle ----
 
@@ -349,22 +360,6 @@ class SweepController:
         return {"roles": roles, "concurrent_enabled": self.concurrent_enabled(),
                 "active_source": self.active_source}
 
-    def device_roles(self) -> dict:
-        """What each connected radio is doing — for the UI to show 'RFE sweeping +
-        Pluto monitoring' and decide live vs post-hoc triage."""
-        _, _, _, mon_src = self.monitor_target()
-        roles = []
-        for src, dev in self.devices.items():
-            if src == self.active_source:
-                role = "sweeper"
-            elif src == mon_src:
-                role = "monitor"
-            else:
-                role = "idle"
-            roles.append({"source": src, "role": role, "busy": self.busy(src)})
-        return {"roles": roles, "concurrent_enabled": self.concurrent_enabled(),
-                "active_source": self.active_source}
-
     def abort(self, erase: bool = False):
         """Stop the active worker. erase=False (default) is 'pause the radio,
         save the session' — everything recorded so far is kept. erase=True is a
@@ -412,10 +407,22 @@ class SweepController:
         with self._lock:
             self.state.update(kw)
 
+    def _assert_sweep_startable(self):
+        """A sweep needs the SWEEP radio free. A monitor worker (record / DF) on
+        the OTHER radio must not block it — 'one radio sweeping, the other honing
+        in' is the whole point of dual mode. It still blocks in legacy single-
+        device mode or when the worker is bound to the sweeper itself."""
+        if self._thread and self._thread.is_alive():
+            raise RuntimeError("a sweep is already running")
+        if self._monitor_thread and self._monitor_thread.is_alive():
+            if (not self.concurrent_enabled()
+                    or self._monitor_source == self.active_source):
+                raise RuntimeError("the monitor is recording on the sweep radio — "
+                                   "stop it before sweeping")
+
     def start_sweep(self, session_id: int, phase: str, module: str, room: str,
                     plan, manual_advance: bool = False, rbw_khz=None, on_done=None):
-        if self.busy():
-            raise RuntimeError("a sweep is already running")
+        self._assert_sweep_startable()
         self.listen_stop.set()           # stop any live audio stream and let it release the radio
         time.sleep(0.4)
         self._ensure_device()
@@ -635,6 +642,9 @@ class SweepController:
         acc = None
         if keep is None:
             keep = lambda: self.sustain_flag                       # noqa: E731
+        # LIVE RETUNE: while watching this segment, an RBW change should take
+        # effect on the NEXT FRAME (~sub-second), not wait for the next segment.
+        applied_rbw = getattr(self, "rbw_khz", None)
         if set_sustaining:
             self._set(sustaining=True,
                       message=f"segment {idx + 1}/{total} SUSTAINED — live on "
@@ -643,6 +653,16 @@ class SweepController:
         try:
             dev.set_calculator("maxhold")
             while keep() and not self.abort_event.is_set():
+                # operator turned the RBW knob mid-segment -> re-tune the grid now
+                cur_rbw = getattr(self, "rbw_khz", None)
+                if cur_rbw != applied_rbw:
+                    try:
+                        dev.set_rbw_khz(cur_rbw)
+                        dev.set_range(seg.low_mhz, seg.high_mhz)   # rebuild grid at new RBW
+                        acc = None                                 # Accumulator resets to the new size
+                    except (DeviceError, OSError):
+                        pass
+                    applied_rbw = cur_rbw
                 frame = dev.read_sweep(timeout_s=3.0)
                 if frame is None:
                     continue

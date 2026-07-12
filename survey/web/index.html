@@ -281,7 +281,7 @@ body.demo #card-casefiles { display:none !important; }
 /* stacked variant (⇅): sweep on top, monitor below */
 #sweep-overlay.split-h #sweep-split { flex-direction:column; align-items:center; }
 #sweep-overlay.split-h.split-on #sweep-pane-monitor { flex:0 0 auto; width:96%; max-height:46vh; }
-#sweep-mon-head { display:flex; gap:8px; align-items:center; margin-bottom:8px; }
+#sweep-mon-head, #page-mon-head { display:flex; gap:8px; align-items:center; margin-bottom:8px; }
 #sweep-monitor-slot > .card, #page-monitor-slot > .card { margin:0; }
 .seg-item.freqlink { cursor:pointer; }
 .seg-item.freqlink:hover { background:var(--hover); }
@@ -522,6 +522,7 @@ body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid va
       <span class="ctl-sep"></span>
       <label class="note" title="actions on THIS signal">act</label>
       <button class="btn primary" id="insp-analyze" title="receive & identify — what IS this signal & what's it transmitting?">◎ ANALYZE</button>
+      <button class="btn" id="insp-dissem" title="per-class next action for this signal — runs ANALYZE first if needed, then offers LISTEN / DECODE / CAPTURE EVIDENCE">✈ DISSEMINATE</button>
       <button class="btn" id="insp-record" title="record demodulated audio of this signal">● REC</button>
       <button class="btn" id="insp-record-iq" title="capture RAW IQ as forensic evidence (encrypted / unknown intruder — for authorities)">⦿ IQ</button>
       <button class="btn ctl-push" id="insp-close">Close ✕</button>
@@ -1161,7 +1162,7 @@ body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid va
 
 </div><!-- /panel -->
 <div id="page-monitor-pane">
-  <div id="sweep-mon-head" style="margin:0 0 8px">
+  <div id="page-mon-head" style="margin:0 0 8px">
     <b style="color:var(--cyan);letter-spacing:1px">LIVE MONITOR</b>
     <span class="note" id="page-mon-note"></span>
     <span style="flex:1 1 auto"></span>

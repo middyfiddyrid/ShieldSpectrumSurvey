@@ -229,6 +229,55 @@ class TestConcurrency(unittest.TestCase):
         with self.assertRaises(RuntimeError):          # same radio both roles
             c.set_roles(sweeper="pluto", monitor="pluto")
 
+    # ---- sweep-start gate: a monitor worker on the OTHER radio must not block ----
+
+    def test_sweep_start_allowed_while_monitor_records_other_radio(self):
+        c = self._dual()                               # rfexplorer sweeper, pluto monitor
+        c._monitor_thread = _AliveThread()             # recording/DF running...
+        c._monitor_source = "pluto"                    # ...on the MONITOR radio
+        c._assert_sweep_startable()                    # must not raise
+
+    def test_sweep_start_blocked_when_monitor_holds_sweep_radio(self):
+        c = self._dual()
+        c._monitor_thread = _AliveThread()
+        c._monitor_source = "rfexplorer"               # worker holds the SWEEPER
+        with self.assertRaises(RuntimeError):
+            c._assert_sweep_startable()
+
+    def test_sweep_start_blocked_by_monitor_in_legacy_mode(self):
+        c = SweepController(self.db, self.cfg)         # flag OFF
+        c.connect_device("pluto")
+        c._monitor_thread = _AliveThread()
+        c._monitor_source = "pluto"
+        with self.assertRaises(RuntimeError):
+            c._assert_sweep_startable()
+
+    # ---- sweeper reconnect: keep the monitor open, take over the new handle ----
+
+    def test_sweeper_reconnect_keeps_monitor_and_updates_handle(self):
+        c = self._dual()                               # rfexplorer sweeper, pluto monitor
+        old = c.devices["rfexplorer"]
+        old.closed = True                              # sweeper USB dropped
+        c._ensure_device()                             # reconnects the SWEEPER source
+        self.assertEqual(c.active_source, "rfexplorer")
+        self.assertIsNot(c.device, old)                # new handle took over
+        self.assertIs(c.device, c.devices["rfexplorer"])
+        self.assertIn("pluto", c.devices)              # monitor NOT torn down
+        self.assertFalse(c.devices["pluto"].closed)
+
+    def test_reconnect_follows_roles_not_config_default(self):
+        # config says rfexplorer, but the operator's sweeper is the B220 —
+        # a mid-sweep reconnect must go back to the B220, not the config default
+        self.cfg.data["pluto"]["concurrent_monitor"] = True
+        self.cfg.data["device"]["source"] = "rfexplorer"
+        c = SweepController(self.db, self.cfg)
+        c.connect_device("b220")
+        c.devices["b220"].closed = True
+        c._reconnect()
+        self.assertEqual(c.active_source, "b220")
+        self.assertIn("b220", c.devices)
+        self.assertTrue(c.devices["b220"].is_alive())
+
     def test_b220_sweeper_promotion_regardless_of_connect_order(self):
         # generalized role rule: with the Pluto + ANY other radio open, the other
         # radio is the sweeper — even when the Pluto was connected first.

@@ -83,8 +83,27 @@ def create_app(db, cfg, demo=False) -> Flask:
     # hands-free second radio: keep seeking the Pluto so it auto-joins as the
     # monitor the moment it's plugged in (operator ask — never hand-connect it).
     # No-op in the public demo (simulated device) and until a sweeper is connected.
+    # (The startup auto-connect of the SWEEPER lives in app.py so the test suite,
+    # which builds create_app directly, never spins up hardware.)
     if not demo:
         st.controller.start_monitor_autoseek()
+
+    def start_autoconnect():
+        """Background auto-connect of the configured sweeper (device.source) +
+        Pluto monitor. Called by app.py at launch (not create_app, to keep tests
+        hardware-free). Non-fatal: an unplugged radio just logs and the operator
+        can still connect in the DEVICE card."""
+        def _run():
+            src = str(cfg.get("device", "source", default="rfexplorer")).strip().lower()
+            try:
+                st.controller.connect_device(source=src)
+                log.info("startup: auto-connected the sweeper (%s)", src)
+                st.controller.autoseek_monitor()
+            except Exception as e:  # noqa: BLE001
+                log.warning("startup auto-connect of %s failed (connect it in the "
+                            "DEVICE card): %s", src, e)
+        threading.Thread(target=_run, daemon=True).start()
+    app.config["START_AUTOCONNECT"] = start_autoconnect
 
     def err(message, code=400):
         return jsonify({"error": str(message)}), code
@@ -567,8 +586,12 @@ def create_app(db, cfg, demo=False) -> Flask:
             info = st.controller.connect_device(source=source, keep_other=keep_other)
         except Exception as e:  # noqa: BLE001
             return err(e, 502)
-        # remember the operator's pick so the next launch defaults to it
-        if source:
+        # remember the operator's SWEEPER pick so the next launch defaults to
+        # it — but ONLY when this radio actually ended up as the sweeper.
+        # Connecting the Pluto as the second radio (keep_other monitor) used to
+        # rewrite device.source: pluto, so the NEXT launch made the Pluto the
+        # sweeper: no monitor, no auto-B220, dual-radio split dead on arrival.
+        if source and st.controller.active_source == source:
             try:
                 cfg.set_and_save(("device", "source"), source)
             except Exception:  # noqa: BLE001
@@ -1001,7 +1024,7 @@ def create_app(db, cfg, demo=False) -> Flask:
             squelch_hang_blocks=int(_dnum("squelch_hang_blocks", 3)),
             deemphasis_us=float(_dnum("deemphasis_us", 75.0)))
         sq_default = _mcfg(msrc, "listen_squelch_snr_db", 5.0)
-        last_off, last_bw = 0.0, None
+        last_off, last_bw, demod_errs = 0.0, None, 0
         mstop.set()                           # preempt whatever stream is running now
         with mlock:                           # wait for the previous user of THIS radio to release
             mstop.clear()
@@ -1022,7 +1045,11 @@ def create_app(db, cfg, demo=False) -> Flask:
                         sq = getattr(st.controller, "listen_squelch_snr_db", None)
                         pcm, arate = demodulate(iq, fs, mode, off, bw,
                                                 state=dstate, squelch_snr_db=sq)
-                    except Exception:  # noqa: BLE001
+                    except Exception as e:  # noqa: BLE001
+                        demod_errs += 1
+                        if demod_errs == 1:   # first failure per stream, no spam
+                            log.warning("live demod error on %s: %s: %s",
+                                        msrc, type(e).__name__, e)
                         continue
                     yield pcm, arate
                     # live analyzer + scrolling waterfall from the WHOLE block.
@@ -1072,8 +1099,12 @@ def create_app(db, cfg, demo=False) -> Flask:
                                 "vmin": nf_ema + span_lo, "vmax": nf_ema + span_hi}}
                     except Exception:  # noqa: BLE001
                         pass
-            except Exception:  # noqa: BLE001 - client disconnect / device error
-                pass
+            except Exception as e:  # noqa: BLE001 - client disconnect / device error
+                # a retune/closed tab also lands here, so keep it to one line —
+                # but a dead radio (Errno 5 / USB drop) must never die silently:
+                # this line is the field evidence for "the monitor radio failed"
+                log.warning("live monitor stream on %s ended: %s: %s",
+                            msrc, type(e).__name__, e)
             finally:
                 st.controller.listening = False
                 st.controller.listen_spectrum = None

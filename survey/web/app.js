@@ -354,9 +354,39 @@ window.csOpen = (c) => {
 async function poll() {
   try {
     App.state = await api("/api/state");
+    if (App._pollFails >= 3) hideServerLostBanner();
+    App._pollFails = 0;
     render(App.state);
-  } catch (e) { $("ft-msg").textContent = "server unreachable: " + e.message; }
+  } catch (e) {
+    App._pollFails = (App._pollFails || 0) + 1;
+    $("ft-msg").textContent = "server unreachable: " + e.message;
+    if (App._pollFails === 3) showServerLostBanner();
+  }
   setTimeout(poll, 1000);
+}
+
+// The radio drivers run in-process: a USB fault can kill the whole backend, and
+// then every click silently does nothing — the split screen "doesn't work", the
+// buttons "don't work". Make that state impossible to miss and self-explaining.
+function showServerLostBanner() {
+  let b = $("server-lost-banner");
+  if (!b) {
+    b = document.createElement("div");
+    b.id = "server-lost-banner";
+    b.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:9999;" +
+      "background:#7a1010;color:#fff;font:bold 13px monospace;" +
+      "padding:10px 16px;text-align:center;border-bottom:2px solid #ff5252";
+    document.body.appendChild(b);
+  }
+  b.textContent = "⛔ RADIO SERVER LINK LOST — the app process crashed or was closed " +
+    "(clicks won't do anything). The launcher window restarts it in ~5 s; if that " +
+    "window is closed, run START Shield Sweep again. Reconnecting…";
+  b.style.display = "";
+}
+function hideServerLostBanner() {
+  const b = $("server-lost-banner");
+  if (b) b.style.display = "none";
+  $("ft-msg").textContent = "reconnected";
 }
 
 function dot(id, cls) {
@@ -1654,7 +1684,13 @@ function inspectByFreq(center, label, mode, sid, attr) {
   $("inspect-panel").style.display = "";
   $("insp-title").textContent = `${fmtF(center)} · ${label || ""}`;   // fmtF already carries the unit
   $("inspect-panel").scrollIntoView({ block: "center" });   // instant — no smooth-scroll animation delay
-  const ao = $("insp-analyze-out"); if (ao) ao.style.display = "none";
+  // keep the ANALYZE card (and its DISSEMINATE row) when re-tuning the SAME
+  // signal (mode change, DISSEMINATE ▶ LISTEN) — hiding it on its own button
+  // click was why "the disseminate button isn't there"; hide only on a new signal
+  const ao = $("insp-analyze-out");
+  const la = App.lastAnalyze;
+  const sameSig = la && la.center_mhz != null && Math.abs(la.center_mhz - center) < 0.0005;
+  if (ao && !sameSig) ao.style.display = "none";
   loadRecordings();
   stopSpectrumPoll();
   listenStop();
@@ -2073,11 +2109,13 @@ const MonitorDock = {
     this.mode = "overlay";
     this._applyOrient();
     const roles = (App.state && App.state.roles && App.state.roles.roles) || [];
-    const plutoMon = roles.some(r => r.source === "pluto" && r.role === "monitor");
+    // any SDR serving as monitor gives live audio during the sweep — the B220
+    // can hold that role too (swap/assign), not just the Pluto
+    const mon = roles.find(r => r.role === "monitor" && SDR_SOURCES.has(r.source));
     const note = $("sweep-mon-note");
-    if (note) note.textContent = plutoMon
-      ? "on the Pluto — the sweep keeps running"
-      : "the sweep holds the radio — plug in the Pluto to hear it live";
+    if (note) note.textContent = mon
+      ? `on the ${mon.source === "b220" ? "B220 Mini" : "Pluto"} — the sweep keeps running`
+      : "the sweep holds the radio — plug in the second radio to hear it live";
   },
   openPage() {
     const p = this._stash();
@@ -2093,10 +2131,14 @@ const MonitorDock = {
         ? "sweep running in the background" : "";
     p.style.display = "";
   },
-  // ✕: operator is done — stop the stream, put the panel home, hide it
+  // ✕: operator is done — stop the stream, put the panel home, hide it.
+  // Mirrors insp-close: also stop AUTO hunt-stepping (or the dock reopens on
+  // the next dwell tick) and silence the <audio> fallback element.
   close() {
     if (!this.mode) return;
-    try { listenStop(); stopSpectrumPoll(); } catch (e) {}
+    try { stopAuto(); listenStop(); stopSpectrumPoll(); } catch (e) {}
+    const a = $("insp-audio");
+    if (a) { a.pause(); a.removeAttribute("src"); }
     const p = this._restore();
     if (p) p.style.display = "none";
   },
@@ -2246,7 +2288,13 @@ function suggestedModeFor(j) {
 }
 
 function dissemRow(j) {
-  if (!j.in_range || !j.features) return "";   // freq-only analyze: nothing was received
+  if (!j.in_range || !j.features) {
+    // freq-only analyze: nothing was received — say WHY there are no actions
+    // instead of silently omitting the row (looks like a missing button)
+    return "<div class='note' style='margin-top:6px;border-top:1px solid #26303d;padding-top:4px'>" +
+           "DISSEMINATE: no actions — " +
+           esc(j.note || "nothing was received (frequency-only match)") + "</div>";
+  }
   const r = ((j.interpretation || {}).readable) || "unknown";
   const f = j.features || {};
   const d = j.decode;
@@ -2346,7 +2394,22 @@ async function loadRecordings() {
     }).join("");
 }
 
+// ✈ DISSEMINATE is ALWAYS in the panel (operator ask 2026-07-12): re-open the
+// last ANALYZE card for this signal if we have one, else run ANALYZE first —
+// either way it lands on the per-class action row (LISTEN / DECODE / CAPTURE).
+async function dissemOpen() {
+  const la = App.lastAnalyze;
+  const sameSig = la && App.inspCenter != null && la.center_mhz != null &&
+                  Math.abs(la.center_mhz - App.inspCenter) < 0.0005;
+  if (!sameSig) await analyzeSignal();
+  const out = $("insp-analyze-out");
+  if (out && out.innerHTML) {
+    out.style.display = "";
+    out.scrollIntoView({ block: "nearest" });
+  }
+}
 if ($("insp-analyze")) $("insp-analyze").onclick = analyzeSignal;
+if ($("insp-dissem")) $("insp-dissem").onclick = dissemOpen;
 if ($("insp-record")) $("insp-record").onclick = () => toggleRecord("audio");
 if ($("insp-record-iq")) $("insp-record-iq").onclick = () => toggleRecord("iq");
 

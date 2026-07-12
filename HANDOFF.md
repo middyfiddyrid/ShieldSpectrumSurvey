@@ -4,6 +4,60 @@ Continuation brief for a fresh Fable/Claude Code session. Read this first, then 
 
 ---
 
+# ⚡⚡ 2026-07-12 (seventh ask) — "split screen will not work / why can't both radios run / disseminate button needs to be there"
+
+Root causes found (all three layers, in order of what the operator actually hit):
+1. **The app was DEAD.** Windows Event Log: python3.12 crashed 0xc0000409
+   (fastfail in ucrtbase.dll — native radio-driver abort) 4× on Jul 10–11.
+   Nothing logged, launcher never restarted, UI showed nothing — clicks did
+   nothing, so "the split doesn't work".
+2. **device.source had been silently rewritten to `pluto`.** /api/device/connect
+   persisted ANY explicit source — including the "add the Pluto as monitor,
+   keep_other:true" click. Next launch: Pluto = SWEEPER → autoseek bails (it
+   only seeks the Pluto, and only when the sweeper is non-Pluto) → B220 never
+   auto-connects → one radio, wrong role, split degraded.
+3. Disseminate existed only as a ROW inside the ◎ ANALYZE output, and EVERY
+   retune — including the row's own ▶ LISTEN button and a mode change — hid it
+   (`inspectByFreq` unconditionally hid #insp-analyze-out).
+
+## SHIPPED (388 tests green, verified in --simulate preview)
+- **Persist rule fixed** (server.py device_connect): device.source saved ONLY
+  when the connected radio actually became the sweeper (active_source==source).
+  config.yaml restored to `device.source: b220`. New tests/test_device_source_persist.py.
+- **Reconnect follows roles, keeps the monitor** — `_ensure_device`/`_reconnect`
+  now reconnect `self.active_source` with keep_other (was: no-arg connect_device →
+  re-resolved the CONFIG default mid-sweep and closed the monitor). Same-source
+  sweeper reconnect now takes over the handle (was: self.device kept the dead one).
+- **Sweep-start gate is dual-radio aware** — new `_assert_sweep_startable()`: a
+  monitor recording on the OTHER radio no longer blocks starting a sweep (was:
+  no-arg busy() → "a sweep is already running", the reverse of the intent).
+- **Crash forensics + auto-recovery**: app.py now logs to rotating `logs/app.log`
+  + `faulthandler` → `logs/crash.log` (per-thread stacks on native access
+  violations; fastfail 0xc0000409 is uncatchable but launcher covers it). BOTH
+  launcher .bats (Desktop + bundle) loop: nonzero exit → log to logs/launcher.log
+  → auto-restart in 5 s (Ctrl+C/clean exit ends). `_audio_blocks` device errors
+  are no longer swallowed silently (one-line log with source + exception).
+- **UI dead-server banner**: 3 failed /api/state polls → fixed red top banner
+  "RADIO SERVER LINK LOST … launcher restarts it in ~5 s"; clears on reconnect.
+- **✈ DISSEMINATE button is ALWAYS in the monitor panel header** (next to
+  ◎ ANALYZE): re-opens the last analyze card for this signal or runs ANALYZE,
+  then lands on the action row. The analyze card now SURVIVES same-signal
+  retunes (mode change, dissem ▶ LISTEN) and hides only on a new signal.
+  Freq-only/failed analyze renders an honest "DISSEMINATE: no actions — {note}"
+  row instead of silently omitting it. MonitorDock ✕ now also stops AUTO
+  stepping + the <audio> fallback (parity with insp-close). Overlay note is
+  B220-aware. Dup id sweep-mon-head → page-mon-head (page dock).
+
+## STILL THE REAL FIX (unbuilt, carried forward)
+Subprocess/worker isolation of the radio drivers: a native USB fault still
+kills the process (launcher now revives it ~5 s, losing an in-flight sweep
+segment). And the Pluto's flaky USB (Errno 5 / drops) is PHYSICAL — data cable,
+other-side USB port / powered hub, replug after a wedge. Dual-radio concurrency
+itself is software-proven; when both radios enumerate, B220 sweeps + Pluto
+monitors with independent locks.
+
+---
+
 # ⚡ 2026-07-12 (sixth ask) — LIVE RBW knob DURING the sweep
 
 Operator expected to adjust RBW while sweeping; the built control was pre-sweep +

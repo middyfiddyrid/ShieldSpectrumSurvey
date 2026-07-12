@@ -12,11 +12,14 @@ This is a RECEIVE-ONLY application. No transmit functionality of any kind.
 """
 
 import argparse
+import faulthandler
 import logging
 import os
 import sys
 import threading
 import webbrowser
+from datetime import datetime
+from logging.handlers import RotatingFileHandler
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
@@ -24,6 +27,8 @@ sys.path.insert(0, BASE_DIR)
 from survey.config import Config           # noqa: E402
 from survey.db import Database             # noqa: E402
 from survey.server import create_app       # noqa: E402
+
+_CRASH_LOG = None   # keeps faulthandler's target file open for the process life
 
 
 def main():
@@ -38,8 +43,35 @@ def main():
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
 
+    # console + rotating file: the radio drivers (UHD/libiio) run in-process in
+    # C++, so a USB fault can kill the whole app with nothing on screen — the
+    # console closes and every diagnostic dies with it. logs/app.log survives a
+    # crash; logs/crash.log gets a per-thread Python stack dump when a native
+    # fault (access violation) takes the process down.
+    log_dir = os.path.join(BASE_DIR, "logs")
+    handlers = [logging.StreamHandler()]
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+        handlers.append(RotatingFileHandler(
+            os.path.join(log_dir, "app.log"), maxBytes=5_000_000,
+            backupCount=5, encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - a read-only disk must not block launch
+        pass
     logging.basicConfig(level=logging.INFO,
-                        format="%(asctime)s %(name)s %(levelname)s %(message)s")
+                        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+                        handlers=handlers)
+    try:
+        # module-global keeps the file object alive for the process lifetime —
+        # faulthandler holds only the fd, which closes if this is GC'd
+        global _CRASH_LOG
+        _CRASH_LOG = open(os.path.join(log_dir, "crash.log"), "a", encoding="utf-8")
+        _CRASH_LOG.write(f"\n=== launch {datetime.now():%Y-%m-%d %H:%M:%S} "
+                         f"pid={os.getpid()} ===\n")
+        _CRASH_LOG.flush()
+        faulthandler.enable(file=_CRASH_LOG, all_threads=True)
+    except Exception:  # noqa: BLE001
+        pass
+    logging.getLogger("app").info("Shield Sweep starting (pid %d)", os.getpid())
 
     cfg = Config(os.path.join(BASE_DIR, "config.yaml"))
     demo = args.demo or os.environ.get("DCS_DEMO") == "1"
