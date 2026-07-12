@@ -114,6 +114,15 @@ def main():
     if not args.no_browser and not hosted and cfg.get("app", "open_browser", default=True):
         threading.Timer(1.2, lambda: webbrowser.open(url)).start()
 
+    # hands-free: auto-connect the configured radio at launch so the app is ready
+    # without a manual DEVICE-card connect (non-fatal if it's unplugged). Pairs
+    # with the launcher's crash auto-restart: crash -> relaunch -> radio ready.
+    # Skipped for the simulator/demo so a demo run never grabs hardware.
+    if not (args.simulate or demo):
+        ac = app.config.get("START_AUTOCONNECT")
+        if ac:
+            ac()
+
     print(f"Shield TSCM Spectrum Survey — {url}")
     app.run(host=host, port=port, debug=False, threaded=True)
 
