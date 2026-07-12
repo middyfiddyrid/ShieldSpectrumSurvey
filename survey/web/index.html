@@ -282,9 +282,19 @@ body.demo #card-casefiles { display:none !important; }
 #sweep-overlay.split-h #sweep-split { flex-direction:column; align-items:center; }
 #sweep-overlay.split-h.split-on #sweep-pane-monitor { flex:0 0 auto; width:96%; max-height:46vh; }
 #sweep-mon-head { display:flex; gap:8px; align-items:center; margin-bottom:8px; }
-#sweep-monitor-slot > .card { margin:0; }
+#sweep-monitor-slot > .card, #page-monitor-slot > .card { margin:0; }
 .seg-item.freqlink { cursor:pointer; }
 .seg-item.freqlink:hover { background:var(--hover); }
+/* ---- page-level monitor dock: same split, everywhere a frequency is clickable.
+   Dock off = layout identical to before (#page-split just passes flex through). ---- */
+#page-split { display:flex; flex:1; min-width:0; min-height:0; }
+#page-split > #panel { flex:1 1 auto; }
+#page-monitor-pane { display:none; min-width:0; overflow-y:auto; background:var(--panel2); padding:12px; }
+body.pdock-on #page-monitor-pane { display:block; }
+body.pdock-on.pdock-v #page-split { flex-direction:row; }
+body.pdock-on.pdock-v #page-monitor-pane { flex:0 0 42%; border-left:1px solid var(--line); }
+body.pdock-on.pdock-h #page-split { flex-direction:column; }
+body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid var(--line); }
 /* ---- style switcher (footer) ---- */
 .themebar { display:flex; align-items:center; gap:3px; }
 .themebar .tb-lbl { font-size:10px; letter-spacing:.14em; color:var(--dim); margin-right:4px; }
@@ -329,6 +339,10 @@ body.demo #card-casefiles { display:none !important; }
   <div class="step" data-view="calibration"><div class="dot" id="dot-calibration"></div>CALIBRATION (shop)</div>
 </nav>
 
+<!-- page-level monitor dock (2026-07-11): clicking a frequency ANYWHERE splits
+     the content area — the view you're on stays put, the live monitor docks
+     beside/below it (MonitorDock in app.js reparents #inspect-panel here). -->
+<div id="page-split">
 <div id="panel">
 
 <!-- ============ SESSION ============ -->
@@ -1145,7 +1159,18 @@ body.demo #card-casefiles { display:none !important; }
   </div>
 </section>
 
+</div><!-- /panel -->
+<div id="page-monitor-pane">
+  <div id="sweep-mon-head" style="margin:0 0 8px">
+    <b style="color:var(--cyan);letter-spacing:1px">LIVE MONITOR</b>
+    <span class="note" id="page-mon-note"></span>
+    <span style="flex:1 1 auto"></span>
+    <button class="btn" id="btn-pdock-orient" title="flip the split: side-by-side ⇄ stacked">⇅</button>
+    <button class="btn" id="btn-pdock-close" title="close the monitor pane (stops listening)">✕</button>
+  </div>
+  <div id="page-monitor-slot"></div>
 </div>
+</div><!-- /page-split -->
 </main>
 
 <footer>

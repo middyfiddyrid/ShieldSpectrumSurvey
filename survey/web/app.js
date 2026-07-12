@@ -512,7 +512,7 @@ function render(st) {
     }
   } else if (!st.sweep.running) {
     so.classList.remove("show");
-    SweepSplit.detach();       // give the monitor panel back to the page (keeps playing)
+    MonitorDock.overlayClosed();   // hand the monitor to the page dock (keeps playing)
     App.overlayHidden = false;
     App.liveSweepSignals = [];
     // F3 focus/mute are sweep-overlay-only — clear them so they don't bleed into
@@ -1616,14 +1616,15 @@ function drawSignalHistory(cv) {
 // pick_mode / the <select> decide. The `tuneId` guards against a stale async
 // fallback stomping a newer tune (multiple lists can drive the same panel).
 function inspectByFreq(center, label, mode, sid, attr) {
-  // mid-sweep: any frequency click SPLITS the sweep overlay so the sweep stays
-  // on screen while the monitor tunes (SweepSplit reparents this panel). Only
-  // when the overlay is actually visible — backgrounded sweeps keep the normal
-  // inline monitor.
+  // EVERY frequency click splits the screen (operator ask): sweep overlay up →
+  // split the overlay (sweep keeps drawing beside the monitor); anywhere else →
+  // dock the monitor beside the current view.
   const _ov = $("sweep-overlay");
   if (_ov && _ov.classList.contains("show")
       && App.state && App.state.sweep && App.state.sweep.running) {
-    SweepSplit.open();
+    MonitorDock.openOverlay();
+  } else {
+    MonitorDock.openPage();
   }
   const tuneId = (App.tuneId = (App.tuneId || 0) + 1);
   App.inspCenter = center; App.inspLabel = label;   // for mode <select> re-tune
@@ -2015,65 +2016,101 @@ if ($("insp-analyzer")) $("insp-analyzer").addEventListener("wheel", (e) => { e.
   if (p && sec && sec.parentElement) sec.parentElement.appendChild(p);
 })();
 
-/* ---------- mid-sweep SPLIT monitor (operator ask 2026-07-11) ---------- */
-// Clicking any frequency while a sweep is running splits the sweep overlay:
-// the sweep keeps drawing in one pane, the live monitor (#inspect-panel,
-// reparented into the overlay) opens in the other. Orientation is a persisted
-// toggle: split-v = side-by-side (default), split-h = stacked. With only one
-// radio the monitor degrades honestly (the sweeper holds it) — plug in the
-// Pluto and the same click gives live audio while the sweep continues.
-const SweepSplit = {
-  active: false, _home: null, _homeNext: null,
+/* ---------- monitor DOCK — split-screen monitor everywhere (2026-07-11) ---------- */
+// Clicking a frequency ANYWHERE splits the screen. Two contexts, one module:
+//   overlay — a sweep is running with the overlay up: the OVERLAY splits, the
+//             sweep keeps drawing in one pane, the monitor in the other
+//             (dual-radio: the Pluto plays live while the B220 sweeps);
+//   page    — everywhere else: the CONTENT AREA splits, the view you clicked
+//             from stays put and the monitor docks beside/below it.
+// One persisted orientation preference drives both (⇄ side-by-side / ⇅ stacked).
+// ✕ stops the listen; when the sweep overlay closes, a still-playing monitor is
+// handed to the page dock so the audio + spectra survive.
+const MonitorDock = {
+  mode: null,                       // null | "overlay" | "page"
+  _home: null, _homeNext: null,     // the panel's ORIGINAL spot (captured once)
   orient() { return localStorage.getItem("sweepSplitOrient") || "v"; },
   setOrient(o) {
     localStorage.setItem("sweepSplitOrient", o);
-    const ov = $("sweep-overlay");
-    ov.classList.toggle("split-v", o === "v");
-    ov.classList.toggle("split-h", o === "h");
-    const b = $("btn-split-orient");
-    if (b) b.textContent = o === "v" ? "⇅" : "⇄";     // icon shows what it flips TO
+    this._applyOrient();
   },
-  open() {
-    const ov = $("sweep-overlay"), p = $("inspect-panel");
-    if (!ov || !p) return false;
-    if (this.active) return true;                      // already split — just retune
-    this._home = p.parentNode; this._homeNext = p.nextSibling;
+  _applyOrient() {
+    const o = this.orient(), ov = $("sweep-overlay");
+    ov.classList.toggle("split-v", this.mode === "overlay" && o === "v");
+    ov.classList.toggle("split-h", this.mode === "overlay" && o === "h");
+    document.body.classList.toggle("pdock-v", this.mode === "page" && o === "v");
+    document.body.classList.toggle("pdock-h", this.mode === "page" && o === "h");
+    for (const id of ["btn-split-orient", "btn-pdock-orient"]) {
+      const b = $(id);
+      if (b) b.textContent = o === "v" ? "⇅" : "⇄";   // icon shows what it flips TO
+    }
+  },
+  _stash() {
+    const p = $("inspect-panel");
+    if (p && this._home == null) { this._home = p.parentNode; this._homeNext = p.nextSibling; }
+    return p;
+  },
+  openOverlay() {
+    const p = this._stash();
+    if (!p || this.mode === "overlay") return;
+    this._clearClasses();
     $("sweep-monitor-slot").appendChild(p);
-    ov.classList.add("split-on");
-    this.setOrient(this.orient());
+    $("sweep-overlay").classList.add("split-on");
+    this.mode = "overlay";
+    this._applyOrient();
     const roles = (App.state && App.state.roles && App.state.roles.roles) || [];
     const plutoMon = roles.some(r => r.source === "pluto" && r.role === "monitor");
     const note = $("sweep-mon-note");
     if (note) note.textContent = plutoMon
       ? "on the Pluto — the sweep keeps running"
       : "the sweep holds the radio — plug in the Pluto to hear it live";
-    this.active = true;
-    return true;
   },
-  // ✕ button: operator is done with the monitor — stop the stream, hide the panel
+  openPage() {
+    const p = this._stash();
+    if (!p || this.mode === "page") return;
+    this._clearClasses();
+    $("page-monitor-slot").appendChild(p);
+    document.body.classList.add("pdock-on");
+    this.mode = "page";
+    this._applyOrient();
+    const note = $("page-mon-note");
+    if (note) note.textContent =
+      (App.state && App.state.sweep && App.state.sweep.running)
+        ? "sweep running in the background" : "";
+    p.style.display = "";
+  },
+  // ✕: operator is done — stop the stream, put the panel home, hide it
   close() {
-    if (!this.active) return;
+    if (!this.mode) return;
     try { listenStop(); stopSpectrumPoll(); } catch (e) {}
-    this._restore();
-    const p = $("inspect-panel");
+    const p = this._restore();
     if (p) p.style.display = "none";
   },
-  // overlay going away (sweep ended / RUN IN BACKGROUND): give the panel back to
-  // the page but KEEP it open — a live listen on the Pluto survives the overlay
-  detach() {
-    if (!this.active) return;
-    this._restore();
+  // sweep overlay going away (sweep end / RUN IN BACKGROUND): hand the monitor
+  // to the page dock, still playing
+  overlayClosed() {
+    if (this.mode !== "overlay") return;
+    this.mode = null;
+    this._clearClasses();
+    this.openPage();
   },
   _restore() {
-    const p = $("inspect-panel"), ov = $("sweep-overlay");
+    const p = $("inspect-panel");
     if (p && this._home) this._home.insertBefore(p, this._homeNext);
-    if (ov) ov.classList.remove("split-on", "split-v", "split-h");
-    this.active = false;
+    this._clearClasses();
+    this.mode = null;
+    return p;
+  },
+  _clearClasses() {
+    $("sweep-overlay").classList.remove("split-on", "split-v", "split-h");
+    document.body.classList.remove("pdock-on", "pdock-v", "pdock-h");
   },
 };
-if ($("btn-split-close")) $("btn-split-close").onclick = () => SweepSplit.close();
-if ($("btn-split-orient")) $("btn-split-orient").onclick = () =>
-  SweepSplit.setOrient(SweepSplit.orient() === "v" ? "h" : "v");
+[["btn-split-close", () => MonitorDock.close()],
+ ["btn-pdock-close", () => MonitorDock.close()],
+ ["btn-split-orient", () => MonitorDock.setOrient(MonitorDock.orient() === "v" ? "h" : "v")],
+ ["btn-pdock-orient", () => MonitorDock.setOrient(MonitorDock.orient() === "v" ? "h" : "v")],
+].forEach(([id, fn]) => { const b = $(id); if (b) b.onclick = fn; });
 
 /* ---------- monitor: fused ANALYZE ("what is it?") + RECORD ---------- */
 
@@ -3177,7 +3214,7 @@ $("abort-erase").onclick = async () => {
 };
 $("btn-hide-overlay").onclick = () => {
   App.overlayHidden = true; $("sweep-overlay").classList.remove("show");
-  SweepSplit.detach();   // monitor panel returns to the page and keeps playing
+  MonitorDock.overlayClosed();   // monitor re-docks on the page and keeps playing
 };
 
 /* ---------- rooms ---------- */

@@ -4,6 +4,21 @@ Continuation brief for a fresh Fable/Claude Code session. Read this first, then 
 
 ---
 
+# ⚡ 2026-07-11 (third ask, extended) — split-screen monitor EVERYWHERE
+Operator follow-up: "for four — everywhere a frequency is clickable." The split is
+now app-wide, one module (`MonitorDock` in app.js, replaces SweepSplit):
+- **overlay mode** — sweep overlay up: the OVERLAY splits (sweep keeps drawing
+  beside the monitor; dual-radio = B220 sweep + Pluto audio at once).
+- **page mode** — everywhere else (Results/Wiki/Triage/Hunt/baseline, or a
+  backgrounded sweep): the CONTENT AREA splits (`#page-split` wraps `#panel` +
+  `#page-monitor-pane`; body classes pdock-on/-v/-h), the view stays put and the
+  monitor docks beside/below it.
+- One persisted ⇄/⇅ orientation drives both; ✕ stops the listen and restores;
+  when the overlay closes (sweep end / RUN IN BACKGROUND) a playing monitor is
+  HANDED TO the page dock — audio/spectra survive.
+- Verified in --simulate preview: page dock beside content, stacked toggle,
+  overlay handoff both directions, ✕ restore — all green, no JS errors.
+
 # ⚡ 2026-07-11 (third ask) — mid-sweep SPLIT-SCREEN monitor
 
 Operator: "when sweeping — no matter what kind of sweep — when I click a frequency
