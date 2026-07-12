@@ -4,6 +4,50 @@ Continuation brief for a fresh Fable/Claude Code session. Read this first, then 
 
 ---
 
+# ⚡ 2026-07-11 (fourth ask) — hands-free Pluto auto-seek (monitor never hand-connected)
+
+Operator: "I shouldn't have to connect the additional radio — it should seek out the
+Pluto, and if it's there, automatically connect and fire up the audio."
+
+- `SweepController._try_open_pluto_monitor()` (shared probe, cooldown-guarded 60 s,
+  serialised by `_monitor_probe_lock`); `autoseek_monitor()` (proactive, no sweep
+  needed); `start_monitor_autoseek()` (20 s background poller, started in
+  create_app for non-demo). `ensure_monitor()` now seeks PROACTIVELY (was: only
+  mid-sweep). `/api/device/connect` spawns a seek right after the sweeper connects.
+- Net: connect the B220 (or launch with it in) and the Pluto auto-joins as monitor
+  within ≤60 s of being plugged in — no manual connect, ever. Verified on hardware:
+  the seek fires on the 60 s cadence (log: "could not auto-connect the Pluto
+  monitor: … No device found" while the Pluto was unplugged — proving it's polling).
+- 376 tests green (3 new autoseek tests; the old "idle → no autoconnect" test was
+  inverted to "idle → seeks proactively" per the new intent).
+
+## ⚠ HARDWARE STATE (2026-07-11 pm) — Pluto USB is FLAKY, blocks audio
+- Both radios in laptop USB ports (not a hub, so NOT hub-power). The B220 works.
+- The Pluto: first enumerated but `capture_iq` → `[Errno 5] Input/output error` on
+  EVERY capture; after an app force-kill it went to "No device found" (not
+  enumerating). Classic marginal USB: charge-only cable, or the two radios sharing
+  one USB controller and contending. NEXT: swap the Pluto to a KNOWN-GOOD DATA
+  cable on a port on the OTHER side of the laptop (different controller than the
+  B220), replug, and the auto-seek grabs it. If capture still Errno-5s with the
+  Pluto ALONE (drop the B220 to test), it's the Pluto/cable; if only-with-B220,
+  it's USB-bus contention (needs a powered hub or separate controllers).
+- The concurrency itself is PROVEN in software: a Pluto listen during a live B220
+  sweep returned 200/416, never 409 "busy" — audio will flow the instant the
+  Pluto can stream.
+
+## STILL OPEN from this dump (not built yet)
+- **Auto-demod default** ("default to already demoding"): clicking a signal already
+  auto-starts the listen stream; may want ANALYZE auto-fired too — folded into the
+  attestation flow below.
+- **Webcam attribution** ("rather than typing name/reason, fire up the laptop cam;
+  the tech states name, reason, etc."): NET-NEW. A getUserMedia + MediaRecorder
+  spoken/video attestation as the session-level sign-gate (the design doc's
+  `session_authorizations` umbrella, still unbuilt), stored under recordings/
+  (gitignored PII), gating demod/analyze/record; per-signal client_space/third_party
+  buttons stay as quick taps. Awaiting the operator's answers on scope/storage.
+
+---
+
 # ⚡ 2026-07-11 (third ask, extended) — split-screen monitor EVERYWHERE
 Operator follow-up: "for four — everywhere a frequency is clickable." The split is
 now app-wide, one module (`MonitorDock` in app.js, replaces SweepSplit):

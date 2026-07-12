@@ -80,6 +80,12 @@ def create_app(db, cfg, demo=False) -> Flask:
     st.demo = demo
     app.config["APP_STATE"] = st
 
+    # hands-free second radio: keep seeking the Pluto so it auto-joins as the
+    # monitor the moment it's plugged in (operator ask — never hand-connect it).
+    # No-op in the public demo (simulated device) and until a sweeper is connected.
+    if not demo:
+        st.controller.start_monitor_autoseek()
+
     def err(message, code=400):
         return jsonify({"error": str(message)}), code
 
@@ -567,6 +573,15 @@ def create_app(db, cfg, demo=False) -> Flask:
                 cfg.set_and_save(("device", "source"), source)
             except Exception:  # noqa: BLE001
                 log.exception("could not persist device.source")
+        # hands-free second radio: right after the sweeper connects, seek the
+        # Pluto so it auto-joins as the monitor without a manual connect. Off the
+        # request thread so this response returns immediately; the connect can
+        # take a few seconds (libiio bring-up) and the background poller keeps
+        # trying anyway if the Pluto is plugged in later.
+        if (source not in ("pluto", "sdr", "ad936x")
+                and st.controller.concurrent_enabled()):
+            threading.Thread(target=st.controller.autoseek_monitor,
+                             daemon=True).start()
         if st.session_id:
             db.set_device_info(st.session_id, info.to_dict())
         return jsonify(info.to_dict())

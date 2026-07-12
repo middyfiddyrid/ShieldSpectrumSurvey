@@ -143,20 +143,25 @@ class TestConcurrency(unittest.TestCase):
         self.assertIsNot(lock, c.device_lock)               # its own lock
         self.assertEqual(c.active_source, "b220")           # sweep untouched
 
-    def test_ensure_monitor_no_autoconnect_when_off_or_idle(self):
+    def test_ensure_monitor_no_autoconnect_when_off(self):
         # flag OFF -> plain monitor_target, never opens hardware
         c = SweepController(self.db, self.cfg)
         c.connect_device("b220")
         _dev, _l, _s, src = c.ensure_monitor()
         self.assertEqual(src, "b220")
         self.assertNotIn("pluto", c.devices)
-        # flag ON but the sweeper is idle -> single-radio monitor is fine as-is
+
+    def test_ensure_monitor_seeks_pluto_proactively_when_idle(self):
+        # operator ask 2026-07-11: the Pluto should auto-join as monitor WITHOUT
+        # a sweep running — flag ON + sweeper connected + idle now seeks it.
         self.cfg.data["pluto"]["concurrent_monitor"] = True
-        c2 = SweepController(self.db, self.cfg)
-        c2.connect_device("b220")
-        _dev, _l, _s, src = c2.ensure_monitor()
-        self.assertEqual(src, "b220")
-        self.assertNotIn("pluto", c2.devices)
+        c = SweepController(self.db, self.cfg)
+        c.connect_device("b220")
+        self.assertNotIn("pluto", c.devices)          # not opened by the connect itself
+        _dev, _l, _s, src = c.ensure_monitor()        # the seek happens here
+        self.assertEqual(src, "pluto")
+        self.assertIn("pluto", c.devices)
+        self.assertEqual(c.active_source, "b220")     # sweeper unchanged
 
     def test_ensure_monitor_failure_is_nonfatal_with_cooldown(self):
         self.cfg.data["pluto"]["concurrent_monitor"] = True
@@ -174,6 +179,27 @@ class TestConcurrency(unittest.TestCase):
         self.assertEqual(src, "b220")
         c.ensure_monitor()                          # inside the 60 s cooldown
         self.assertEqual(calls["n"], 1)             # -> no second open attempt
+
+    def test_autoseek_monitor_connects_when_present(self):
+        self.cfg.data["pluto"]["concurrent_monitor"] = True
+        c = SweepController(self.db, self.cfg)
+        c.connect_device("b220")
+        self.assertTrue(c.autoseek_monitor())         # Pluto present -> joins
+        self.assertIn("pluto", c.devices)
+        self.assertEqual(c.device_roles()["roles"][-1]["role"], "monitor")
+
+    def test_autoseek_noop_without_sweeper_or_flag(self):
+        # no sweeper connected yet -> nothing to seek onto
+        self.cfg.data["pluto"]["concurrent_monitor"] = True
+        c = SweepController(self.db, self.cfg)
+        self.assertFalse(c.autoseek_monitor())
+        self.assertNotIn("pluto", c.devices)
+        # flag OFF -> never seeks even with a sweeper up
+        c2 = SweepController(self.db, self.cfg)
+        c2.cfg.data["pluto"]["concurrent_monitor"] = False
+        c2.connect_device("b220")
+        self.assertFalse(c2.autoseek_monitor())
+        self.assertNotIn("pluto", c2.devices)
 
     def test_b220_sweeper_promotion_regardless_of_connect_order(self):
         # generalized role rule: with the Pluto + ANY other radio open, the other

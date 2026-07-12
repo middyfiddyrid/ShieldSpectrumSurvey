@@ -55,6 +55,9 @@ class SweepController:
         self._busy_source = None         # source the sweep worker is bound to
         self._monitor_source = None      # source the monitor worker is bound to
         self.abort_event = threading.Event()
+        # serialise the Pluto auto-monitor probe (background poller vs a request)
+        self._monitor_probe_lock = threading.Lock()
+        self._pluto_auto_fail_ts = 0.0
         # serialise radio access across sweep / snapshot-capture / live audio stream
         self.device_lock = threading.Lock()
         self.listen_stop = threading.Event()   # set to stop the active audio stream
@@ -199,32 +202,93 @@ class SweepController:
                     self.listen_stops.setdefault(src, threading.Event()), src)
         return self.device, self.device_lock, self.listen_stop, self.active_source
 
-    def ensure_monitor(self):
-        """Monitor-ACTION entry point (inspect / analyze / listen / record): like
-        monitor_target(), but if the sweeper radio (B220/RFE) is busy mid-sweep,
-        concurrent mode is on, and the Pluto isn't open yet, try to open the
-        Pluto on the spot so the operator's 'quick background look at this
-        signal' lands on the second radio instead of a 409. Failure is non-fatal
-        (radio unplugged, drivers missing): logged once with a 60 s retry
-        cooldown, then falls back to plain monitor_target(). Read-only pollers
-        (device_roles, /api/state) keep calling monitor_target() so a status
-        poll can never spin up hardware."""
-        if (self.concurrent_enabled() and "pluto" not in self.devices
-                and self.active_source not in (None, "pluto")
-                and self.busy(self.active_source)
-                and time.time() - getattr(self, "_pluto_auto_fail_ts", 0.0) > 60.0):
+    def _try_open_pluto_monitor(self) -> bool:
+        """Probe for a Pluto and, if present, open it as the concurrent monitor
+        WITHOUT disturbing the sweeper. Non-fatal + cooldown-guarded so a missing
+        or faulting Pluto (unplugged, bad USB, driver) is retried at most once per
+        60 s instead of stalling every call. Returns True if the Pluto is now
+        connected. Serialised so the background poller and a request thread can't
+        both open it at once."""
+        if not self.concurrent_enabled() or "pluto" in self.devices:
+            return "pluto" in self.devices
+        if self.active_source in (None, "pluto"):
+            return False   # no primary yet, or the Pluto IS the primary
+        if time.time() - getattr(self, "_pluto_auto_fail_ts", 0.0) <= 60.0:
+            return False   # inside the failure cooldown
+        with self._monitor_probe_lock:
+            if "pluto" in self.devices:
+                return True
             try:
                 from .device import open_device
                 dev = open_device(self.cfg, source="pluto")
                 self.devices["pluto"] = dev
                 self.device_locks.setdefault("pluto", threading.Lock())
                 self.listen_stops.setdefault("pluto", threading.Event())
+                self._pluto_auto_fail_ts = 0.0
                 log.info("auto-connected the Pluto as the concurrent monitor "
-                         "(sweep continues on %s)", self.active_source)
+                         "(sweeper stays on %s)", self.active_source)
+                return True
             except Exception as e:  # noqa: BLE001
                 self._pluto_auto_fail_ts = time.time()
                 log.warning("could not auto-connect the Pluto monitor: %s", e)
+                return False
+
+    def ensure_monitor(self):
+        """Monitor-ACTION entry point (inspect / analyze / listen / record): like
+        monitor_target(), but proactively opens the Pluto as the concurrent
+        monitor if it's present and not open yet — so the operator never
+        hand-connects the second radio. Failure is non-fatal (cooldown-guarded).
+        Read-only pollers (device_roles, /api/state) keep calling monitor_target()
+        so a status poll can never spin up hardware."""
+        self._try_open_pluto_monitor()
         return self.monitor_target()
+
+    def autoseek_monitor(self):
+        """Proactive seek — called after a primary connect and by the background
+        poller: bring the Pluto up as the monitor the moment it's detected, no
+        sweep or click required (operator ask 2026-07-11: 'it should seek out the
+        Pluto and automatically connect')."""
+        return self._try_open_pluto_monitor()
+
+    def start_monitor_autoseek(self, interval_s: float = 20.0):
+        """Background thread that keeps trying to bring up the Pluto monitor while
+        concurrent mode is on and it isn't connected yet — so plugging the Pluto
+        in AFTER launch is picked up hands-free. The 60 s failure cooldown inside
+        the probe means a faulting/absent Pluto is retried gently, not hammered."""
+        if getattr(self, "_autoseek_thread", None) and self._autoseek_thread.is_alive():
+            return
+
+        def loop():
+            while True:
+                try:
+                    if (self.concurrent_enabled() and "pluto" not in self.devices
+                            and self.active_source not in (None, "pluto")):
+                        self.autoseek_monitor()
+                except Exception:  # noqa: BLE001
+                    log.exception("monitor autoseek loop error")
+                self._autoseek_stop.wait(interval_s)
+                if self._autoseek_stop.is_set():
+                    return
+
+        self._autoseek_stop = threading.Event()
+        self._autoseek_thread = threading.Thread(target=loop, daemon=True)
+        self._autoseek_thread.start()
+
+    def device_roles(self) -> dict:
+        """What each connected radio is doing — for the UI to show 'RFE sweeping +
+        Pluto monitoring' and decide live vs post-hoc triage."""
+        _, _, _, mon_src = self.monitor_target()
+        roles = []
+        for src, dev in self.devices.items():
+            if src == self.active_source:
+                role = "sweeper"
+            elif src == mon_src:
+                role = "monitor"
+            else:
+                role = "idle"
+            roles.append({"source": src, "role": role, "busy": self.busy(src)})
+        return {"roles": roles, "concurrent_enabled": self.concurrent_enabled(),
+                "active_source": self.active_source}
 
     def device_roles(self) -> dict:
         """What each connected radio is doing — for the UI to show 'RFE sweeping +
