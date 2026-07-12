@@ -1090,11 +1090,20 @@ async function renderDeviceRoles() {
                      : x.role === "monitor" ? "listens/analyzes signals" : "connected (idle)";
       el.innerHTML = roles.map(x =>
         `<b>${name(x.source)}</b> — ${job(x)}${x.busy ? " (busy)" : ""}`).join(" &nbsp;·&nbsp; ");
-      if (r.concurrent_enabled && roles.length >= 2)
+      if (r.concurrent_enabled && roles.length >= 2) {
         el.innerHTML += ` &nbsp;·&nbsp; <b style="color:var(--green)">BOTH RADIOS ACTIVE</b> — you can inspect signals while a sweep runs`;
-      else if (r.concurrent_enabled && roles.length === 1)
+        // field resilience: let the operator swap which radio sweeps vs monitors
+        el.innerHTML += ` &nbsp; <button class="btn" id="btn-swap-roles" style="padding:2px 8px;font-size:11px" title="switch which radio sweeps and which monitors">⇄ SWAP ROLES</button>`;
+      } else if (r.concurrent_enabled && roles.length === 1)
         el.innerHTML += ` &nbsp;·&nbsp; connect the other radio too to inspect during sweeps`;
       el.style.display = "";
+      const swapBtn = $("btn-swap-roles");
+      if (swapBtn) swapBtn.onclick = async () => {
+        swapBtn.disabled = true;
+        try { await api("/api/device/swap", {}); }
+        catch (e) { alert("Swap failed: " + (e.message || e)); }
+        renderDeviceRoles();
+      };
     }
   }
   if (sw) {

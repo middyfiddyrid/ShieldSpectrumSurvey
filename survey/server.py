@@ -593,6 +593,26 @@ def create_app(db, cfg, demo=False) -> Flask:
         Pluto monitoring' and choose LIVE vs post-hoc triage."""
         return jsonify(st.controller.device_roles())
 
+    @app.post("/api/device/swap")
+    def device_swap():
+        """Swap sweeper <-> monitor (field 'just switch them around'). Refused
+        while a sweep is running."""
+        try:
+            return jsonify(st.controller.swap_roles())
+        except Exception as e:  # noqa: BLE001
+            return err(e, 409)
+
+    @app.post("/api/device/roles/assign")
+    def device_roles_assign():
+        """Explicitly assign which connected radio sweeps and which monitors."""
+        body = request.get_json(silent=True) or {}
+        try:
+            return jsonify(st.controller.set_roles(
+                sweeper=(body.get("sweeper") or "").strip().lower() or None,
+                monitor=(body.get("monitor") or "").strip().lower() or None))
+        except Exception as e:  # noqa: BLE001
+            return err(e, 409)
+
     @app.post("/api/identify")
     def identify_signal():
         """sigidwiki-style ID of an emitter. With a connected Pluto, captures IQ

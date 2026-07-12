@@ -58,6 +58,9 @@ class SweepController:
         # serialise the Pluto auto-monitor probe (background poller vs a request)
         self._monitor_probe_lock = threading.Lock()
         self._pluto_auto_fail_ts = 0.0
+        # operator role override (swap_roles/set_roles): which source is the
+        # MONITOR. None = auto (Pluto-preferred). The sweeper is always active_source.
+        self._monitor_override = None
         # serialise radio access across sweep / snapshot-capture / live audio stream
         self.device_lock = threading.Lock()
         self.listen_stop = threading.Event()   # set to stop the active audio stream
@@ -128,6 +131,9 @@ class SweepController:
                         d.close()
                     except Exception:  # noqa: BLE001
                         pass
+            # a full close-all resets any operator role override — the fresh
+            # connect starts from the auto default (Pluto-preferred monitor)
+            self._monitor_override = None
         dev = open_device(self.cfg, source=src)
         self.devices[src] = dev
         self.device_locks.setdefault(src, threading.Lock())
@@ -137,11 +143,13 @@ class SweepController:
         if not (keep_other and self.concurrent_enabled()) or self.device is None:
             self.device = dev
             self.active_source = src
-        # dual mode: the Pluto is ALWAYS the monitor (see monitor_target), so once
-        # the Pluto plus ANY other radio (RFE or B220) are open, make the other
-        # radio the sweeper regardless of the order the operator connected them —
-        # but never yank a sweep in flight.
+        # dual mode: default the Pluto to monitor — so once the Pluto plus ANY
+        # other radio (RFE or B220) are open, make the other radio the sweeper
+        # regardless of connect order. SKIPPED when the operator has explicitly
+        # assigned roles (swap_roles/set_roles) so a reconnect can't stomp their
+        # choice; never yanks a sweep in flight.
         if (self.concurrent_enabled() and not self.busy()
+                and self._monitor_override is None
                 and "pluto" in self.devices and len(self.devices) > 1):
             sweeper = next(s for s in self.devices if s != "pluto")
             self.device = self.devices[sweeper]
@@ -191,16 +199,67 @@ class SweepController:
         return ((sweep_alive and self._busy_source == source)
                 or (mon_alive and self._monitor_source == source))
 
+    def _current_monitor(self):
+        """Which connected radio is the MONITOR (live listen / analyze / record),
+        or None in single-device mode. Precedence: the operator's explicit role
+        override (set via swap_roles / set_roles) if that radio is connected and
+        isn't the sweeper; else the auto default — the Pluto when it isn't the
+        sweeper, otherwise any other connected radio. The SWEEPER is always
+        active_source, so the monitor is 'some other radio than the sweeper'."""
+        if not self.concurrent_enabled():
+            return None
+        ov = self._monitor_override
+        if ov and ov in self.devices and ov != self.active_source:
+            return ov
+        if "pluto" in self.devices and self.active_source != "pluto":
+            return "pluto"
+        return next((s for s in self.devices if s != self.active_source), None)
+
     def monitor_target(self):
         """(device, lock, listen_stop, source) for live monitor / analyze /
-        record. In dual mode with a Pluto open, returns the Pluto + its OWN lock
-        so it never blocks on the sweeper's lock; otherwise the active device +
-        the legacy lock (so single-device behaviour is unchanged)."""
-        if self.concurrent_enabled() and "pluto" in self.devices:
-            src = "pluto"
-            return (self.devices[src], self.device_locks.setdefault(src, threading.Lock()),
-                    self.listen_stops.setdefault(src, threading.Event()), src)
+        record. In dual mode returns the MONITOR radio + its OWN lock so it never
+        blocks on the sweeper's lock; otherwise the active device + the legacy
+        lock (so single-device behaviour is unchanged)."""
+        mon = self._current_monitor()
+        if mon:
+            return (self.devices[mon], self.device_locks.setdefault(mon, threading.Lock()),
+                    self.listen_stops.setdefault(mon, threading.Event()), mon)
         return self.device, self.device_lock, self.listen_stop, self.active_source
+
+    def set_roles(self, sweeper=None, monitor=None):
+        """Operator-assigned radio roles (field resilience — either radio can
+        sweep or monitor). Both must be connected and distinct; refused while a
+        sweep is running (the sweeper is actively streaming). Persists until
+        changed or a radio drops (a stale override self-heals via _current_monitor)."""
+        if self.busy():
+            raise RuntimeError("stop the sweep before changing radio roles")
+        if len(self.devices) < 2:
+            raise RuntimeError("connect both radios before assigning roles")
+        for r in (sweeper, monitor):
+            if r and r not in self.devices:
+                raise RuntimeError(f"{r} is not connected")
+        if sweeper and monitor and sweeper == monitor:
+            raise RuntimeError("the sweeper and monitor must be different radios")
+        if sweeper:
+            self.device = self.devices[sweeper]
+            self.active_source = sweeper
+        if monitor:
+            self._monitor_override = monitor
+        return self.device_roles()
+
+    def swap_roles(self):
+        """Swap sweeper <-> monitor — the field 'just switch them around' button
+        for when the preferred monitor radio can't do the job (bad USB, weak
+        antenna, etc.)."""
+        if self.busy():
+            raise RuntimeError("stop the sweep before swapping radio roles")
+        if len(self.devices) < 2:
+            raise RuntimeError("connect both radios to swap roles")
+        new_sweeper = self._current_monitor()
+        new_monitor = self.active_source
+        if not new_sweeper or new_sweeper == new_monitor:
+            raise RuntimeError("need two distinct radios to swap")
+        return self.set_roles(sweeper=new_sweeper, monitor=new_monitor)
 
     def _try_open_pluto_monitor(self) -> bool:
         """Probe for a Pluto and, if present, open it as the concurrent monitor

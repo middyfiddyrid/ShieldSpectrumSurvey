@@ -201,6 +201,34 @@ class TestConcurrency(unittest.TestCase):
         self.assertFalse(c2.autoseek_monitor())
         self.assertNotIn("pluto", c2.devices)
 
+    def test_swap_roles_reassigns_sweeper_and_monitor(self):
+        c = self._dual()                               # rfexplorer sweeper, pluto monitor
+        self.assertEqual(c.active_source, "rfexplorer")
+        self.assertEqual(c._current_monitor(), "pluto")
+        c.swap_roles()
+        self.assertEqual(c.active_source, "pluto")     # now the Pluto sweeps
+        self.assertEqual(c._current_monitor(), "rfexplorer")  # ...RFE monitors
+        _dev, _l, _s, msrc = c.monitor_target()
+        self.assertEqual(msrc, "rfexplorer")
+        # a later reconnect must NOT stomp the explicit choice
+        c.connect_device("rfexplorer", keep_other=True)
+        self.assertEqual(c.active_source, "pluto")
+        self.assertEqual(c._current_monitor(), "rfexplorer")
+
+    def test_swap_refused_while_sweeping(self):
+        c = self._dual()
+        c._thread = _AliveThread()
+        c._busy_source = "rfexplorer"
+        with self.assertRaises(RuntimeError):
+            c.swap_roles()
+
+    def test_set_roles_validates(self):
+        c = self._dual()                               # connected: rfexplorer, pluto
+        with self.assertRaises(RuntimeError):          # b220 not connected
+            c.set_roles(sweeper="b220")
+        with self.assertRaises(RuntimeError):          # same radio both roles
+            c.set_roles(sweeper="pluto", monitor="pluto")
+
     def test_b220_sweeper_promotion_regardless_of_connect_order(self):
         # generalized role rule: with the Pluto + ANY other radio open, the other
         # radio is the sweeper — even when the Pluto was connected first.

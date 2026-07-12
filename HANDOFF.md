@@ -4,6 +4,34 @@ Continuation brief for a fresh Fable/Claude Code session. Read this first, then 
 
 ---
 
+# ⚡ 2026-07-11 (fifth ask) — operator-swappable radio ROLES (field resilience)
+
+Operator: "will the Pluto sweep? if so just switch them around — we should have that
+option anyway just in case that happens in the field."
+
+- ANSWER (verified on hardware): the Pluto will NOT sweep while its streaming is
+  broken — sweeping is the same IQ-stream path as listening; a Pluto-as-sweeper
+  sweep started then immediately "serial hiccup — reconnecting" and failed.
+- BUILT anyway (good field feature): `SweepController.set_roles(sweeper, monitor)`
+  + `swap_roles()`; `_current_monitor()` resolves the monitor from an operator
+  override (else auto = Pluto-preferred). `monitor_target()` honors it; the
+  connect-time Pluto→monitor auto-promotion is SKIPPED when an override is set;
+  a legacy close-all clears the override. POST `/api/device/swap` +
+  `/api/device/roles/assign`. UI: "⇄ SWAP ROLES" button in the DEVICE card roles
+  line (2 radios). Refused while a sweep runs. Verified: UI swap round-trips
+  (B220 sweeps↔monitors), 3 new tests, 379 green.
+- NOTE the naming trap: there's a pre-existing instance attr `self._monitor_source`
+  (the recording worker's bound source) — the new METHOD had to be `_current_monitor`
+  to avoid shadowing it. Don't reintroduce a `_monitor_source()` method.
+
+## ⚠ Pluto STILL can't stream (unchanged) — see the hardware block below
+Both roles land the streaming job on whichever radio is assigned it; with the Pluto
+broken, swapping just moves which FUNCTION is broken (sweep vs monitor). Neither
+gives real concurrency until the Pluto streams. Fix is physical (power-cycle /
+powered hub). When B220 was made the monitor, its inspect hit `uhd_error 44` — but
+that was under contention with the failing Pluto sweep + reconnect churn, not a
+clean test; the B220 monitors fine on its own (proven earlier this session).
+
 # ⚡ 2026-07-11 (fourth ask) — hands-free Pluto auto-seek (monitor never hand-connected)
 
 Operator: "I shouldn't have to connect the additional radio — it should seek out the
