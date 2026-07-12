@@ -480,6 +480,11 @@ function render(st) {
       : `${st.sweep.percent || 0}%  ·  ETA ${Math.floor(eta / 60)}m ${eta % 60}s`;
     const nextBtn = $("btn-next-segment");
     if (nextBtn) nextBtn.style.display = st.sweep.awaiting_advance ? "" : "none";
+    // LIVE RBW readout — the delivered RBW of the current segment (don't stomp
+    // the box while the operator is typing in it)
+    const rbwNow = $("sweep-rbw-now");
+    if (rbwNow && cs && !App._rbwFocused)
+      rbwNow.textContent = cs.rbw_khz != null ? `now ${cs.rbw_khz} kHz` : "";
     if (st.sweep.live_trace) {
       drawTrace($("livechart"), st.sweep.live_trace, muteRangesFor());
       buildSweepLabelOverlays($("livechart"), st.sweep.live_trace,
@@ -3954,6 +3959,23 @@ if ($("btn-sustain")) $("btn-sustain").onclick = async () => {
   try { await api("/api/sweep/sustain", { on }); }
   catch (e) { $("sweep-overlay-eta").textContent = "sustain failed: " + e.message; }
 };
+/* LIVE RBW knob: change resolution bandwidth mid-sweep — applies on the next
+   segment. Blank restores the config/auto value. */
+(() => {
+  const inp = $("sweep-rbw"), now = $("sweep-rbw-now");
+  if (!inp) return;
+  inp.addEventListener("focus", () => { App._rbwFocused = true; });
+  inp.addEventListener("blur", () => { App._rbwFocused = false; });
+  const apply = async () => {
+    const v = inp.value.trim();
+    try {
+      const r = await api("/api/sweep/rbw", { rbw_khz: v === "" ? "auto" : parseFloat(v) });
+      if (now) now.textContent = !r.adjustable ? "fixed (RFE)"
+        : r.achieved_khz != null ? `→ ${r.achieved_khz} kHz next segment` : "";
+    } catch (e) { if (now) now.textContent = "RBW: " + (e.message || e); }
+  };
+  inp.addEventListener("change", apply);   // commit on Enter / blur
+})();
 document.querySelectorAll("#sweep-info-tabs button[data-tab]").forEach(b =>
   b.onclick = () => setInfoTab(b.dataset.tab));
 /* LIVE window: drag a span on the main chart; double-click resets to the segment */

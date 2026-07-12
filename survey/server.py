@@ -1417,6 +1417,25 @@ def create_app(db, cfg, demo=False) -> Flask:
         st.controller.set_sustain(on)
         return jsonify({"ok": True, "sustain": on})
 
+    @app.post("/api/sweep/rbw")
+    def sweep_rbw():
+        """LIVE RBW knob (SDR only): change resolution bandwidth mid-sweep — it
+        re-tunes on the next segment. 'auto'/null/0 restores the config default.
+        No-op with an informative note on the RF Explorer (fixed span/112)."""
+        body = request.get_json(silent=True) or {}
+        v = body.get("rbw_khz")
+        rbw = None if v in (None, "", "auto", 0) else _num_or_none(v)
+        if rbw:
+            rbw = max(1.0, min(1000.0, rbw))
+        achieved = st.controller.set_live_rbw(rbw)
+        dev = st.controller.device
+        adjustable = bool(dev is not None and getattr(dev, "is_swept_sdr", False))
+        return jsonify({"rbw_khz": rbw, "achieved_khz": achieved,
+                        "adjustable": adjustable,
+                        "note": "" if adjustable else
+                        "RBW is fixed on the RF Explorer (segment span / 112) — "
+                        "use the Seg MHz control"})
+
     _catalog_cache = {}
 
     @app.get("/api/catalog/segment")

@@ -1283,6 +1283,12 @@ body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid va
   </div><!-- /sweep-split -->
   <div class="row">
     <div class="sub" id="sweep-overlay-eta"></div>
+    <!-- LIVE RBW: turn resolution bandwidth mid-sweep (SDR only); takes effect on
+         the next segment. Blank = keep the current/config value. -->
+    <label class="note" id="sweep-rbw-wrap" title="Resolution bandwidth — finer resolves close signals, coarser sweeps faster. Applies on the next segment. RF Explorer: fixed at span/112.">RBW
+      <input class="small" id="sweep-rbw" type="number" min="1" step="1" placeholder="kHz" style="width:60px">
+      <span class="note" id="sweep-rbw-now"></span>
+    </label>
     <button class="btn" id="btn-sustain" title="Hold this segment — keep sweeping it live until you resume">⏸ SUSTAIN SEGMENT</button>
     <button class="btn primary" id="btn-next-segment" style="display:none">NEXT SEGMENT →</button>
     <button class="btn danger" id="btn-abort">ABORT PHASE (keep data)</button>

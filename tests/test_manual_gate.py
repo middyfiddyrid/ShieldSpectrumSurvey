@@ -134,6 +134,21 @@ class TestManualGateKeepsSweeping(unittest.TestCase):
         self.assertIn(25.0, calls)                 # override applied for the sweep
         self.assertIsNone(calls[-1])               # ...and CLEARED on exit
 
+    def test_live_rbw_change_applies_on_next_segment(self):
+        # operator ask 2026-07-11: turn the RBW knob DURING the sweep; it must
+        # re-tune on the next segment (set_live_rbw -> _run_plan re-applies)
+        c = self._controller()
+        sid = self._session_id()
+        c.start_sweep(sid, "interior", "right", "room", _plan(),
+                      manual_advance=True, rbw_khz=None)
+        self.assertTrue(_wait(lambda: c.state["awaiting_advance"]))  # seg 1 done
+        c.set_live_rbw(50.0)                        # turn the knob mid-sweep
+        self.assertEqual(c.rbw_khz, 50.0)
+        c.advance()                                # -> segment 2 applies it
+        self.assertTrue(_wait(lambda: not c.busy(), timeout=15.0))
+        self.assertIn(50.0, c.device.rbw_calls)    # the device got the new RBW
+        self.assertIsNone(c.device.rbw_calls[-1])  # ...and it's cleared on exit
+
     def test_abort_during_gate_stops_promptly(self):
         c = self._controller()
         sid = self._session_id()

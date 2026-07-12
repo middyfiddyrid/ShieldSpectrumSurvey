@@ -4,6 +4,37 @@ Continuation brief for a fresh Fable/Claude Code session. Read this first, then 
 
 ---
 
+# ⚡ 2026-07-12 (sixth ask) — LIVE RBW knob DURING the sweep
+
+Operator expected to adjust RBW while sweeping; the built control was pre-sweep +
+Custom-profile-only, so they couldn't find/use it mid-sweep.
+
+- `SweepController.set_live_rbw(rbw_khz)` updates `self.rbw_khz`; `_run_plan` now
+  re-applies it per segment when it changes (was: once before the loop) — a
+  mid-sweep change re-tunes on the NEXT segment (Accumulator rebuilds on the new
+  grid size; merge-gap + seg RBW display recompute). POST `/api/sweep/rbw`
+  {rbw_khz|"auto"} → {rbw_khz, achieved_khz, adjustable, note}. UI: an "RBW [kHz]"
+  input in the sweep-overlay control row with a live "now N kHz" readout; SDR →
+  "→ N kHz next segment", RFE/sim → "fixed (RFE)".
+- Verified in the sim preview: control renders in the overlay, live change POSTs
+  and the sweep keeps running, honest RFE/SDR distinction (sim is RFE-class so it
+  says fixed). SDR effect unit-tested (test_rbw + a new live-rbw manual-gate test).
+  380 green.
+- STILL: the pre-sweep RBW box remains Custom-profile-only (not surfaced on
+  Quick/Standard/Deep) — operator hadn't confirmed whether to surface it there
+  too. The live knob makes it reachable during any sweep regardless.
+
+## ⚠ CRASH ROOT CAUSE (2026-07-12) — native USB fault kills the whole app
+The app died mid-session (no Python traceback): the log showed
+`LIBUSB_TRANSFER_NO_DEVICE` (B220 USB dropped) and a `10054` reset (Pluto IP). The
+radio drivers (UHD/libiio) run IN-PROCESS in C++, so a USB-loss access-violation
+segfaults the whole Python process — a click on a dead app does nothing (that's
+why the split "didn't work"; the split code itself is verified fine). After the
+crash BOTH radios were wedged (B220 `access violation reading 0x0` on UHD open) —
+needs a physical replug. PROPOSED (not built, awaiting operator go): isolate radio
+access in a SUBPROCESS/worker so a native crash is caught + auto-reconnected
+instead of taking down the UI. This is the real field-reliability fix.
+
 # ⚡ 2026-07-11 (fifth ask) — operator-swappable radio ROLES (field resilience)
 
 Operator: "will the Pluto sweep? if so just switch them around — we should have that

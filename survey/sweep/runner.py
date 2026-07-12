@@ -390,6 +390,24 @@ class SweepController:
         self.sustain_flag = bool(on)
         self._set(sustain_requested=self.sustain_flag)
 
+    def set_live_rbw(self, rbw_khz):
+        """Turn the RBW knob (SDR only) — mid-sweep it re-tunes resolution on the
+        NEXT segment (_run_plan re-applies self.rbw_khz when it changes); with no
+        sweep running it just primes the value for the next start_sweep. Returns
+        the achieved analysis RBW (kHz) if a device is connected, else None."""
+        self.rbw_khz = float(rbw_khz) if rbw_khz else None
+        self._set(rbw_khz=self.rbw_khz)
+        dev = self.device
+        if dev is not None and hasattr(dev, "predicted_rbw_khz"):
+            try:
+                # report what the CURRENT segment span would deliver (advisory)
+                cs = self.state.get("current_segment") or {}
+                span = (cs.get("high_mhz", 0) - cs.get("low_mhz", 0)) or 10.0
+                return dev.predicted_rbw_khz(span, self.rbw_khz)
+            except Exception:  # noqa: BLE001
+                return None
+        return None
+
     def _set(self, **kw):
         with self._lock:
             self.state.update(kw)
@@ -500,9 +518,12 @@ class SweepController:
             dev.environment = {"phase": phase, "room": room}
         dev.select_module(module if module in ("left", "right") else "right")
         # Operator RBW override (SDR only). ALWAYS called: None restores the
-        # config defaults so the previous sweep's setting can't leak in.
+        # config defaults so the previous sweep's setting can't leak in. The
+        # operator can also turn the RBW knob MID-SWEEP (set_live_rbw) — the loop
+        # below re-applies self.rbw_khz whenever it changes, effective next segment.
         rbw_req = getattr(self, "rbw_khz", None)
         analysis_rbw = dev.set_rbw_khz(rbw_req)
+        applied_rbw = rbw_req
         if rbw_req and analysis_rbw is None:
             self._set(message="RBW is fixed on the RF Explorer (span/112) — "
                               "use the Seg MHz control instead")
@@ -516,6 +537,13 @@ class SweepController:
         for idx, seg in enumerate(plan.segments):
             if self.abort_event.is_set():
                 break
+            # LIVE RBW: the operator turned the knob mid-sweep — re-apply on this
+            # (the next) segment. set_rbw_khz is cheap + idempotent; the seg_rbw
+            # display and merge-gap scaling below then reflect the new value.
+            cur_rbw = getattr(self, "rbw_khz", None)
+            if cur_rbw != applied_rbw:
+                analysis_rbw = dev.set_rbw_khz(cur_rbw)
+                applied_rbw = rbw_req = cur_rbw
             # F2: what licensed records do we EXPECT in this segment's range —
             # published as status='looking', flipped to 'found' in _sweep_segment.
             seg_expected = expected_for_range(baseline_rows, seg.low_mhz, seg.high_mhz)
