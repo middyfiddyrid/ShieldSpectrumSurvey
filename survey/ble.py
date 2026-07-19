@@ -65,6 +65,40 @@ COMPANY_IDS = {
     0x0072: "Realtek",
     0x0117: "Bose",
     0x00C4: "LG Electronics",
+    # HID / keyboards / mice / remotes (TSCM: nRF24-class look-alikes)
+    0x005D: "Razer",
+    0x00E8: "Google (Chromecast/Nest remote class)",
+    0x0822: "MuteMe / accessory",
+    0x0D28: "SteelSeries",
+    0x03F0: "HP Inc",
+    0x0002: "Intel",
+    0x00A7: "Harman International",
+    0x008A: "Polar Electro",
+    0x0154: "Swatch Group",
+    0x01D7: "Qualcomm",
+    0x02B0: "Tesla Motors",
+    0x05C1: "Vizio",
+    0x06D5: "Roku",
+    0x0A7C: "Anker",
+}
+
+# Company ids that often mean keyboard/mouse/remote (not exhaustive)
+HID_COMPANY_IDS = {
+    0x0060,  # Logitech
+    0x005D,  # Razer
+    0x0006,  # Microsoft
+    0x03F0,  # HP
+    0x0D28,  # SteelSeries
+}
+
+AV_REMOTE_COMPANY_IDS = {
+    0x004C,  # Apple TV remote / Continuity
+    0x00E0,  # Google
+    0x0171,  # Amazon Fire
+    0x06D5,  # Roku
+    0x05C1,  # Vizio
+    0x00C4,  # LG
+    0x0075,  # Samsung
 }
 
 # First-3-octet OUI prefixes (uppercase, colon-less) -> vendor. Meaningful ONLY for
@@ -98,6 +132,16 @@ OUI_VENDORS = {
 SERVICE_UUIDS = {
     "180F": "Battery",
     "180A": "Device Information",
+    "1812": "HID (Human Interface Device)",
+    "1800": "Generic Access",
+    "1801": "Generic Attribute",
+    "180D": "Heart Rate",
+    "181A": "Environmental Sensing",
+    "FE2C": "Google Fast Pair / Find My Device class",
+    "FD6F": "Apple Find My network class",
+    "FE9F": "Google Eddystone class",
+    "FEE0": "Xiaomi",
+    "FFF0": "Generic proprietary",
     "1800": "Generic Access",
     "1801": "Generic Attribute",
     "1811": "Alert Notification",
@@ -323,14 +367,26 @@ def summarize_advertisement(adv: dict) -> dict:
 
     mfrs = []
     is_tracker = False
+    is_hid = False
+    is_av_remote = False
     for cid, data in (adv.get("manufacturer_data") or {}).items():
         d = decode_manufacturer(int(cid), bytes(data) if data else b"")
         mfrs.append(d)
         is_tracker = is_tracker or d["is_tracker"]
+        try:
+            icid = int(cid)
+        except (TypeError, ValueError):
+            icid = -1
+        if icid in HID_COMPANY_IDS:
+            is_hid = True
+        if icid in AV_REMOTE_COMPANY_IDS:
+            is_av_remote = True
 
     svcs = service_names(adv.get("service_uuids"))
     if any(s["tracker"] for s in svcs):
         is_tracker = True
+    if any("HID" in (s.get("name") or "") for s in svcs):
+        is_hid = True
 
     appearance = appearance_label(adv.get("appearance"))
     name = adv.get("name") or ""
@@ -347,6 +403,10 @@ def summarize_advertisement(adv: dict) -> dict:
         bits.append(vendor)
     if is_tracker:
         bits.append("⚑ TRACKER")
+    if is_hid:
+        bits.append("⌨ HID")
+    if is_av_remote:
+        bits.append("📺 AV remote class")
     hinttxt = [h for m in mfrs for h in m["hints"]]
     if hinttxt:
         bits.append(" / ".join(hinttxt))
@@ -394,6 +454,8 @@ def summarize_advertisement(adv: dict) -> dict:
         "manufacturers": mfrs,
         "services": svcs,
         "is_tracker": is_tracker,
+        "is_hid": is_hid,
+        "is_av_remote": is_av_remote,
         "info": info,
         "summary": summary,
         "tscm_note": tscm_note,

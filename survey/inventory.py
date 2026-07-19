@@ -88,7 +88,14 @@ def scan_wifi() -> tuple[list[dict], str]:
     if not devices:
         return [], ("no WiFi networks seen — is the WLAN adapter on? "
                     "(netsh needs the wireless service running)")
-    return devices, f"{len(devices)} access points seen"
+    # curated OUI → vendor class (cameras, TVs, mesh, ESP32, …)
+    from .wifi_oui import annotate_wifi_device
+    devices = [annotate_wifi_device(d) for d in devices]
+    n_vend = sum(1 for d in devices if d.get("vendor"))
+    msg = f"{len(devices)} access points seen"
+    if n_vend:
+        msg += f" ({n_vend} with known OUI/vendor class)"
+    return devices, msg
 
 
 def _ble_raw(seconds: float = 8.0) -> tuple[list[dict], str]:
@@ -173,15 +180,18 @@ def upsert_inventory(db, session_id: int, devices: list[dict]):
     for d in devices:
         db.execute(
             "INSERT INTO inventory (session_id,kind,identifier,name,rssi_dbm,channel,"
-            "freq_mhz,extra,first_seen,last_seen) VALUES (?,?,?,?,?,?,?,?,?,?) "
+            "freq_mhz,extra,vendor,first_seen,last_seen) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(session_id,kind,identifier) DO UPDATE SET "
             "name=CASE WHEN excluded.name!='' THEN excluded.name ELSE inventory.name END, "
             "rssi_dbm=MAX(COALESCE(inventory.rssi_dbm,-200), COALESCE(excluded.rssi_dbm,-200)), "
             "channel=excluded.channel, freq_mhz=excluded.freq_mhz, "
-            "extra=excluded.extra, last_seen=excluded.last_seen",
+            "extra=excluded.extra, "
+            "vendor=CASE WHEN excluded.vendor!='' THEN excluded.vendor ELSE inventory.vendor END, "
+            "last_seen=excluded.last_seen",
             (session_id, d["kind"], d["identifier"], d.get("name", ""),
              d.get("rssi_dbm"), d.get("channel", ""), d.get("freq_mhz"),
-             d.get("extra", ""), now, now))
+             d.get("extra", ""), d.get("vendor", "") or "", now, now))
 
 
 def inventory_rows(db, session_id: int) -> list[dict]:

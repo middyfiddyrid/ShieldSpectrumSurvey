@@ -247,12 +247,23 @@ class UHDRadio:
             self.h = ctypes.c_void_p()
             time.sleep(1.0)            # let the USB re-enumeration settle
         if err != 0:
-            raise DeviceError(
+            hint = (
                 f"uhd_usrp_make({device_args!r}) failed (uhd_error {err}) after 5 "
-                f"tries. Is the radio plugged in (USB3), the Ettus WinUSB driver "
-                f"installed, and no OTHER process using it? If a prior app instance "
-                f"is still running it holds the radio — close it. (First open "
-                f"flashes FX3 firmware + FPGA over USB and can take ~20 s.)")
+                f"tries. Is the radio plugged in (USB3 data cable, not charge-only), "
+                f"the Ettus WinUSB driver installed, and no OTHER process using it? "
+                f"If a prior app instance is still running it holds the radio — close it. "
+                f"(First open flashes FX3 firmware + FPGA over USB and can take ~20 s.)"
+            )
+            # LibreSDR / B220 Mini clones brick soft-open after the STOCK Ettus
+            # Spartan-6 bitstream is loaded (fx3 state 5). A USB replug clears it;
+            # subsequent opens must use the Artix-7 image (fpga=…/ShieldTSCM/…).
+            if err in (11, 44) or "fpga=" not in (device_args or ""):
+                hint += (
+                    " If you recently ran uhd_usrp_probe without the LibreSDR "
+                    "fpga= arg (or saw 'fx3 is in state 5'), UNPLUG the B220 for "
+                    "5 seconds, replug it, and try CONNECT again."
+                )
+            raise DeviceError(hint)
         self._md = ctypes.c_void_p()
         self._check(lib.dll.uhd_rx_metadata_make(ctypes.byref(self._md)),
                     "rx_metadata_make")

@@ -201,6 +201,76 @@ tr:hover td { background:var(--hover); }
 /* F4: single-RX (Pluto) shows ONE Main sweep step; RF Explorer keeps LEFT/RIGHT */
 body.single-rx nav .step.rfe-only { display:none; }
 body:not(.single-rx) nav .step.single-only { display:none; }
+/* F8: live-ledger signal thumbnails, next-step chips, segment review, lightbox */
+.sig-thumb { width:72px; height:26px; display:block; background:#04070c;
+  border:1px solid #26303d; border-radius:2px; cursor:zoom-in; }
+.sig-thumb:hover { border-color:var(--cyan); box-shadow:0 0 4px var(--cyan); }
+#tbl-live-ledger td.thumb-cell { padding:2px 6px; }
+#tbl-live-ledger tr[data-sid] { cursor:pointer; }
+.ns-chip { display:inline-block; padding:2px 8px; border-radius:3px; font-size:10px;
+  font-family:var(--mono); background:transparent; border:1px solid; cursor:pointer;
+  white-space:nowrap; letter-spacing:.04em; }
+.ns-chip.listen { border-color:var(--cyan); color:var(--cyan); }
+.ns-chip.identify { border-color:var(--blue); color:var(--blue); }
+.ns-chip.test, .ns-chip.inventory { border-color:var(--amber); color:var(--amber); }
+.ns-chip.clear { border-color:var(--green); color:var(--green); }
+.ns-chip.review { border-color:var(--cyan); color:var(--cyan); background:var(--info-bg); }
+.ns-chip.urgent { border-color:var(--red); color:var(--red); background:var(--err-bg);
+  font-weight:bold; }
+.ns-chip.done { border-color:var(--line); color:var(--dim); cursor:default; }
+.ns-chip:hover { filter:brightness(1.25); }
+#review-banner { display:none; align-items:center; gap:12px; padding:5px 10px;
+  background:var(--warn-bg); border:1px solid var(--amber); color:var(--amber);
+  font-size:12px; border-radius:3px; }
+#review-banner .btn { padding:3px 10px; font-size:11px; }
+#sl-card { background:var(--panel); border:1px solid var(--line); border-radius:4px;
+  padding:16px; width:min(1060px,94vw); max-height:92vh; overflow-y:auto;
+  display:flex; flex-direction:column; gap:12px; }
+#sl-head { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+#sl-head b { font-size:16px; color:var(--bright); }
+#sl-close { margin-left:auto; }
+#sl-img { width:100%; background:#04070c; border:1px solid #26303d; border-radius:3px;
+  min-height:120px; }
+#sl-next { display:flex; gap:10px; align-items:baseline; font-size:12.5px;
+  padding:8px 10px; background:var(--panel2); border:1px solid var(--line);
+  border-radius:3px; }
+#sl-next:empty { display:none; }
+/* sweep-complete NEXT toast */
+#next-step-banner { display:none; position:fixed; top:12px; left:50%; transform:translateX(-50%);
+  z-index:80; align-items:center; gap:12px; padding:8px 12px; background:var(--panel);
+  border:1px solid var(--green); border-radius:6px; box-shadow:0 4px 18px rgba(0,0,0,.4);
+  font-size:13px; color:var(--txt); }
+#next-step-banner.show { display:flex; }
+#next-step-banner #next-step-msg b { color:var(--green); }
+#next-step-banner .btn { padding:5px 12px; font-size:12px; }
+#sl-nav-pos { margin-left:auto; }
+#sl-head #sl-close { margin-left:8px; }
+/* verification rundown — the ordered "how we know what this is" checklist */
+#sl-rundown { display:flex; flex-direction:column; gap:1px; border:1px solid var(--line);
+  border-radius:3px; overflow:hidden; }
+.rd-item { display:flex; gap:10px; align-items:flex-start; padding:7px 10px;
+  background:var(--panel2); font-size:12.5px; }
+.rd-item .rd-ic { flex:0 0 auto; width:16px; text-align:center; font-weight:bold; }
+.rd-item.done .rd-ic { color:var(--green); }
+.rd-item.pending .rd-ic { color:var(--amber); }
+.rd-item.na .rd-ic { color:var(--dim); }
+.rd-item .rd-body { flex:1 1 auto; min-width:0; }
+.rd-item .rd-title { color:var(--bright); }
+.rd-item .rd-detail { color:var(--dim); }
+.rd-item .rd-run { flex:0 0 auto; }
+.rd-cands { display:flex; flex-wrap:wrap; gap:5px; margin-top:5px; }
+.rd-cand { cursor:pointer; border:1px solid var(--cyan); color:var(--cyan);
+  border-radius:10px; padding:1px 9px; font-size:11px; background:var(--info-bg); }
+.rd-cand:hover { background:var(--cyan); color:var(--bg); }
+.rd-cand.top { border-color:var(--green); color:var(--green); background:var(--ok-bg); }
+#sl-compare { border:1px solid var(--cyan); border-radius:3px; padding:10px 12px;
+  background:var(--panel2); }
+#sl-compare h4 { font-size:12px; color:var(--cyan); margin:0 0 8px; letter-spacing:.05em; }
+.cmp-cols { display:grid; grid-template-columns:1fr 1fr; gap:14px; font-size:12px; }
+.cmp-cols .kv { font-size:12px; }
+.cmp-col h5 { font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:.06em;
+  margin:0 0 4px; }
+.cmp-match { color:var(--green); } .cmp-miss { color:var(--amber); }
 
 .overlay { position:fixed; inset:0; background:rgba(5,8,12,.93); display:none;
            align-items:center; justify-content:center; z-index:50; flex-direction:column; gap:26px; }
@@ -336,6 +406,8 @@ body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid va
   <div class="step" data-view="wiki"><div class="dot" id="dot-wiki"></div>SIGNAL WIKI</div>
   <div class="step" data-view="cases"><div class="dot" id="dot-cases"></div>CASE STUDIES</div>
   <div class="step" data-view="inventory"><div class="dot" id="dot-inventory"></div>INVENTORY (WiFi/BT)</div>
+  <div class="step" data-view="network"><div class="dot" id="dot-network"></div>NETWORK CHECK (LAN)</div>
+  <div class="step" data-view="devicelab"><div class="dot" id="dot-devicelab"></div>CAPTURE DEVICE (lab)</div>
   <div class="step" data-view="calibration"><div class="dot" id="dot-calibration"></div>CALIBRATION (shop)</div>
 </nav>
 
@@ -382,6 +454,7 @@ body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid va
         <option value="b220">B220 Mini (USRP SDR, 2 antenna ports)</option>
       </select>
       <button class="btn" id="btn-connect">CONNECT</button>
+      <button class="btn" id="btn-install-driver" title="Install the Pluto / USB radio driver — needed once per computer before the radio will connect">INSTALL RADIO DRIVER</button>
       <span id="device-msg" class="note">not connected</span>
     </div>
     <div id="device-roles" class="note" style="display:none; margin:6px 0; padding:6px 8px; border:1px solid var(--line,#345); border-radius:4px;"></div>
@@ -483,6 +556,20 @@ body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid va
   <div class="card">
     <h3>PREVIOUS SESSIONS</h3>
     <div class="scroll" style="max-height:180px"><table id="tbl-sessions"></table></div>
+  </div>
+  <div class="card" id="card-sweep-history">
+    <div class="row">
+      <h3 style="margin:0">HISTORICAL SWEEPS</h3>
+      <button class="btn" id="btn-history-refresh">REFRESH</button>
+      <span class="note" id="history-msg"></span>
+    </div>
+    <p class="note">Open a previous session above, then correct where a saved sweep was
+      performed or add technician notes here. <b>SAVE + RESCORE</b> preserves the raw RF
+      measurements, updates linked signal metadata, records an audit entry, and recomputes
+      every derived anomaly score in that session.</p>
+    <p class="note caution">Use <b>OUTSIDE / AMBIENT</b> only for exterior reference work.
+      An outside sweep must not receive indoor-strength or room-localization points.</p>
+    <div class="scroll" style="max-height:420px"><table id="tbl-sweep-history"></table></div>
   </div>
     </div>
   </details>
@@ -1142,6 +1229,246 @@ body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid va
   </div>
 </section>
 
+<!-- ============ DEVICE CAPTURE LAB ============ -->
+<section class="view" id="view-devicelab">
+  <h2>CAPTURE DEVICE <span class="tag">guided bench / known-DUT characterization</span></h2>
+  <p class="note">Walk a <b>test article</b> (known device) through photo → ID → antenna →
+    10&nbsp;ft / next-room / near-field RF → optional TX probe (ISM) → demod → commit.
+    Demod is intentional on the DUT — not bulk ambient intercept. Tech instructions update each step.</p>
+
+  <div class="card">
+    <div class="row" style="gap:10px;flex-wrap:wrap">
+      <button class="btn primary big" id="dl-start">▶ START CAPTURE</button>
+      <button class="btn" id="dl-refresh">REFRESH</button>
+      <span class="note" id="dl-radio">Radio: —</span>
+    </div>
+    <div id="dl-guide" class="card" style="margin-top:12px;background:var(--info-bg);border:1px solid var(--blue)">
+      <h3 style="margin:0 0 6px" id="dl-guide-title">Start a capture when ready</h3>
+      <ol id="dl-guide-do" class="note" style="margin:0 0 0 18px"></ol>
+      <p class="note" id="dl-guide-why" style="margin-top:8px"></p>
+    </div>
+  </div>
+
+  <div class="card" id="dl-panel" style="display:none">
+    <div class="row" style="justify-content:space-between;flex-wrap:wrap">
+      <b>Package <span id="dl-pkg-id"></span></b>
+      <span class="pill" id="dl-status">—</span>
+    </div>
+    <p class="note" id="dl-msg"></p>
+
+    <!-- PHOTO -->
+    <div id="dl-step-photo" class="dl-step">
+      <h3>1 · Photo of the device</h3>
+      <div class="row" style="gap:12px;align-items:flex-start;flex-wrap:wrap">
+        <div>
+          <video id="dl-video" width="320" height="240" autoplay playsinline muted
+                 style="background:#000;border:1px solid var(--line);border-radius:4px"></video>
+          <div class="row" style="margin-top:6px;gap:6px">
+            <button class="btn" id="dl-cam-start">ENABLE CAMERA</button>
+            <button class="btn primary" id="dl-snap">SNAP PHOTO</button>
+            <label class="btn" style="cursor:pointer">UPLOAD
+              <input type="file" id="dl-upload" accept="image/*" capture="environment" style="display:none">
+            </label>
+          </div>
+        </div>
+        <div>
+          <canvas id="dl-canvas" width="320" height="240"
+                  style="display:none;border:1px solid var(--line);border-radius:4px"></canvas>
+          <img id="dl-preview" alt="DUT photo" style="max-width:320px;display:none;border:1px solid var(--line)">
+        </div>
+      </div>
+      <div style="margin-top:10px">
+        <label class="note">Device name / make-model</label><br>
+        <input id="dl-name" placeholder="e.g. Wyze Cam v3, Toyota fob, unknown black box" style="width:100%;max-width:520px">
+      </div>
+      <div style="margin-top:8px">
+        <label class="note">Description (what it is, ports, how it behaves, power, anything useful)</label><br>
+        <textarea id="dl-desc" rows="3" style="width:100%;max-width:520px;font-family:inherit"
+          placeholder="e.g. Small cube cam, USB-C, glows blue, claims 2.4 GHz Wi-Fi…"></textarea>
+      </div>
+      <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
+        <input id="dl-photo-notes" placeholder="Photo notes (angle, label text…)" style="min-width:200px">
+        <button class="btn primary" id="dl-photo-next">SAVE PHOTO → CONTINUE</button>
+        <button class="btn" id="dl-photo-skip">SKIP PHOTO</button>
+      </div>
+    </div>
+
+    <!-- IDENTIFY -->
+    <div id="dl-step-identify" class="dl-step" style="display:none">
+      <h3>2 · Device class &amp; frequency guess</h3>
+      <p class="note" id="dl-lookup-note"></p>
+      <div style="margin-bottom:8px">
+        <label class="note">Description (edit anytime — used for catalog match)</label><br>
+        <textarea id="dl-desc2" rows="2" style="width:100%;max-width:520px;font-family:inherit"
+          placeholder="Refine description if needed"></textarea>
+      </div>
+      <div class="row" style="gap:8px;flex-wrap:wrap;margin-bottom:8px">
+        <label>Catalog class
+          <select id="dl-catalog"></select>
+        </label>
+        <label>Center MHz <input id="dl-center" type="number" step="0.001" style="width:110px"></label>
+        <label>BW kHz <input id="dl-bw" type="number" step="1" style="width:90px"></label>
+      </div>
+      <div id="dl-guesses" class="note"></div>
+      <p class="note" style="color:var(--cyan)"><b>Libre RXA</b> = omni · <b>Libre RXB</b> = directional · NF probes chosen on the next step.</p>
+      <button class="btn primary" id="dl-id-next">CONFIRM CLASS → ANTENNA</button>
+    </div>
+
+    <!-- ANTENNA -->
+    <div id="dl-step-antenna" class="dl-step" style="display:none">
+      <h3>3 · Libre ports &amp; antennas</h3>
+      <p class="note"><b>Libre RXA</b> = omni (whip/duck) · <b>Libre RXB</b> = directional (LPDA/Yagi).
+        Near-field step uses a dedicated probe type you pick below.</p>
+      <div class="row" style="gap:16px;flex-wrap:wrap;align-items:flex-start">
+        <div class="card" style="min-width:220px;flex:1">
+          <b style="color:var(--cyan)">Libre RXA — OMNI</b>
+          <p class="note">Plug omni on RXA / RX2-A. Default for 10 ft &amp; next room.</p>
+          <select id="dl-rxa-ant"></select>
+        </div>
+        <div class="card" style="min-width:220px;flex:1">
+          <b style="color:var(--amber)">Libre RXB — DIRECTIONAL</b>
+          <p class="note">Plug LPDA/Yagi on RXB / RX2-B. Peak toward DUT when used.</p>
+          <select id="dl-rxb-ant"></select>
+        </div>
+      </div>
+      <div style="margin-top:12px">
+        <b>Near-field probes</b> <span class="note">(assign which physical probe you will use at ≤1 ft)</span>
+        <div id="dl-nf-gallery" class="row" style="gap:10px;flex-wrap:wrap;margin-top:8px"></div>
+        <input type="hidden" id="dl-nf-ant" value="hfield_loop">
+      </div>
+      <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
+        <input id="dl-ant-notes" placeholder="Cable length / polarity / custom probe notes" style="min-width:260px">
+        <button class="btn primary" id="dl-ant-next">SAVE ANTENNAS → FREQ</button>
+      </div>
+      <p class="note" style="margin-top:8px"><b>TX probe later:</b> TX antenna on <b>TX/RX-A</b> only.</p>
+    </div>
+
+    <!-- FREQ CONFIRM -->
+    <div id="dl-step-freq" class="dl-step" style="display:none">
+      <h3>4 · Confirm frequency (power DUT on)</h3>
+      <p class="note">Power the device. Correct the tune if your spectrum peak is elsewhere.</p>
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        <label>Center MHz <input id="dl-center2" type="number" step="0.001" style="width:120px"></label>
+        <label>BW kHz <input id="dl-bw2" type="number" step="1" style="width:90px"></label>
+        <button class="btn primary" id="dl-freq-next">LOCK FREQ → 10 FT CAPTURE</button>
+      </div>
+    </div>
+
+    <!-- DISTANCE CAPTURES -->
+    <div id="dl-step-capture" class="dl-step" style="display:none">
+      <h3 id="dl-cap-title">5 · RF capture</h3>
+      <p class="note" id="dl-cap-instr"></p>
+      <div class="row" style="gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+        <label>Libre port
+          <select id="dl-cap-port">
+            <option value="RXA">RXA — omni</option>
+            <option value="RXB">RXB — directional</option>
+          </select>
+        </label>
+        <div id="dl-cap-nf-wrap" style="display:none">
+          <label>Near-field probe <select id="dl-cap-nf"></select></label>
+        </div>
+        <input id="dl-cap-notes" placeholder="Notes for this distance" style="min-width:180px">
+        <button class="btn primary big" id="dl-cap-go">⦿ CAPTURE NOW</button>
+      </div>
+      <!-- live visual: spectrum + SNR meter -->
+      <div class="card" style="background:var(--panel2);margin-top:8px">
+        <div class="row" style="justify-content:space-between;flex-wrap:wrap">
+          <b id="dl-cap-status">Waiting for capture…</b>
+          <span class="note" id="dl-cap-snr">SNR —</span>
+        </div>
+        <div style="height:14px;background:#1a222c;border-radius:3px;margin:6px 0;overflow:hidden">
+          <div id="dl-snr-bar" style="height:100%;width:0%;background:var(--dim);transition:width .25s"></div>
+        </div>
+        <canvas id="dl-spec" width="640" height="160"
+                style="width:100%;max-width:640px;height:160px;background:#0a0e14;border:1px solid var(--line);border-radius:3px"></canvas>
+        <p class="note" id="dl-spec-hint">Spectrum appears after each capture — peak = energy; flat = empty/wrong freq/port.</p>
+      </div>
+      <div id="dl-cap-results" style="margin-top:10px"></div>
+    </div>
+
+    <!-- STIMULATE -->
+    <div id="dl-step-stim" class="dl-step" style="display:none">
+      <h3>8 · TX interaction (optional)</h3>
+      <p class="note"><b>Which port:</b> TX antenna on <b>TX/RX-A</b> (channel&nbsp;0). Lab RX stays on
+        <b>RX2-B</b>. Default single-radio stim listens on the radio’s RX2 while TX keys TX/RX —
+        keep antennas isolated (don’t share a cable). Authorized ISM only unless you override.
+        Null ≠ clean.</p>
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        <label><input type="checkbox" id="dl-stim-override"> Override band (logged)</label>
+        <button class="btn primary" id="dl-stim-go">▶ PROBE TX (via TX/RX-A)</button>
+        <button class="btn" id="dl-stim-skip">SKIP → DEMOD</button>
+      </div>
+      <div id="dl-stim-result" style="margin-top:8px"></div>
+    </div>
+
+    <!-- DEMOD -->
+    <div id="dl-step-demod" class="dl-step" style="display:none">
+      <h3>9 · Demod / analyze DUT</h3>
+      <p class="note">Intentional lab analyze on this test article (modulation, candidates, optional audio).</p>
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        <select id="dl-demod-mode">
+          <option value="">auto</option>
+          <option value="nfm">nfm</option>
+          <option value="wfm">wfm</option>
+          <option value="am">am</option>
+          <option value="usb">usb</option>
+          <option value="lsb">lsb</option>
+        </select>
+        <button class="btn primary" id="dl-demod-go">◎ ANALYZE / DEMOD</button>
+        <button class="btn" id="dl-demod-skip">SKIP → COMMIT</button>
+      </div>
+      <div id="dl-demod-result" style="margin-top:8px"></div>
+      <audio id="dl-audio" controls style="display:none;width:100%;margin-top:8px"></audio>
+    </div>
+
+    <!-- COMMIT -->
+    <div id="dl-step-commit" class="dl-step" style="display:none">
+      <h3 style="color:var(--green)">10 · Ready to commit</h3>
+      <p class="note">Review the summary, then freeze the package (and save a signature library entry).</p>
+      <pre id="dl-summary" class="note" style="white-space:pre-wrap;background:var(--panel2);padding:10px;border-radius:4px"></pre>
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        <input id="dl-commit-notes" placeholder="Final notes (serial, battery, firmware…)" style="min-width:260px">
+        <label><input type="checkbox" id="dl-save-sig" checked> Save to signature library</label>
+        <button class="btn primary big" id="dl-commit">✓ COMMIT PACKAGE</button>
+      </div>
+      <p class="note" id="dl-commit-msg" style="color:var(--green);font-weight:bold"></p>
+    </div>
+
+    <div style="margin-top:14px">
+      <h4 class="note">Tech log</h4>
+      <div id="dl-log" class="note" style="max-height:160px;overflow:auto"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">Past packages</h3>
+    <div class="scroll" style="max-height:200px"><table id="dl-packages"></table></div>
+  </div>
+</section>
+
+<!-- ============ NETWORK CHECK (LAN) ============ -->
+<section class="view" id="view-network">
+  <h2>NETWORK CHECK <span class="tag">who is on the client's WiFi / LAN</span></h2>
+  <div class="card">
+    <p class="note">Lists every device on <b>this laptop's own network</b> — IP, MAC,
+    vendor, and hostname — by reading the ARP table, a quick ping sweep, and reverse DNS.
+    <b>Read-only discovery: no passwords, no interception.</b> Walk the list with the client and
+    mark each device they account for as <b>OWNED</b>; anything left is <b>unrecognized</b>.
+    Blocking is never automatic — you confirm each one, and it's logged.</p>
+    <div class="row">
+      <button class="btn primary" id="btn-netscan">SCAN NETWORK</button>
+      <label class="note" style="display:inline-flex;gap:5px;align-items:center">
+        <input type="checkbox" id="net-ping" checked> ping sweep (finds quiet devices)</label>
+      <label class="note" style="display:inline-flex;gap:5px;align-items:center">
+        <input type="checkbox" id="net-unrec-only"> unrecognized only</label>
+      <span class="note" id="net-msg"></span>
+    </div>
+    <div class="scroll" style="max-height:520px"><table id="tbl-network"></table></div>
+    <p class="note" id="net-enforce-note" style="display:none"></p>
+  </div>
+</section>
+
 <!-- ============ CALIBRATION ============ -->
 <section class="view" id="view-calibration">
   <h2>CALIBRATION / EXPERIMENT MODE <span class="tag">run at the shop, not client sites</span></h2>
@@ -1216,6 +1543,12 @@ body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid va
   <div id="sweep-pane-main">
   <div class="sweep-stage">
     <div class="chart-col">
+      <!-- F8: historic segment review — chart frozen on a past segment's
+           stored max-hold + average until BACK TO LIVE -->
+      <div id="review-banner">
+        <button class="btn" id="btn-back-live">◂ BACK TO LIVE</button>
+        <span id="review-banner-text"></span>
+      </div>
       <div class="chart-wrap">
         <canvas id="livechart" style="width:100%"></canvas>
         <div id="sweep-label-layer"></div>
@@ -1294,6 +1627,34 @@ body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid va
     <button class="btn primary" id="btn-next-segment" style="display:none">NEXT SEGMENT →</button>
     <button class="btn danger" id="btn-abort">ABORT PHASE (keep data)</button>
     <button class="btn" id="btn-hide-overlay">RUN IN BACKGROUND</button>
+  </div>
+</div>
+
+<!-- sweep-complete NEXT suggestion (so a finished sweep never just sits there) -->
+<div id="next-step-banner">
+  <span id="next-step-msg"></span>
+  <button class="btn primary" id="next-step-go"></button>
+  <button class="btn" id="next-step-x" title="dismiss">✕</button>
+</div>
+
+<!-- F8: signal lightbox — expanded fingerprint + everything known + actions -->
+<div class="overlay" id="sig-lightbox" style="z-index:70">
+  <div id="sl-card">
+    <div id="sl-head">
+      <button class="btn" id="sl-nav-prev" title="previous signal (←)">◂</button>
+      <button class="btn" id="sl-nav-next" title="next signal (→)">▸</button>
+      <b id="sl-title"></b>
+      <span id="sl-pills"></span>
+      <span class="note" id="sl-nav-pos"></span>
+      <button class="btn" id="sl-close">✕ CLOSE</button>
+    </div>
+    <img id="sl-img" alt="signal spectrum capture">
+    <div id="sl-next"></div>
+    <div id="sl-rundown"></div>
+    <div id="sl-compare" style="display:none"></div>
+    <div id="sl-grid" class="kv"></div>
+    <div class="row" id="sl-actions"></div>
+    <div class="note" id="sl-msg"></div>
   </div>
 </div>
 

@@ -272,6 +272,35 @@ class SweepController:
             raise RuntimeError("need two distinct radios to swap")
         return self.set_roles(sweeper=new_sweeper, monitor=new_monitor)
 
+    def _evict_dead_monitor(self):
+        """Drop a DEAD monitor handle from self.devices so the autoseek /
+        ensure_monitor machinery can reopen it. Without this a crashed monitor
+        (worker death or USB drop) lingers in the dict forever: the membership
+        checks below keep 'finding' it and every monitor action fails until a
+        manual reconnect. Never touches the sweeper (its recovery is
+        _ensure_device / the segment-retry loop)."""
+        mon = self._current_monitor()
+        if not mon or mon == self.active_source:
+            return
+        d = self.devices.get(mon)
+        try:
+            dead = d is not None and not d.is_alive()
+        except Exception:  # noqa: BLE001 — a broken handle counts as dead
+            dead = True
+        if not dead:
+            return
+        with self._monitor_probe_lock:
+            d2 = self.devices.get(mon)
+            if d2 is not d:                 # raced a reconnect — leave it be
+                return
+            self.devices.pop(mon, None)
+            try:
+                d.close()
+            except Exception:  # noqa: BLE001
+                pass
+            log.warning("monitor radio %s is dead — evicted; autoseek/"
+                        "ensure_monitor will reopen it", mon)
+
     def _try_open_pluto_monitor(self) -> bool:
         """Probe for a Pluto and, if present, open it as the concurrent monitor
         WITHOUT disturbing the sweeper. Non-fatal + cooldown-guarded so a missing
@@ -279,6 +308,7 @@ class SweepController:
         60 s instead of stalling every call. Returns True if the Pluto is now
         connected. Serialised so the background poller and a request thread can't
         both open it at once."""
+        self._evict_dead_monitor()          # a dead handle must not block reopen
         if not self.concurrent_enabled() or "pluto" in self.devices:
             return "pluto" in self.devices
         if self.active_source in (None, "pluto"):
@@ -331,7 +361,11 @@ class SweepController:
         def loop():
             while True:
                 try:
-                    if (self.concurrent_enabled() and "pluto" not in self.devices
+                    # NO membership pre-gate on self.devices: a DEAD monitor
+                    # handle must reach the probe so _evict_dead_monitor can
+                    # drop it and the reopen happens hands-free (the probe
+                    # early-returns cheaply when a LIVE Pluto is connected).
+                    if (self.concurrent_enabled()
                             and self.active_source not in (None, "pluto")):
                         self.autoseek_monitor()
                 except Exception:  # noqa: BLE001
@@ -753,12 +787,14 @@ class SweepController:
                 "INSERT INTO signals (sweep_id,session_id,segment_id,room,module,phase,"
                 "center_mhz,bw_khz,peak_dbm,avg_dbm,floor_dbm,persistence,classification,"
                 "matched_label,match_reason,caution,identity_tier,display_label,"
-                "group_key,group_label) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "group_key,group_label,bin_start,bin_end) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (sweep_id, session_id, segment_id, room, module, phase,
                  s.center_mhz, s.bw_khz, s.peak_dbm, s.avg_dbm, s.floor_dbm,
                  s.persistence, cls.classification, cls.matched_label,
                  cls.match_reason, int(cls.caution), cls.identity_tier,
-                 cls.display_label, cls.group_key, cls.group_label))
+                 cls.display_label, cls.group_key, cls.group_label,
+                 s.bin_start, s.bin_end))
 
         # F2: flip expected records found, accumulate anomalies for the side panel.
         # Same _matches rule the report uses, so live panel and PDF agree.
@@ -1292,7 +1328,8 @@ def postprocess_session(db, cfg, session_id: int):
         expl = explain_anomaly_score(cls, s["persistence"], None, None,
                                      interior_flag, room_flag)
         db.execute(
-            "UPDATE signals SET anomaly_score=?, score_reason=?, classification=?, "
+            "UPDATE signals SET interior_delta_db=NULL, localization_score=NULL, "
+            "strongest_room=NULL, anomaly_score=?, score_reason=?, classification=?, "
             "matched_label=?, match_reason=?, caution=?, identity_tier=?, "
             "display_label=?, group_key=?, group_label=? WHERE id=?",
             (expl.score, expl.summary, cls.classification, cls.matched_label,

@@ -9,7 +9,7 @@ import yaml
 _LOCK = threading.Lock()
 
 DEFAULTS = {
-    "app": {"host": "127.0.0.1", "port": 8765, "open_browser": True},
+    "app": {"host": "127.0.0.1", "port": 8765, "open_browser": True, "admin": False},
     "branding": {"company": "Shield TSCM", "logo_path": "", "operator": ""},
     "radius": {"broadcast_miles": 25, "land_mobile_miles": 5},
     "api_keys": {"opencellid": "", "radioreference_user": "", "radioreference_pass": "",
@@ -46,7 +46,27 @@ DEFAULTS = {
     # spectrum source family: "rfexplorer" (default, unchanged), "pluto", or
     # "b220" (SUOGOEST B220 Mini / USRP B210-compatible via UHD).
     # env SWEEP_SOURCE overrides this.
-    "device": {"simulate": False, "port": "", "baud": 500000, "source": "rfexplorer"},
+    "device": {
+        "simulate": False, "port": "", "baud": 500000, "source": "rfexplorer",
+        # SDR drivers (pluto/b220) run behind a supervised worker SUBPROCESS
+        # so a native USB fault (uhd.dll/libiio fastfail 0xc0000409) kills
+        # only the worker, not the app — the radio then auto-reconnects via
+        # the existing hiccup paths. See survey/sweep/worker_proxy.py.
+        # false = legacy in-process drivers (a native fault kills the app;
+        # the launcher restarts it in ~5 s).
+        "isolate_workers": True,
+        # test/preview only: run the SIMULATOR behind the worker too, so the
+        # whole IPC + crash-recovery path is exercisable with no hardware.
+        "isolate_simulator": False,
+        # a WEDGED (not crashed) native call can't be cancelled — after this
+        # many seconds the worker is killed and the call raises DeviceError
+        # (the reconnect paths then respawn it). Generous on purpose: a wide
+        # read_sweep legitimately runs tens of seconds. 0/null = wait forever
+        # (the pre-worker in-process behavior).
+        "worker_call_timeout_s": 300.0,
+        # first B220 open can flash FX3 firmware + FPGA (~20-45 s)
+        "worker_connect_timeout_s": 300.0,
+    },
     # ADALM-Pluto / AD936x SDR source. Only used when device.source == "pluto".
     "pluto": {
         "uri": "ip:192.168.2.1",          # env PLUTO_URI overrides; or "usb:"

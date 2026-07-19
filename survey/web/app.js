@@ -55,6 +55,11 @@ const App = {
   infoTab: "signals",      // which pane sits in the table slot while sustained
   liveWindow: null,        // {lo,hi} MHz zoom window for the LIVE pane (null = whole segment)
   _sweepSt: null, _lastTrace: null, _catKey: null,
+  // F8: ledger detail — historic segment review + row-hover highlight + lightbox
+  review: null,            // {segId, sid, trace, seg} while reviewing a past segment
+  hoverHL: null,           // {lo,hi} MHz — vertical highlight of the hovered ledger row
+  _segCache: {},           // segment_id -> /api/segments payload (immutable once written)
+  _ledgerKey: "",          // change-detection key so the ledger DOM isn't rebuilt every poll
 };
 
 /* ---------- F1: keep the laptop screen awake while the app is open ----------
@@ -120,8 +125,10 @@ function show(view) {
   if (view === "results") loadResults();
   if (view === "directional") loadDirectional();
   if (view === "inventory") loadInventory();
+  if (view === "network") loadNetwork();
   if (view === "wiki") loadWiki();
-  if (view === "session") { loadCaseFiles(); loadEngagement(); loadTechTasks(); loadReportOptions(); }
+  if (view === "devicelab") loadDeviceLab();
+  if (view === "session") { loadCaseFiles(); loadEngagement(); loadTechTasks(); loadReportOptions(); loadSweepHistory(); }
   if (view === "poi") loadPoi();
   if (view === "cases") loadCases();
   if (view === "triage") loadTriage();
@@ -461,9 +468,19 @@ function render(st) {
   // auto-open triage after an interior sweep finishes (once per sweep)
   if (st.sweep.running) {
     App._activeSweep = { phase: st.sweep.phase, sweep_id: st.sweep.sweep_id };
+    // remember so the ledger stays populated after the overlay closes
+    if (st.sweep.sweep_id) App._lastFinishedSweepId = st.sweep.sweep_id;
   } else if (App._wasSweepRunning && !App.seq) {
     const info = App._activeSweep;
+    if (info && info.sweep_id) App._lastFinishedSweepId = info.sweep_id;
     if (info && info.phase === "interior") maybeOpenTriageAfterSweep(info.sweep_id);
+    // don't leave the operator staring at a finished sweep — suggest the NEXT step
+    if (info) suggestNextStep(info.phase);
+    // final ledger pull with behavior / inventory enrichment while the id is hot
+    if (info && info.sweep_id) {
+      ledgerLast = 0;
+      refreshLiveSweepSignals(info.sweep_id);
+    }
     App._activeSweep = null;
   }
   App._wasSweepRunning = st.sweep.running;
@@ -515,8 +532,14 @@ function render(st) {
     const rbwNow = $("sweep-rbw-now");
     if (rbwNow && cs && !App._rbwFocused)
       rbwNow.textContent = cs.rbw_khz != null ? `now ${cs.rbw_khz} kHz` : "";
-    if (st.sweep.live_trace) {
-      drawTrace($("livechart"), st.sweep.live_trace, muteRangesFor());
+    // F8: while reviewing a historic segment the chart stays frozen on it —
+    // the sweep (and its data) continues server-side. Review is STICKY: only
+    // BACK TO LIVE, clicking another row, or the sweep ending leaves it —
+    // an auto-exit on segment advance made review flash away on fast segments.
+    if (App.review) {
+      drawSegmentReview();
+    } else if (st.sweep.live_trace) {
+      drawTrace($("livechart"), st.sweep.live_trace, muteRangesFor(), App.hoverHL);
       buildSweepLabelOverlays($("livechart"), st.sweep.live_trace,
         sweepChartSignals(st.sweep.live_trace));
       pushWaterfall($("waterfall"), st.sweep.live_trace);
@@ -549,11 +572,22 @@ function render(st) {
     so.classList.remove("show");
     MonitorDock.overlayClosed();   // hand the monitor to the page dock (keeps playing)
     App.overlayHidden = false;
-    App.liveSweepSignals = [];
-    // F3 focus/mute are sweep-overlay-only — clear them so they don't bleed into
-    // other views (e.g. the baseline strip) after the sweep ends
-    if (App.focusAnomalies || Object.keys(App.mutedKeys).length) {
-      App.focusAnomalies = false; App.mutedKeys = {}; syncFocusButton();
+    // KEEP liveSweepSignals after the sweep ends so the hit ledger stays
+    // clickable (behavior class + inventory match + lightbox). Previously this
+    // wiped the list every idle poll → empty ledger even with hundreds of hits.
+    // New sweeps replace the list via refreshLiveSweepSignals.
+    //
+    // cold open / page reload: rehydrate from last finished sweep
+    if ((!App.liveSweepSignals || !App.liveSweepSignals.length)) {
+      let sid = App._lastFinishedSweepId;
+      if (!sid && (st.sweeps || []).length) {
+        const done = (st.sweeps || []).filter(s => s.status === "done" && s.id);
+        if (done.length) sid = done[done.length - 1].id;
+      }
+      if (sid) {
+        App._lastFinishedSweepId = sid;
+        refreshLiveSweepSignals(sid);
+      }
     }
   }
 
@@ -722,6 +756,8 @@ function sweepChartSignals(t) {
     matched_label: s.matched_label,
     match_reason: s.match_reason,
     caution: s.caution,
+    device_hint: s.device_hint,
+    id_device_class: s.id_device_class,
     live: false,
   }));
   return mergeSweepLabels([...db, ...livePeaksFromTrace(t)]);
@@ -779,8 +815,12 @@ function sweepLabelText(item) {
   }
   if (item.kind === "scanmore") return `+${item.count} detecting…`;
   if (tier === "SCANNING") return "Detecting…";
-  if (tier === "ANOMALY") return `ANOMALY · ${fmtF(s.center_mhz)}`;
-  return s.display_label || s.matched_label || fmtF(s.center_mhz);
+  // device-type tag: signature ID > behavioral class > band guess
+  const hint = s.id_device_class || s.device_hint
+    || (s.behavior && s.behavior.label) || "";
+  if (tier === "ANOMALY")
+    return hint ? `${hint} · ${fmtF(s.center_mhz)}` : `ANOMALY · ${fmtF(s.center_mhz)}`;
+  return s.display_label || s.matched_label || hint || fmtF(s.center_mhz);
 }
 
 function buildSweepLabelOverlays(canvas, t, signals) {
@@ -868,17 +908,20 @@ function buildSweepLabelOverlays(canvas, t, signals) {
 }
 
 /* ---------- canvas traces (RF Explorer for Windows style) ---------- */
-function drawTrace(canvas, t, muteRanges) {
+function drawTrace(canvas, t, muteRanges, highlight) {
   /* three traces drawn together: realtime (green, filled), average (cyan),
      max-hold (yellow) on a black scope grid — RF Explorer for Windows look.
      F3: muteRanges (MHz {lo,hi}[]) pulls those bins to the floor ("dampen the
      expected") and the chart auto-rescales to what's left, so weak anomalies
-     fill the view instead of hugging the noise floor. */
+     fill the view instead of hugging the noise floor.
+     F8: t.amps may be absent (historic segment review draws only the stored
+     max-hold + average); highlight = {lo,hi} MHz draws a vertical band so a
+     hovered ledger row's signal stands out from the rest of the segment. */
   const ctx = canvas.getContext("2d");
   const W = canvas.width = canvas.clientWidth || 800;
   const H = canvas.height = canvas.clientHeight || 230;
   ctx.fillStyle = "#000208"; ctx.fillRect(0, 0, W, H);
-  const n = (t.amps || []).length;
+  const n = (t.amps || t.maxpeak || t.avg || []).length;
   if (!n) return;
   const freqs = t.freqs || [];
   const ranges = (muteRanges && muteRanges.length && freqs.length === n) ? muteRanges : null;
@@ -917,6 +960,21 @@ function drawTrace(canvas, t, muteRanges) {
     ctx.fillStyle = "#5a6a80"; ctx.font = "9px monospace";
     ctx.fillText(g + " dBm", 4, Y(g) - 2);
   }
+  // F8: hovered ledger row — vertical band behind the traces marking that
+  // signal's slice of the segment (min 2 px so narrowband hits stay visible)
+  if (highlight && freqs.length > 1) {
+    const f0 = freqs[0], f1 = freqs[freqs.length - 1];
+    if (f1 > f0 && highlight.hi > f0 && highlight.lo < f1) {
+      const x0 = Math.max(0, (highlight.lo - f0) / (f1 - f0) * W);
+      const x1 = Math.min(W, (highlight.hi - f0) / (f1 - f0) * W);
+      const w = Math.max(x1 - x0, 2);
+      ctx.fillStyle = "rgba(26,188,156,.16)";
+      ctx.fillRect(x0, 0, w, H);
+      ctx.strokeStyle = "rgba(26,188,156,.85)"; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.moveTo(x0 + .5, 0); ctx.lineTo(x0 + .5, H); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(x0 + w - .5, 0); ctx.lineTo(x0 + w - .5, H); ctx.stroke();
+    }
+  }
   const plot = (arr, color, width) => {
     if (!arr || arr.length < 2) return;
     ctx.strokeStyle = color; ctx.lineWidth = width; ctx.beginPath();
@@ -926,21 +984,24 @@ function drawTrace(canvas, t, muteRanges) {
     }
     ctx.stroke();
   };
-  // realtime: filled area under the trace like the vendor app
-  ctx.beginPath();
-  ctx.moveTo(0, H);
-  for (let i = 0; i < n; i++) ctx.lineTo(i / (n - 1) * W, Y(v(t.amps, i)));
-  ctx.lineTo(W, H); ctx.closePath();
-  const grad = ctx.createLinearGradient(0, 0, 0, H);
-  grad.addColorStop(0, "rgba(0,255,90,0.35)");
-  grad.addColorStop(1, "rgba(0,255,90,0.04)");
-  ctx.fillStyle = grad; ctx.fill();
+  // realtime: filled area under the trace like the vendor app (absent in the
+  // historic-segment review — only avg/max-hold were persisted, by design)
+  if (t.amps) {
+    ctx.beginPath();
+    ctx.moveTo(0, H);
+    for (let i = 0; i < n; i++) ctx.lineTo(i / (n - 1) * W, Y(v(t.amps, i)));
+    ctx.lineTo(W, H); ctx.closePath();
+    const grad = ctx.createLinearGradient(0, 0, 0, H);
+    grad.addColorStop(0, "rgba(0,255,90,0.35)");
+    grad.addColorStop(1, "rgba(0,255,90,0.04)");
+    ctx.fillStyle = grad; ctx.fill();
+  }
   plot(t.maxpeak, "#ffd000", 1.1);    // max-hold (yellow)
   plot(t.avg, "#00c8ff", 1.1);        // average (cyan)
   plot(t.amps, "#00ff5a", 1.5);       // realtime (green) on top
   ctx.font = "10px monospace";
   let lx = W - 250;
-  [["REALTIME", "#00ff5a", true], ["AVG", "#00c8ff", !!t.avg], ["MAX HOLD", "#ffd000", !!t.maxpeak]]
+  [["REALTIME", "#00ff5a", !!t.amps], ["AVG", "#00c8ff", !!t.avg], ["MAX HOLD", "#ffd000", !!t.maxpeak]]
     .forEach(([label, color, on]) => {
       if (!on) return;
       ctx.fillStyle = color; ctx.fillRect(lx, 8, 10, 3);
@@ -1061,36 +1122,75 @@ async function refreshLiveSweepSignals(sweepId) {
   try {
     const sigs = await api("/api/signals?sweep_id=" + sweepId);
     App.liveSweepSignals = sigs;
-    const tierName = s => statusLabel(signalTier(s));
-    // F3: in focus mode (or with individual mutes) the ledger shows only the
-    // anomalies/cautions left after dampening the expected — full list is kept above.
-    const shown = sigs.filter(s => {
-      if (isMutedSignal(s)) return false;
-      if (App.focusAnomalies) {
-        const tt = signalTier(s);
-        return tt === "ANOMALY" || s.caution;
-      }
-      return true;
-    });
-    const header = "<tr><th>#</th><th>Frequency</th><th>Peak</th><th>Width</th><th>Status</th><th>Identity</th></tr>";
-    const body = shown.slice().reverse().map((s, i) => {
-      const k = tierName(s);
-      const cls = s.identity_tier || (s.classification === "VERIFIED" ? "IDENTIFIED"
-        : s.classification === "PLAUSIBLE" ? "KNOWN_BAND" : "ANOMALY");
-      const id = s.display_label || s.matched_label || s.match_reason || "";
-      return `<tr><td>${shown.length - i}</td><td><a class="freqlink" href="#" ` +
-        `data-center="${s.center_mhz}" data-label="${esc(id)}">${fmtF(s.center_mhz)}</a></td>` +
-        `<td>${s.peak_dbm} dBm</td><td>${s.bw_khz != null ? Math.round(s.bw_khz) + " kHz" : "—"}</td>` +
-        `<td><span class="pill ${cls}">${k}</span>${s.caution ? " ⚠" : ""}</td>` +
-        `<td>${esc(id).slice(0, 70)}</td></tr>`;
-    }).join("");
-    // apply the empty-state to the BODY only (header is always non-empty, so the
-    // old `header+body || fallback` could never show it); colspan spans all cols
-    const empty = App.focusAnomalies
-      ? "<tr><td colspan=6 class='note'>no anomalies — all detected signals are expected/known</td></tr>"
-      : "<tr><td colspan=6 class='note'>no signals detected yet</td></tr>";
-    $("tbl-live-ledger").innerHTML = header + (body || empty);
+    renderLiveLedger();
   } catch (e) { /* ledger is best-effort during sweep */ }
+}
+
+function renderLiveLedger() {
+  const sigs = App.liveSweepSignals || [];
+  const tierName = s => statusLabel(signalTier(s));
+  // F3: in focus mode (or with individual mutes) the ledger shows only the
+  // anomalies/cautions left after dampening the expected — full list is kept above.
+  const shown = sigs.filter(s => {
+    if (isMutedSignal(s)) return false;
+    if (App.focusAnomalies) {
+      const tt = signalTier(s);
+      return tt === "ANOMALY" || s.caution;
+    }
+    return true;
+  });
+  // F8: rebuild the DOM only when a row actually changed — keeps hover state
+  // alive and stops the thumbnails re-flowing on every poll
+  const key = (App.focusAnomalies ? "F" : "") + Object.keys(App.mutedKeys).join(",") + "|"
+    + shown.map(s => [s.id, s.triage_status, s.analysis_utc || 0, s.id_updated_utc || 0,
+                      s.anomaly_score || 0, s.classification, s.identity_tier,
+                      s.display_label, s.peak_dbm,
+                      (s.behavior && s.behavior.class_id) || "",
+                      s.inventory_summary || ""].join(":")).join("|");
+  if (key === App._ledgerKey) return;
+  App._ledgerKey = key;
+  const header = "<tr><th>#</th><th>Signal</th><th>Frequency</th><th>Peak</th><th>SNR</th>" +
+    "<th>Width</th><th>Persist</th><th>Status</th><th>Identity / verdict</th><th>Next step</th></tr>";
+  const body = shown.slice().reverse().map((s, i) => {
+    const k = tierName(s);
+    const cls = s.identity_tier || (s.classification === "VERIFIED" ? "IDENTIFIED"
+      : s.classification === "PLAUSIBLE" ? "KNOWN_BAND" : "ANOMALY");
+    const id = s.display_label || s.matched_label || s.match_reason || "";
+    // once ANALYZE ran, its verdict IS the identity answer — show it first
+    let idText = s.analysis_summary ? "🎧 " + s.analysis_summary : id;
+    if (!idText && s.behavior && s.behavior.label)
+      idText = s.behavior.label;
+    if (s.inventory_summary)
+      idText = (idText ? idText + " · " : "") + "📡 " + s.inventory_summary;
+    const ns = s.next_step;
+    const nsCell = ns
+      ? `<button class="ns-chip ${esc(ns.kind)}" data-sid="${s.id}" title="${esc(ns.detail)}">${esc(ns.action)}</button>`
+      : "—";
+    const behTitle = s.behavior && s.behavior.phrase
+      ? esc(s.behavior.phrase) : "";
+    return `<tr data-sid="${s.id}" data-seg="${s.segment_id ?? ""}" data-center="${s.center_mhz}" ` +
+      `data-bw="${s.bw_khz ?? ""}" title="click row: review the segment it was found in (max hold + average)">` +
+      `<td>${shown.length - i}</td>` +
+      `<td class="thumb-cell"><img class="sig-thumb" loading="lazy" alt="" data-sid="${s.id}" ` +
+      `src="/api/signals/${s.id}/image.svg?size=thumb" ` +
+      `onerror="this.style.visibility='hidden'" title="click: expand signal picture + details"></td>` +
+      `<td><a class="freqlink" href="#" data-center="${s.center_mhz}" data-label="${esc(id)}" ` +
+      `data-sid="${s.id}" data-attr="${esc(s.attribution_status || "")}">${fmtF(s.center_mhz)}</a></td>` +
+      `<td>${s.peak_dbm} dBm</td>` +
+      `<td>${s.snr_db != null ? s.snr_db + " dB" : "—"}</td>` +
+      `<td>${s.bw_khz != null ? Math.round(s.bw_khz) + " kHz" : "—"}</td>` +
+      `<td>${s.persistence != null ? Math.round(s.persistence * 100) + "%" : "—"}</td>` +
+      `<td><span class="pill ${cls}">${k}</span>${s.caution ? " ⚠" : ""}` +
+      `${s.is_novel_to_address ? " <span class='caution' title='new to this address'>★</span>" : ""}</td>` +
+      `<td title="${behTitle}">${esc(idText).slice(0, 80)}</td>` +
+      `<td>${nsCell}</td></tr>`;
+  }).join("");
+  // apply the empty-state to the BODY only (header is always non-empty, so the
+  // old `header+body || fallback` could never show it); colspan spans all cols
+  const empty = App.focusAnomalies
+    ? "<tr><td colspan=10 class='note'>no anomalies — all detected signals are expected/known</td></tr>"
+    : "<tr><td colspan=10 class='note'>no signals detected yet</td></tr>";
+  $("tbl-live-ledger").innerHTML = header + (body || empty);
 }
 
 /* ---------- session / device / baseline ---------- */
@@ -1177,7 +1277,28 @@ $("btn-connect").onclick = async () => {
       (d.modules.length < 2 ? `<div>⚠ Coverage</div><div class="caution">single-module mode — coverage gap will be noted in the report</div>` : "") +
       (d.warnings.length ? `<div>⚠ Warnings</div><div class="caution">${d.warnings.map(esc).join("<br>")}</div>` : "");
     renderDeviceRoles();
-  } catch (e) { $("device-msg").textContent = "FAILED: " + e.message; }
+  } catch (e) {
+    $("device-msg").textContent = "FAILED: " + e.message;
+    // a driver/native-load failure is the classic first-run wall — nudge the
+    // operator straight to the in-app driver installer instead of a dead end
+    const drv = $("btn-install-driver");
+    if (drv && /driver|libiio|LoadLibrary|not loadable|no device|find the file/i.test(e.message))
+      drv.classList.add("primary");
+  }
+};
+// INSTALL RADIO DRIVER — runs the bundled Pluto/USB driver installer from inside
+// the app so the client never has to find a .exe on the stick.
+if ($("btn-install-driver")) $("btn-install-driver").onclick = async () => {
+  const b = $("btn-install-driver");
+  b.disabled = true;
+  $("device-msg").textContent = "launching the radio driver installer…";
+  try {
+    const r = await api("/api/device/install_driver", {});
+    $("device-msg").textContent = r.message || "driver installer launched — approve its prompts, then CONNECT";
+  } catch (e) {
+    $("device-msg").textContent = "driver install failed: " + e.message;
+  }
+  b.disabled = false;
 };
 renderDeviceRoles();   // show current radio roles on page load too
 
@@ -1233,13 +1354,94 @@ async function loadSessions() {
         `<td>${esc(s.address)}</td><td><button class="btn" onclick="openSession(${s.id})">OPEN</button></td></tr>`).join("");
   } catch (e) { /* no sessions yet */ }
 }
+
+function historyPhaseOptions(value) {
+  return `<option value="ambient"${value === "ambient" ? " selected" : ""}>OUTSIDE / AMBIENT</option>` +
+         `<option value="interior"${value === "interior" ? " selected" : ""}>INSIDE / INTERIOR</option>`;
+}
+
+async function loadSweepHistory(message) {
+  const table = $("tbl-sweep-history");
+  if (!table) return;
+  try {
+    const data = await api("/api/sweeps/history");
+    App.sweepHistory = data.sweeps || [];
+    const session = data.session || {};
+    App.sweepHistorySessionId = session.id || null;
+    table.innerHTML =
+      "<tr><th># / started</th><th>status</th><th>phase</th><th>room / location</th>" +
+      "<th>signals</th><th>technician notes</th><th></th></tr>" +
+      App.sweepHistory.map(w => {
+        const editable = w.status !== "running" &&
+                         (w.phase === "ambient" || w.phase === "interior");
+        const mins = w.finished_utc && w.started_utc
+          ? Math.max(0, (w.finished_utc - w.started_utc) / 60).toFixed(1) + " min"
+          : "incomplete";
+        const counts = `${w.signal_count || 0} total` +
+          `<div class="note">${w.high_count || 0} high · ${w.medium_count || 0} medium · ${w.low_count || 0} low</div>`;
+        const phase = editable
+          ? `<select id="hist-phase-${w.id}">${historyPhaseOptions(w.phase)}</select>`
+          : `<span class="pill ${esc(w.status)}">${esc(w.phase)}</span>`;
+        return `<tr>` +
+          `<td><b>#${w.id}</b><div class="note">${new Date(w.started_utc * 1000).toLocaleString()}</div>` +
+          `<div class="note">${esc(w.module || "")} · ${esc(w.profile || "")} · ${mins}</div></td>` +
+          `<td><span class="pill ${esc(w.status)}">${esc(w.status)}</span></td>` +
+          `<td>${phase}</td>` +
+          `<td><input id="hist-room-${w.id}" value="${esc(w.room || "")}" ` +
+          `style="width:150px" ${editable ? "" : "disabled"}></td>` +
+          `<td>${counts}</td>` +
+          `<td><textarea id="hist-notes-${w.id}" style="width:240px;height:58px;` +
+          `background:var(--input-bg);color:var(--txt);border:1px solid var(--line);font-family:var(--mono)" ` +
+          `${editable ? "" : "disabled"}>${esc(w.operator_notes || "")}</textarea>` +
+          (w.last_edited_utc ? `<div class="note">edited ${new Date(w.last_edited_utc * 1000).toLocaleString()}</div>` : "") +
+          `</td><td>${editable ? `<button class="btn primary" onclick="saveHistoricalSweep(${w.id})">SAVE + RESCORE</button>` : ""}` +
+          `<button class="btn" onclick="show('results')">SESSION RESULTS</button></td></tr>`;
+      }).join("");
+    $("history-msg").textContent = message ||
+      `session #${session.id || "—"} · ${App.sweepHistory.length} saved sweep${App.sweepHistory.length === 1 ? "" : "s"}`;
+  } catch (e) {
+    App.sweepHistory = [];
+    App.sweepHistorySessionId = null;
+    table.innerHTML = "";
+    $("history-msg").textContent = e.message === "no session" ? "open or create a session first" : e.message;
+  }
+}
+
+window.saveHistoricalSweep = async (id) => {
+  const row = (App.sweepHistory || []).find(w => w.id === id);
+  if (!row) return;
+  const phase = $("hist-phase-" + id).value;
+  const room = $("hist-room-" + id).value.trim();
+  const notes = $("hist-notes-" + id).value.trim();
+  const changed = phase !== row.phase || room !== (row.room || "");
+  if (changed && !confirm(
+      `Correct sweep #${id} from ${row.phase}/${row.room || "unspecified"} to ` +
+      `${phase}/${room || (phase === "ambient" ? "exterior" : "unspecified")}?\n\n` +
+      "Raw measurements will be preserved. All session anomaly scores will be recomputed.")) return;
+  $("history-msg").textContent = `saving sweep #${id} and rescoring the session…`;
+  try {
+    const r = await api("/api/sweep/history/update", {
+      session_id: App.sweepHistorySessionId, sweep_id: id, phase, room, notes
+    });
+    await loadSweepHistory(r.message || "saved and rescored");
+    loadResults();
+    loadBaseline();
+  } catch (e) {
+    $("history-msg").textContent = "FAILED: " + e.message;
+  }
+};
+
+$("btn-history-refresh").onclick = () => loadSweepHistory("history refreshed");
+
 window.openSession = async (id) => {
   await api("/api/session/open", { id });
+  await poll();
   loadBaseline();
   loadEngagement();
   loadCaseFiles();
   loadTechTasks();
   loadReportOptions();
+  loadSweepHistory(`opened session #${id}`);
   App.triage = null;
   App.triageRemaining = 0;
 };
@@ -1466,6 +1668,581 @@ function freqLinkDelegate(e) {
   const el = $(id);
   if (el) el.addEventListener("click", freqLinkDelegate, true);  // capture: beat the row onclick
 });
+
+/* ---------- F8: ledger row → segment review / thumbnail lightbox / next step ----------
+   Bubble-phase, so the capture-phase freqLinkDelegate above still owns clicks
+   that land on the frequency link (tune & listen, unchanged). */
+(function wireLedger() {
+  const ledger = $("tbl-live-ledger");
+  if (!ledger) return;
+  ledger.addEventListener("click", (e) => {
+    const thumb = e.target.closest(".sig-thumb");
+    if (thumb) { openSigLightbox(parseInt(thumb.dataset.sid, 10)); return; }
+    const chip = e.target.closest(".ns-chip");
+    if (chip) { nextStepAction(parseInt(chip.dataset.sid, 10)); return; }
+    const tr = e.target.closest("tr[data-sid]");
+    if (tr) openSegmentReview(parseInt(tr.dataset.sid, 10));
+  });
+  // hovering a row highlights that signal vertically on whichever segment the
+  // chart is showing (live or under review); leaving the table clears it
+  ledger.addEventListener("mouseover", (e) => {
+    const tr = e.target.closest("tr[data-sid]");
+    if (!tr || tr === App._hoverRow) return;
+    App._hoverRow = tr;
+    const c = parseFloat(tr.dataset.center);
+    const half = Math.max((parseFloat(tr.dataset.bw) || 50) / 2000, 0.01);
+    App.hoverHL = { lo: c - half, hi: c + half };
+    redrawSweepChart();
+  });
+  ledger.addEventListener("mouseleave", () => {
+    App._hoverRow = null;
+    App.hoverHL = null;
+    redrawSweepChart();
+  });
+})();
+
+// redraw the sweep chart NOW (hover feedback can't wait for the 1 Hz poll)
+function redrawSweepChart() {
+  if (App.review) { drawSegmentReview(); return; }
+  const t = App._lastTrace;
+  if (t && $("sweep-overlay").classList.contains("show"))
+    drawTrace($("livechart"), t, muteRangesFor(), App.hoverHL);
+}
+
+/* -- historic segment review: click a ledger row, see the segment it was
+      found in — the stored max hold + average (the realtime trace is never
+      persisted). View-only; the radio and the sweep are untouched. -- */
+async function openSegmentReview(sid) {
+  const s = (App.liveSweepSignals || []).find(x => x.id === sid);
+  if (!s || !s.segment_id) return;
+  try {
+    let seg = App._segCache[s.segment_id];
+    if (!seg) {
+      seg = await api("/api/segments/" + s.segment_id);
+      App._segCache[s.segment_id] = seg;
+    }
+    if (!seg.data || !seg.data.freqs || seg.data.freqs.length < 2) return;
+    // version-skew guard: if the page HTML predates this app.js, the review
+    // banner doesn't exist — tell the operator instead of half-working
+    if (!$("review-banner") || !$("review-banner-text")) {
+      if (!App._staleWarned) {
+        App._staleWarned = true;
+        alert("The app was updated but this page didn't fully reload.\n" +
+              "Press Ctrl+F5 to hard-refresh, then try again.");
+      }
+      return;
+    }
+    App.review = { segId: s.segment_id, sid, seg,
+      trace: { freqs: seg.data.freqs, avg: seg.data.avg, maxpeak: seg.data.maxpeak,
+               low: seg.low_mhz, high: seg.high_mhz } };
+    App._lastLabelKey = "";        // labels must rebuild for the review bounds
+    const nSig = (seg.signals || []).length;
+    $("review-banner-text").textContent =
+      `REVIEWING SEGMENT ${seg.low_mhz.toFixed(3)}–${seg.high_mhz.toFixed(3)} MHz — ` +
+      `max hold + average as recorded (${nSig} signal${nSig === 1 ? "" : "s"}) — ` +
+      "sweep continues in the background";
+    $("review-banner").style.display = "flex";
+    const wf = $("waterfall");
+    if (wf) wf.style.opacity = ".25";   // the waterfall is live-only — dim it
+    drawSegmentReview();
+  } catch (e) { $("ft-msg").textContent = "segment review failed: " + e.message; }
+}
+
+function drawSegmentReview() {
+  if (!App.review) return;
+  const t = App.review.trace;
+  const canvas = $("livechart");
+  drawTrace(canvas, t, null, App.hoverHL);
+  // unmistakable on-canvas mode tag, independent of the banner
+  const ctx = canvas.getContext("2d");
+  ctx.font = "bold 12px monospace";
+  ctx.fillStyle = "#f39c12";
+  ctx.fillText("◂ SEGMENT REVIEW — recorded max hold + average", 4, 26);
+  // DB-identified labels only — livePeaksFromTrace's "Detecting…" chips are a
+  // live-sweep affordance, noise on a finished segment
+  buildSweepLabelOverlays(canvas, t,
+    sweepChartSignals(t).filter(x => !x.live));
+}
+
+function exitSegmentReview() {
+  if (!App.review) return;
+  App.review = null;
+  App._lastLabelKey = "";
+  const b = $("review-banner");
+  if (b) b.style.display = "none";
+  const wf = $("waterfall");
+  if (wf) wf.style.opacity = "";
+  redrawSweepChart();
+}
+if ($("btn-back-live")) $("btn-back-live").onclick = exitSegmentReview;
+
+/* -- next-step chip: the one obvious action for this row -- */
+function nextStepAction(sid) {
+  const s = (App.liveSweepSignals || []).find(x => x.id === sid);
+  if (!s || !s.next_step) return;
+  const ns = s.next_step;
+  if (ns.kind === "listen") {
+    listenAt(s.center_mhz, s.display_label || s.matched_label || "", ns.mode,
+             s.id, s.attribution_status || null);
+  } else if (ns.kind === "clear" && !document.body.classList.contains("demo")) {
+    sigTriage(sid, "cleared");     // cross it off in one click
+  } else {
+    openSigLightbox(sid);          // test/inventory/urgent/review/done → details
+  }
+}
+
+async function sigTriage(sid, status) {
+  try {
+    await api(`/api/signals/${sid}/triage`, { status });
+    const s = (App.liveSweepSignals || []).find(x => x.id === sid);
+    if (s) s.triage_status = status;
+    App._ledgerKey = "";           // repaint the ledger with the new state
+    renderLiveLedger();
+    closeSigLightbox();
+  } catch (e) {
+    const m = $("sl-msg");
+    if (m && $("sig-lightbox").classList.contains("show"))
+      m.textContent = "triage failed: " + e.message;
+    else $("ft-msg").textContent = "triage failed: " + e.message;
+  }
+}
+
+/* -- lightbox nav: the ordered id list matches what the ledger shows, so the
+   ◂ ▸ arrows step through signals in the same order the operator sees them -- */
+function lightboxOrder() {
+  return (App.liveSweepSignals || []).filter(x => {
+    if (isMutedSignal(x)) return false;
+    if (App.focusAnomalies) { const t = signalTier(x); return t === "ANOMALY" || x.caution; }
+    return true;
+  }).slice().reverse().map(x => x.id);
+}
+function updateLightboxNav() {
+  const ids = App._lightboxIds || [];
+  const i = App._lightboxIdx;
+  const pos = $("sl-nav-pos");
+  if (pos) pos.textContent = ids.length ? `${i + 1} / ${ids.length}` : "";
+  const has = ids.length > 1;
+  if ($("sl-nav-prev")) $("sl-nav-prev").style.visibility = has ? "" : "hidden";
+  if ($("sl-nav-next")) $("sl-nav-next").style.visibility = has ? "" : "hidden";
+}
+function lightboxStep(delta) {
+  const ids = App._lightboxIds || [];
+  if (ids.length < 2) return;
+  App._lightboxIdx = (App._lightboxIdx + delta + ids.length) % ids.length;
+  openSigLightbox(ids[App._lightboxIdx]);   // keeps the same list; re-indexes below
+}
+
+/* -- lightbox: the expanded signal picture + everything known about it -- */
+async function openSigLightbox(sid) {
+  let s = (App.liveSweepSignals || []).find(x => x.id === sid);
+  // Results / triage tables may open a signal that isn't in the live ledger —
+  // pull the enriched row (behavior + inventory) on demand.
+  if (!s) {
+    try {
+      const all = await api("/api/signals");
+      s = (all || []).find(x => x.id === sid);
+      if (s) {
+        App.liveSweepSignals = App.liveSweepSignals || [];
+        if (!App.liveSweepSignals.some(x => x.id === sid))
+          App.liveSweepSignals.push(s);
+      }
+    } catch (_) { /* fall through */ }
+  }
+  if (!s) return;
+  // (re)build the nav list; keep the operator's position on the clicked signal
+  App._lightboxIds = lightboxOrder();
+  App._lightboxIdx = Math.max(0, App._lightboxIds.indexOf(sid));
+  updateLightboxNav();
+  const cls = s.identity_tier || (s.classification === "VERIFIED" ? "IDENTIFIED"
+    : s.classification === "PLAUSIBLE" ? "KNOWN_BAND" : "ANOMALY");
+  $("sl-title").textContent = fmtF(s.center_mhz) +
+    ((s.display_label || s.matched_label) ? " — " + (s.display_label || s.matched_label) : "");
+  $("sl-pills").innerHTML =
+    `<span class="pill ${cls}">${esc(statusLabel(signalTier(s)))}</span>` +
+    (s.caution ? " <span class='caution'>⚠ caution band</span>" : "") +
+    (s.is_novel_to_address ? " <span class='caution'>★ new to this address</span>" : "");
+  $("sl-img").src = `/api/signals/${sid}/image.svg`;
+  const kv = [
+    ["Peak", s.peak_dbm + " dBm"],
+    ["SNR", s.snr_db != null ? s.snr_db + " dB" : "—"],
+    ["Width", s.bw_khz != null ? Math.round(s.bw_khz) + " kHz" : "—"],
+    ["Persistence", s.persistence != null ? Math.round(s.persistence * 100) + "% of passes" : "—"],
+    ["Room / module", `${s.room || "—"} / ${s.module || "—"}`],
+    ["Classification", (s.classification || "—") + (s.matched_label ? " — " + s.matched_label : "")],
+  ];
+  if (s.match_reason) kv.push(["Match reason", s.match_reason]);
+  if (s.anomaly_score) kv.push(["Anomaly score",
+    Math.round(s.anomaly_score) + "/100" + (s.score_reason ? " — " + s.score_reason : "")]);
+  if (s.interior_delta_db != null) kv.push(["Interior vs ambient",
+    (s.interior_delta_db >= 0 ? "+" : "") + Math.round(s.interior_delta_db) + " dB" +
+    (s.interior_delta_db >= 10 ? " — louder inside (originates in the space)" : "")]);
+  if (s.localization_score != null || s.strongest_room)
+    kv.push(["Localization", (s.strongest_room ? "strongest in " + s.strongest_room : "") +
+      (s.localization_score != null ? ` (${Math.round(s.localization_score * 100)}%)` : "")]);
+  if (s.attribution_status && s.attribution_status !== "unassessed")
+    kv.push(["Attribution", s.attribution_status.replace("_", " ")]);
+  if (s.cue) kv.push(["Client relevance", s.cue.summary]);
+  if (s.novelty_reason) kv.push(["Novelty", s.novelty_reason]);
+  if (s.behavior && s.behavior.label) {
+    const conf = s.behavior.confidence != null
+      ? ` (${Math.round(s.behavior.confidence * 100)}%)` : "";
+    kv.push(["Behavior class", s.behavior.label + conf]);
+    if (s.behavior.phrase) kv.push(["What that means", s.behavior.phrase]);
+    if (s.behavior.evidence && s.behavior.evidence.length)
+      kv.push(["Evidence", s.behavior.evidence.join("; ")]);
+    if (s.behavior.could_also_be && s.behavior.could_also_be.length)
+      kv.push(["Could also be", s.behavior.could_also_be.join("; ")]);
+  }
+  if (s.inventory_matches && s.inventory_matches.length) {
+    kv.push(["Inventory match",
+      s.inventory_matches.slice(0, 4).map(m => m.phrase || m.label).join(" | ")]);
+  } else if (s.inventory_summary) {
+    kv.push(["Inventory match", s.inventory_summary]);
+  }
+  if (s.local_summary) kv.push(["Your signature library", s.local_summary]);
+  if (s.experiment_summary) kv.push(["Field test", s.experiment_summary]);
+  if (s.id_top_name) kv.push(["Signature ID",
+    s.id_top_name + (s.id_device_class ? ` (${s.id_device_class})` : "") +
+    (s.id_mode === "band" ? " — frequency-only match" : "")]);
+  if (s.analysis_summary) kv.push(["Analyze verdict",
+    s.analysis_summary + (s.analysis_protocol ? ` [${s.analysis_protocol}]` : "")]);
+  if (s.triage_status && s.triage_status !== "unreviewed")
+    kv.push(["Triage", s.triage_status + (s.triage_notes ? " — " + s.triage_notes : "")]);
+  $("sl-grid").innerHTML = kv.map(([k, v]) =>
+    `<div>${esc(k)}</div><div>${esc(String(v))}</div>`).join("");
+  $("sl-compare").style.display = "none";      // collapse any prior comparison
+  renderRundown(s);                            // the "how we know" checklist
+  const ns = s.next_step;
+  $("sl-next").innerHTML = ns
+    ? `<span class="ns-chip ${esc(ns.kind)}">${esc(ns.action)}</span><span>${esc(ns.detail)}</span>`
+    : "";
+  const demo = document.body.classList.contains("demo");
+  const listenable = s.cue && s.cue.listenable;
+  const admin = !!(App.state && App.state.admin);
+  $("sl-actions").innerHTML =
+    `<button class="btn primary" id="sl-listen">🎧 LISTEN</button>` +
+    // admin/authorized: hear it to confirm the app's blinded call was right —
+    // logged to the audit trail. Only shown in admin mode.
+    (admin ? `<button class="btn" id="sl-verify" title="Admin: listen to confirm the blinded call — logged">▶ LISTEN TO VERIFY (admin)</button>` : "") +
+    `<button class="btn" id="sl-directional">📡 DIRECTIONAL (RX-A)</button>` +
+    `<button class="btn" id="sl-identify">IDENTIFY SIGNATURE</button>` +
+    `<button class="btn" id="sl-scan-inv" title="Scan Wi-Fi + BLE and match this hit">📡 SCAN INV</button>` +
+    `<button class="btn" id="sl-save-sig" title="Save de-identified shape to your library">💾 SAVE SIG</button>` +
+    (demo ? "" :
+      `<button class="btn" id="sl-clear">✓ CLEAR</button>` +
+      `<button class="btn danger" id="sl-flag">⚑ FLAG</button>` +
+      `<button class="btn" id="sl-ask">? ASK CLIENT</button>`);
+  // content is ECPA-gated: listening is only clean when attributed to the
+  // client's space — otherwise it needs the audited override (already in the app)
+  $("sl-msg").textContent = (listenable && s.cue && !s.cue.listen_permitted)
+    ? "Listening to content requires attributing this to the client's space (or an audited ECPA override) — the blinded cue above needs no such privilege."
+    : "";
+  $("sl-listen").onclick = () => {
+    closeSigLightbox();
+    listenAt(s.center_mhz, s.display_label || s.matched_label || "",
+             (ns && ns.mode) || undefined, sid, s.attribution_status || null);
+  };
+  // admin verify-by-listening: audit the authorized listen, then hear it. This
+  // is the operator confirming the blinded call against a KNOWN test signal —
+  // logged as an ECPA override so every content-listen is accountable.
+  if ($("sl-verify")) $("sl-verify").onclick = async () => {
+    try {
+      await api("/api/decode/override", {
+        ecpa_ack: true, signal_id: sid, center_mhz: s.center_mhz,
+        mode: (ns && ns.mode) || "nfm",
+        reason: "admin verification of the blinded call (known test signal)" });
+    } catch (e) { /* audit is best-effort; still allow the authorized listen */ }
+    closeSigLightbox();
+    listenAt(s.center_mhz, s.display_label || s.matched_label || "",
+             (ns && ns.mode) || undefined, sid, s.attribution_status || null);
+  };
+  // switch to the directional strength meter on RX-A (receive-only) to walk to it
+  $("sl-directional").onclick = async () => {
+    try {
+      await api("/api/directional/start", {
+        center_mhz: s.center_mhz, bw_khz: s.bw_khz || 100,
+        room: s.strongest_room || s.room || "" });
+      closeSigLightbox();
+      show("directional");
+    } catch (e) { $("sl-msg").textContent = "directional failed: " + e.message; }
+  };
+  $("sl-identify").onclick = async () => {
+    const b = $("sl-identify");
+    b.disabled = true; $("sl-msg").textContent = "identifying — capturing signature…";
+    try {
+      const r = await api("/api/identify", { signal_id: sid });
+      const top = (r.candidates || [])[0];
+      let msg = top
+        ? `best match: ${top.name}${top.device_class ? " (" + top.device_class + ")" : ""}` +
+          (r.id_mode === "band" ? " — frequency-only (connect the SDR monitor for a live match)" : "")
+        : "no signature match" + (r.note ? " — " + r.note : "");
+      if (r.behavior && r.behavior.label)
+        msg += ` · behavior: ${r.behavior.label}`;
+      if (r.inventory_summary)
+        msg += ` · ${r.inventory_summary}`;
+      $("sl-msg").textContent = msg;
+      if (top) {
+        s.id_top_name = top.name; s.id_top_score = top.score;
+        s.id_device_class = top.device_class || ""; s.id_mode = r.id_mode || s.id_mode;
+      }
+      if (r.behavior) s.behavior = r.behavior;
+      if (r.inventory_matches) {
+        s.inventory_matches = r.inventory_matches;
+        s.inventory_summary = r.inventory_summary || "";
+      }
+      s.id_candidates_json = JSON.stringify(r.candidates || []);
+      s._features = r.features || null;        // measured modulation, for the side-by-side
+      App._ledgerKey = "";
+      renderLiveLedger();
+      // re-paint the detail grid so behavior / inventory rows appear
+      const keep = msg;
+      openSigLightbox(sid);
+      $("sl-msg").textContent = keep;
+    } catch (e) { $("sl-msg").textContent = "identify failed: " + e.message; }
+    b.disabled = false;
+  };
+  if ($("sl-scan-inv")) $("sl-scan-inv").onclick = async () => {
+    const b = $("sl-scan-inv");
+    b.disabled = true;
+    $("sl-msg").textContent = "scanning Wi-Fi + BLE for this hit…";
+    try {
+      const r = await api("/api/inventory/scan_for_signal", { signal_id: sid });
+      if (r.signal) {
+        Object.assign(s, r.signal);
+        App._ledgerKey = "";
+        renderLiveLedger();
+        openSigLightbox(sid);
+      }
+      $("sl-msg").textContent =
+        (r.messages || []).join(" · ") +
+        (r.signal && r.signal.inventory_summary
+          ? " → " + r.signal.inventory_summary
+          : " → no channel/BLE match yet");
+    } catch (e) { $("sl-msg").textContent = "inventory scan failed: " + e.message; }
+    b.disabled = false;
+  };
+  if ($("sl-save-sig")) $("sl-save-sig").onclick = async () => {
+    const label = prompt(
+      "Label this signature for your local library (no client names):\n" +
+      "e.g. “lobby badge reader” / “front door fob class”",
+      (s.behavior && s.behavior.label) || s.matched_label || "");
+    if (!label) return;
+    try {
+      const r = await api("/api/siglib/save", {
+        signal_id: sid, label,
+        notes: (s.behavior && s.behavior.phrase) || "",
+        site_type: "" });
+      $("sl-msg").textContent = r.saved
+        ? `saved “${r.ref.label}” to your signature library`
+        : "save failed";
+    } catch (e) { $("sl-msg").textContent = "save failed: " + e.message; }
+  };
+  // quick field-test shortcuts on behavior class
+  const bclass = (s.behavior && s.behavior.class_id) || "";
+  const expKind =
+    bclass === "cellular_uplink" ? "phone_test" :
+    bclass === "video_like" || bclass === "wifi_data" || bclass === "hid_keepalive"
+      ? "inventory_subtract" :
+    bclass === "dect_cordless" ? "dect_unplug" :
+    bclass === "keyfob_like" ? "keyfob_press" : "";
+  if (expKind && !demo) {
+    const expBtn = document.createElement("button");
+    expBtn.className = "btn";
+    expBtn.id = "sl-exp";
+    expBtn.textContent = "🧪 FIELD TEST";
+    expBtn.title = "Record a guided field experiment outcome for this hit";
+    $("sl-actions").appendChild(expBtn);
+    expBtn.onclick = async () => {
+      try {
+        const g = await api("/api/experiments/guide");
+        const guide = (g.guides && g.guides[expKind]) || { title: expKind, steps: [] };
+        const steps = (guide.steps || []).map((t, i) => `${i + 1}. ${t}`).join("\n");
+        const outcome = prompt(
+          `${guide.title}\n\n${steps}\n\nOutcome code:\n` +
+          (expKind === "keyfob_press"
+            ? "correlated | uncorrelated | inconclusive"
+            : "energy_dropped | energy_remains | residue_gone | residue_remains | inconclusive"),
+          expKind === "keyfob_press" ? "correlated" : "energy_dropped");
+        if (!outcome) return;
+        const notes = prompt("Notes (optional)", "") || "";
+        const label = expKind === "keyfob_press"
+          ? (prompt("Which remote? (e.g. front door)", "") || "") : "";
+        const r = await api("/api/experiments/record", {
+          signal_id: sid, kind: expKind, outcome, notes, label });
+        s.experiment_summary = r.summary;
+        $("sl-msg").textContent = r.summary;
+        openSigLightbox(sid);
+        $("sl-msg").textContent = r.summary;
+      } catch (e) { $("sl-msg").textContent = "experiment failed: " + e.message; }
+    };
+  }
+  if (!demo) {
+    $("sl-clear").onclick = () => sigTriage(sid, "cleared");
+    $("sl-flag").onclick = () => sigTriage(sid, "flagged");
+    $("sl-ask").onclick = () => sigTriage(sid, "ask_client");
+  }
+  $("sig-lightbox").classList.add("show");
+}
+
+/* -- verification rundown: the ordered "how we know what this is" checklist,
+   cheapest checks first, each showing its result or a one-click way to run it.
+   Signature-ID candidates are shown as scored probabilities you can click for a
+   measured-vs-expected side-by-side. Re-rendered as analysis refines. -- */
+function buildRundown(s) {
+  const pct = v => Math.round((v || 0) * 100);
+  const items = [];
+  // 1 — band / type (instant)
+  const hint = s.id_device_class || s.device_hint
+    || (s.behavior && s.behavior.label) || "";
+  items.push({ state: "done", title: "Frequency band",
+    detail: hint ? `In band — reads as ${hint}` : `At ${fmtF(s.center_mhz)}` });
+  // 1b — CLIENT RELEVANCE (blinded cue) — content-free: is it in the client's
+  // space + does it carry audio, without anyone listening to content
+  if (s.cue) {
+    const c = s.cue;
+    const st2 = (c.space === "client" || c.space === "likely_client") ? "pending"
+      : (c.space === "not_client" || c.space === "likely_not") ? "done" : "na";
+    items.push({ state: st2, title: (c.listenable ? "🎧 " : "") + "Client relevance (blinded)",
+      detail: c.summary });
+  }
+  // 2 — baseline correlation (instant)
+  if (s.classification === "VERIFIED" || s.matched_label)
+    items.push({ state: "done", title: "Baseline match",
+      detail: `${s.matched_label || "matched"} (${s.classification})` +
+        (s.match_reason ? ` — ${s.match_reason}` : "") });
+  else
+    items.push({ state: "na", title: "Baseline match",
+      detail: "no licensed/known transmitter here — treated as an anomaly" });
+  // 3 — signal shape (instant)
+  items.push({ state: "done", title: "Signal shape",
+    detail: `${s.bw_khz != null ? Math.round(s.bw_khz) + " kHz wide" : "width —"} · ` +
+      `${s.persistence != null ? pct(s.persistence) + "% duty" : "duty —"} · ` +
+      `${s.snr_db != null ? s.snr_db + " dB SNR" : "SNR —"}` });
+  // 4 — anomaly score (post-sweep)
+  if (s.anomaly_score != null && s.anomaly_score !== 0)
+    items.push({ state: "done", title: `Anomaly score ${Math.round(s.anomaly_score)}/100`,
+      detail: s.score_reason || "" });
+  // 5 — novelty vs this address
+  if (s.is_novel_to_address || s.novelty_reason)
+    items.push({ state: "done", title: s.is_novel_to_address ? "New to this address" : "Seen before here",
+      detail: s.novelty_reason || "" });
+  // 6 — signature ID (on demand)
+  let cands = [];
+  try { cands = JSON.parse(s.id_candidates_json || "[]"); } catch (e) { cands = []; }
+  if (s.id_top_name || cands.length)
+    items.push({ state: "done", title: "Signature ID"
+        + (s.id_mode === "band" ? " (frequency-only)" : s.id_mode === "iq" ? " (live IQ)" : ""),
+      detail: "probable device class — click a match for the side-by-side:",
+      cands });
+  else
+    items.push({ state: "pending", title: "Signature ID", run: "IDENTIFY",
+      detail: "match the fingerprint to a device signature (runs a capture)" });
+  // 7 — demod / analyze verdict (on demand)
+  if (s.analysis_summary)
+    items.push({ state: "done", title: "Demod / analyze",
+      detail: s.analysis_summary + (s.analysis_protocol ? ` [${s.analysis_protocol}]` : "") });
+  else
+    items.push({ state: "pending", title: "Demod / analyze", run: "LISTEN",
+      detail: "listen / decode to confirm what it actually is" });
+  return items;
+}
+
+function renderRundown(s) {
+  const el = $("sl-rundown");
+  if (!el) return;
+  const items = buildRundown(s);
+  const ic = st => st === "done" ? "✓" : st === "pending" ? "○" : "—";
+  el.innerHTML = items.map((it, i) => {
+    let cands = "";
+    if (it.cands && it.cands.length) {
+      const tot = it.cands.reduce((a, c) => a + (c.score || 0), 0) || 1;
+      cands = `<div class="rd-cands">` + it.cands.slice(0, 5).map((c, j) =>
+        `<span class="rd-cand ${j === 0 ? "top" : ""}" data-ci="${j}">` +
+        `${Math.round((c.score || 0) / tot * 100)}% ${esc(c.device_class || c.name || "?")}</span>`
+      ).join("") + `</div>`;
+    }
+    const run = it.run
+      ? `<button class="btn rd-run" data-run="${esc(it.run)}">${esc(it.run)}</button>` : "";
+    return `<div class="rd-item ${it.state}" data-i="${i}">` +
+      `<span class="rd-ic">${ic(it.state)}</span>` +
+      `<span class="rd-body"><span class="rd-title">${esc(it.title)}</span>` +
+      (it.detail ? ` <span class="rd-detail">— ${esc(it.detail)}</span>` : "") +
+      cands + `</span>${run}</div>`;
+  }).join("");
+  // wire candidate clicks → side-by-side, and pending-run buttons
+  el.querySelectorAll(".rd-cand").forEach(chip => {
+    chip.onclick = () => {
+      const item = items.find(it => it.cands);
+      showCompare(s, item.cands[parseInt(chip.dataset.ci, 10)]);
+    };
+  });
+  el.querySelectorAll(".rd-run").forEach(btn => {
+    btn.onclick = () => {
+      const which = btn.dataset.run;
+      if (which === "IDENTIFY" && $("sl-identify")) $("sl-identify").click();
+      else if (which === "LISTEN" && $("sl-listen")) $("sl-listen").click();
+    };
+  });
+}
+
+// side-by-side: the MEASURED signal vs the candidate's EXPECTED signature
+function showCompare(s, cand) {
+  if (!cand) return;
+  const el = $("sl-compare");
+  const f = s._features || {};
+  const measBw = s.bw_khz != null ? Math.round(s.bw_khz) : (f.occupied_bw_khz || null);
+  const rows = (pairs) => pairs.map(([k, a, b, ok]) =>
+    `<div>${esc(k)}</div><div class="${ok === true ? "cmp-match" : ok === false ? "cmp-miss" : ""}">` +
+    `${esc(a)}</div>`).join("");
+  const measured = [
+    ["Center", fmtF(s.center_mhz)],
+    ["Width", measBw != null ? measBw + " kHz" : "—"],
+    ["Modulation", f.modulation_class || (s.id_mode === "band" ? "(not measured — band-only)" : "—")],
+    ["Duty", s.persistence != null ? Math.round(s.persistence * 100) + "%" : "—"],
+    ["SNR", s.snr_db != null ? s.snr_db + " dB" : "—"],
+  ];
+  const expBw = cand.bandwidth_khz != null ? cand.bandwidth_khz + " kHz" : "—";
+  const bwOk = (measBw != null && cand.bandwidth_khz != null)
+    ? (measBw <= cand.bandwidth_khz * 3 && measBw >= cand.bandwidth_khz / 3) : null;
+  const expected = [
+    ["Name", cand.name || "—"],
+    ["Device class", cand.device_class || "—"],
+    ["Expected width", expBw, null, bwOk],
+    ["Signature class", cand.class || cand.mode || "—"],
+    ["TSCM concern", cand.tscm ? "yes — surveillance-capable" : "—"],
+  ];
+  const steps = (cand.confirm_steps || []).slice(0, 4);
+  el.innerHTML =
+    `<h4>SIDE-BY-SIDE — measured signal vs ${esc(cand.name || "candidate")}` +
+    ` (${Math.round((cand.score || 0) * 100) > 0 ? "" : ""}match)</h4>` +
+    `<div class="cmp-cols">` +
+    `<div class="cmp-col"><h5>Measured (this signal)</h5><div class="kv">` +
+    measured.map(([k, v]) => `<div>${esc(k)}</div><div>${esc(String(v))}</div>`).join("") +
+    `</div></div>` +
+    `<div class="cmp-col"><h5>Expected (${esc(cand.device_class || cand.name || "reference")})</h5><div class="kv">` +
+    expected.map(([k, v, , ok]) => `<div>${esc(k)}</div><div class="${ok === true ? "cmp-match" : ok === false ? "cmp-miss" : ""}">${esc(String(v))}</div>`).join("") +
+    `</div></div></div>` +
+    (steps.length ? `<div class="note" style="margin-top:8px"><b>Confirm it:</b> ${steps.map(esc).join(" · ")}</div>` : "") +
+    (cand.url ? `<div class="note" style="margin-top:4px"><a href="${esc(cand.url)}" target="_blank" rel="noopener">reference signature ↗</a></div>` : "");
+  el.style.display = "";
+  el.scrollIntoView({ block: "nearest" });
+}
+
+function closeSigLightbox() { $("sig-lightbox").classList.remove("show"); }
+if ($("sl-close")) $("sl-close").onclick = closeSigLightbox;
+if ($("sl-nav-prev")) $("sl-nav-prev").onclick = () => lightboxStep(-1);
+if ($("sl-nav-next")) $("sl-nav-next").onclick = () => lightboxStep(1);
+if ($("sig-lightbox")) {
+  $("sig-lightbox").addEventListener("click", (e) => {
+    if (e.target.id === "sig-lightbox") closeSigLightbox();   // backdrop click
+  });
+  document.addEventListener("keydown", (e) => {
+    if (!$("sig-lightbox").classList.contains("show")) return;
+    if (e.key === "Escape") closeSigLightbox();
+    else if (e.key === "ArrowLeft") lightboxStep(-1);
+    else if (e.key === "ArrowRight") lightboxStep(1);
+  });
+}
 
 function inRangeClient(center) {
   // dual mode: if an SDR (Pluto or B220) is connected as the monitor, listening
@@ -1807,14 +2584,56 @@ function setInspNav(enabled) {
   }
 }
 
+// Is a SECOND radio available to monitor while the first keeps sweeping? The
+// B220's two RX share one LO (they can't tune two different frequencies at
+// once — that's why they're paired for direction-finding, not split-tuning), so
+// a lone B220 CANNOT sweep and monitor a different frequency simultaneously.
+// True concurrent monitoring needs a second, independent-LO radio (the Pluto).
+function hasConcurrentMonitor() {
+  const roles = App.state && App.state.roles;
+  if (!roles || !roles.concurrent_enabled) return false;
+  const sdrs = (roles.roles || []).filter(r => SDR_SOURCES.has(r.source));
+  return sdrs.length >= 2 || sdrs.some(r => r.role === "monitor" && !r.busy);
+}
+
 // Entry point for the NON-baseline lists (Results / detected signals / Wiki).
 // Disables Next/Prev (no list to step) and tunes the given center+label.
-function listenAt(center, label, mode, sid, attr) {
+// AUTO-HANDOFF: if there's no second radio to monitor with and a sweep is
+// running, we don't error ("not plugged in") — we stop the sweep and repurpose
+// the one radio to direction-find the clicked signal. One radio, no dead ends.
+async function listenAt(center, label, mode, sid, attr) {
   if (center == null || isNaN(center)) return;
   stopAuto();                       // a manual freq pick takes manual control
   App.inspContext = "freq";
   App.inspIdx = null;
   setInspNav(false);
+  const sweeping = App.state && App.state.sweep && App.state.sweep.running;
+  if (sweeping && !hasConcurrentMonitor()) {
+    $("ft-msg").textContent = `one radio — pausing the sweep and direction-finding ${fmtF(center)}`;
+    const dfBody = { center_mhz: center, bw_khz: 100, room: (attr && attr.room) || "" };
+    try { await api("/api/sweep/abort", {}); } catch (e) { /* already stopping */ }
+    try {
+      await api("/api/directional/start", dfBody);
+      show("directional");
+      return;
+    } catch (e) {
+      // the B220 USB worker can crash mid-run — respawn it (reconnect) and retry
+      // rather than silently leaving a stopped sweep and nothing running
+      $("ft-msg").textContent = "radio hiccup — reconnecting, then direction-finding…";
+      try { await api("/api/device/connect", {}); } catch (_) { /* best effort */ }
+      await new Promise(r => setTimeout(r, 1400));
+      try {
+        await api("/api/directional/start", dfBody);
+        show("directional");
+        return;
+      } catch (e2) {
+        show("directional");   // land on the DF view so the state is visible
+        $("ft-msg").textContent =
+          "radio not responding — replug the B220's USB and press CONNECT (DEVICE card).";
+        return;
+      }
+    }
+  }
   inspectByFreq(center, label, mode, sid, attr);
 }
 
@@ -2953,15 +3772,37 @@ function isSdrDevice() {
   return !!(App.state && SDR_SOURCES.has(App.state.source));
 }
 
-// F4: true when the device has a single RX (Pluto) → one "Main sweep" step.
-// Post-connect uses the real reported module count; pre-connect honors the
-// device-source picker (so the UI collapses before you even connect).
+// A wideband SDR sweeps the WHOLE range on ONE port — the RF Explorer is the
+// only device whose two "modules" are actually different frequency bands. The
+// B220's two ports (RX-A/RX-B) BOTH cover 70–6000 MHz (they're for direction-
+// finding, not band coverage), so sweeping "left then right" just re-sweeps the
+// same range. Detect that so the B220 does one sweep, no antenna-port dance.
+function isSingleRangeSweep() {
+  const dev = App.state && App.state.device;
+  const mods = (dev && dev.modules) || [];
+  if (mods.length <= 1) return true;
+  const lo = Math.min(...mods.map(m => m.min_mhz));
+  const hi = Math.max(...mods.map(m => m.max_mhz));
+  const span = (hi - lo) || 1;
+  // every port covers ~the whole span → one wideband sweep (B220);
+  // ports covering distinct sub-bands → a real multi-module sweep (RF Explorer)
+  return mods.every(m => (m.max_mhz - m.min_mhz) >= span * 0.8);
+}
+// The RX port to sweep on for a single-range device: RX-A = side "right" (chan 0
+// per uhd_source SIDE_TO_CHAN), else whatever the one module is.
+function primarySweepPort() {
+  const mods = modulesAvailable();
+  return mods.includes("right") ? "right" : (mods[0] || "right");
+}
+
+// F4: true when the device sweeps as one wideband range (Pluto, or B220's
+// same-range ports) → one "Main sweep" step, no LEFT/RIGHT port dance.
 function isSingleRx() {
   const dev = App.state && App.state.device;
-  if (dev && dev.modules && dev.modules.length) return dev.modules.length === 1;
+  if (dev && dev.modules && dev.modules.length) return isSingleRangeSweep();
   const sel = $("device-source");
   const src = (sel && sel.value) || (App.state && App.state.source);
-  return src === "pluto";
+  return src === "pluto" || src === "b220";
 }
 
 // F2: paint the per-segment expected (looking…→found) + anomaly side panel.
@@ -3164,18 +4005,43 @@ function moduleRange(side) {
   return m ? `${fmtF(m.min_mhz)} – ${fmtF(m.max_mhz)}` : "";
 }
 
+/* a finished sweep should never just sit there — point the operator at the next
+   step in the workflow (ambient → interior → review → directional → report). */
+function showNextBanner(msgHtml, label, go) {
+  const b = $("next-step-banner");
+  if (!b) return;
+  $("next-step-msg").innerHTML = msgHtml;
+  const goBtn = $("next-step-go");
+  goBtn.textContent = label;
+  goBtn.onclick = () => { b.classList.remove("show"); go(); };
+  b.classList.add("show");
+}
+function suggestNextStep(phase) {
+  if (phase === "ambient")
+    showNextBanner("<b>✓ Ambient reference done.</b> Next: sweep inside the premises.",
+      "START INTERIOR SWEEP", () => show(isSingleRx() ? "sweep" : "sweepL"));
+  else if (phase === "interior")
+    showNextBanner("<b>✓ Interior sweep done.</b> Next: review the anomalies, then direction-find the live ones.",
+      "REVIEW ANOMALIES", () => show("triage"));
+  else if (phase === "directional")
+    showNextBanner("<b>✓ Directional pass done.</b> Next: generate the report.",
+      "GENERATE REPORT", () => show("results"));
+}
+if ($("next-step-x")) $("next-step-x").onclick = () => $("next-step-banner").classList.remove("show");
+
 $("btn-ambient").onclick = async () => {
   const mods = modulesAvailable();
   if (!mods.length) return alert("Connect the device first (Session tab).");
   const profile = $("ambient-profile").value, minutes = $("ambient-minutes").value;
-  const pluto = isPlutoDevice();
   const steps = [];
-  if (pluto) {
-    // single wideband RX — one step, no SMA-port dance
+  if (isSingleRangeSweep()) {
+    // one wideband RX (Pluto, or B220's same-range ports) — one step, no dance
+    const module = primarySweepPort();
     steps.push({
-      phase: "ambient", module: "right", room: "exterior",
-      msg: "ATTACH THE OMNI ANTENNA TO THE PLUTO RX SMA",
-      sub: `Pluto sweeps ${moduleRange("right")} — ambient reference, run OUTSIDE / vehicle at the curb` });
+      phase: "ambient", module, room: "exterior",
+      msg: isPlutoDevice() ? "ATTACH THE OMNI ANTENNA TO THE PLUTO RX SMA"
+                           : "ATTACH THE OMNI ANTENNA TO THE RX-A PORT",
+      sub: `Sweeps ${moduleRange(module)} — ambient reference, run OUTSIDE / vehicle at the curb` });
   } else {
     if (mods.includes("left")) steps.push({
       phase: "ambient", module: "left", room: "exterior",
@@ -3197,14 +4063,22 @@ $("btn-bugscan").onclick = async () => {
   const profile = $("bug-profile").value, minutes = $("bug-minutes").value;
   const room = $("bug-room").value || "bug-scan";
   const steps = [];
-  if (mods.includes("left")) steps.push({
-    phase: "interior", module: "left", room,
-    msg: "ATTACH THE NON-DIRECTIONAL (OMNI) ANTENNA TO THE LEFT SMA PORT",
-    sub: `Bug-frequency scan — known surveillance bands within ${moduleRange("left")}` });
-  if (mods.includes("right")) steps.push({
-    phase: "interior", module: "right", room,
-    msg: "MOVE THE OMNI ANTENNA TO THE RIGHT SMA PORT",
-    sub: `Bug-frequency scan — known surveillance bands within ${moduleRange("right")}` });
+  if (isSingleRangeSweep()) {
+    const module = primarySweepPort();
+    steps.push({ phase: "interior", module, room,
+      msg: isPlutoDevice() ? "ATTACH THE OMNI ANTENNA TO THE PLUTO RX SMA"
+                           : "ATTACH THE OMNI ANTENNA TO THE RX-A PORT",
+      sub: `Bug-frequency scan — known surveillance bands within ${moduleRange(module)}` });
+  } else {
+    if (mods.includes("left")) steps.push({
+      phase: "interior", module: "left", room,
+      msg: "ATTACH THE NON-DIRECTIONAL (OMNI) ANTENNA TO THE LEFT SMA PORT",
+      sub: `Bug-frequency scan — known surveillance bands within ${moduleRange("left")}` });
+    if (mods.includes("right")) steps.push({
+      phase: "interior", module: "right", room,
+      msg: "MOVE THE OMNI ANTENNA TO THE RIGHT SMA PORT",
+      sub: `Bug-frequency scan — known surveillance bands within ${moduleRange("right")}` });
+  }
   if (!steps.length) return alert("No modules reported by device.");
   App.seq = { steps, profile, minutes, scanMode: "bug", profileId: "bug-profile" };
   advanceSeq();
@@ -3640,17 +4514,41 @@ async function loadSignals() {
   const phase = $("signals-phase").value;
   try {
     const sigs = await api("/api/signals" + (phase ? "?phase=" + phase : ""));
+    // keep lightbox / next-step working from this table too
+    if (sigs && sigs.length) App.liveSweepSignals = sigs;
     $("tbl-signals").innerHTML =
-      "<tr><th>Frequency</th><th>Peak</th><th>Persist</th><th>Phase</th><th>Module</th>" +
-      "<th>Room</th><th>Class</th><th>Match</th></tr>" +
-      sigs.map(s => `<tr><td><a href="#" class="freqlink" data-center="${s.center_mhz}" ` +
-        `data-label="${esc(s.matched_label || s.classification || "signal")}">${fmtF(s.center_mhz)}</a></td>` +
-        `<td>${s.peak_dbm}</td>` +
-        `<td>${((s.persistence || 0) * 100).toFixed(0)}%</td><td>${s.phase}</td><td>${s.module}</td>` +
-        `<td>${esc(s.room)}</td><td><span class="pill ${s.classification}">${esc(statusLabel(s.classification))}</span></td>` +
-        `<td>${esc(s.matched_label)}</td></tr>`).join("");
+      "<tr><th></th><th>Frequency</th><th>Peak</th><th>Persist</th><th>Behavior</th>" +
+      "<th>Inventory</th><th>Class</th><th>Match</th></tr>" +
+      sigs.map(s => {
+        const beh = (s.behavior && s.behavior.label) || s.device_hint || "—";
+        const inv = s.inventory_summary || "—";
+        return `<tr data-sid="${s.id}" style="cursor:pointer" title="click: open signal detail (behavior + inventory)">` +
+          `<td class="thumb-cell"><img class="sig-thumb" loading="lazy" alt="" data-sid="${s.id}" ` +
+          `src="/api/signals/${s.id}/image.svg?size=thumb" onerror="this.style.visibility='hidden'"></td>` +
+          `<td><a href="#" class="freqlink" data-center="${s.center_mhz}" data-sid="${s.id}" ` +
+          `data-label="${esc(s.matched_label || s.behavior && s.behavior.label || s.classification || "signal")}">${fmtF(s.center_mhz)}</a></td>` +
+          `<td>${s.peak_dbm}</td>` +
+          `<td>${((s.persistence || 0) * 100).toFixed(0)}%</td>` +
+          `<td title="${esc((s.behavior && s.behavior.phrase) || "")}">${esc(beh)}</td>` +
+          `<td style="max-width:220px;font-size:11px">${esc(String(inv).slice(0, 80))}</td>` +
+          `<td><span class="pill ${s.classification}">${esc(statusLabel(s.classification))}</span></td>` +
+          `<td>${esc(s.matched_label || "")}</td></tr>`;
+      }).join("");
   } catch (e) {}
 }
+// Results signal table: thumbnail / row → lightbox (same as live ledger)
+(function wireResultsSignals() {
+  const tbl = $("tbl-signals");
+  if (!tbl || tbl._behWired) return;
+  tbl._behWired = true;
+  tbl.addEventListener("click", (e) => {
+    const thumb = e.target.closest(".sig-thumb");
+    if (thumb) { openSigLightbox(parseInt(thumb.dataset.sid, 10)); return; }
+    if (e.target.closest(".freqlink")) return;   // freqlink does listen
+    const tr = e.target.closest("tr[data-sid]");
+    if (tr) openSigLightbox(parseInt(tr.dataset.sid, 10));
+  });
+})();
 $("signals-phase").onchange = loadSignals;
 
 async function loadReports() {
@@ -3827,18 +4725,47 @@ $("btn-scan-ble").onclick = () => invScan("ble");
 
 async function bleDetailScan() {
   const card = $("ble-detail-card");
-  card.style.display = "";
-  $("ble-detail-msg").textContent = "scanning BLE (~8s)…";
-  $("ble-detail-list").innerHTML = "";
+  const btn = $("btn-scan-ble-detail");
+  if (btn) btn.disabled = true;
+  // status on the button row so it's obvious something is happening (the
+  // detail card is BELOW the inventory table — easy to miss)
+  if ($("inv-msg")) $("inv-msg").textContent = "Bluetooth detail sweep (~8s)… scroll down for full dossiers";
+  if (card) {
+    card.style.display = "";
+    try { card.scrollIntoView({ behavior: "smooth", block: "start" }); } catch (_) {}
+  }
+  if ($("ble-detail-msg")) $("ble-detail-msg").textContent = "scanning BLE (~8s)…";
+  if ($("ble-detail-list")) $("ble-detail-list").innerHTML = "";
   try {
     const r = await api("/api/ble/scan", { seconds: 8 });
-    $("ble-detail-msg").innerHTML = esc(r.message) +
-      (r.trackers ? ` — <span class="score-hi">⚑ ${r.trackers} possible tracker(s)</span>` : "");
-    $("ble-detail-list").innerHTML = r.devices.map(bleCard).join("") ||
-      "<p class='note'>no advertisers heard — is the Bluetooth adapter on?</p>";
-  } catch (e) { $("ble-detail-msg").textContent = "FAILED: " + e.message; }
+    const n = (r.devices || []).length;
+    const tr = r.trackers || 0;
+    if ($("inv-msg"))
+      $("inv-msg").textContent = `${r.message || (n + " devices")}` +
+        (tr ? ` — ⚑ ${tr} possible tracker(s) (see detail card below)` : " (detail card below)");
+    if ($("ble-detail-msg"))
+      $("ble-detail-msg").innerHTML = esc(r.message || "") +
+        (tr ? ` — <span class="score-hi">⚑ ${tr} possible tracker(s)</span>` : "");
+    if ($("ble-detail-list")) {
+      try {
+        $("ble-detail-list").innerHTML = (r.devices || []).map(bleCard).join("") ||
+          "<p class='note'>no advertisers heard — is the Bluetooth adapter on? " +
+          "Windows: Settings → Bluetooth & devices → On. Close other BLE apps.</p>";
+      } catch (renderErr) {
+        $("ble-detail-list").innerHTML =
+          `<p class='note'>scan OK (${n} devices) but display failed: ${esc(renderErr.message)}</p>` +
+          `<pre class="note" style="white-space:pre-wrap">${esc(JSON.stringify(r.devices, null, 2).slice(0, 4000))}</pre>`;
+      }
+    }
+    if (card) try { card.scrollIntoView({ behavior: "smooth", block: "start" }); } catch (_) {}
+  } catch (e) {
+    const msg = "FAILED: " + (e.message || e);
+    if ($("ble-detail-msg")) $("ble-detail-msg").textContent = msg;
+    if ($("inv-msg")) $("inv-msg").textContent = msg;
+  }
+  if (btn) btn.disabled = false;
 }
-$("btn-scan-ble-detail").onclick = bleDetailScan;
+if ($("btn-scan-ble-detail")) $("btn-scan-ble-detail").onclick = bleDetailScan;
 
 async function stimulateProbe() {
   const center = parseFloat($("stim-center").value);
@@ -3910,31 +4837,36 @@ async function emanationScan() {
 $("btn-emanation").onclick = emanationScan;
 
 function bleCard(d) {
-  const mfr = d.manufacturers.map(m => esc(m.company) +
-    (m.hints.length ? " (" + m.hints.map(esc).join(", ") + ")" : "")).join("; ");
-  const svc = d.services.filter(s => s.name).map(s =>
+  d = d || {};
+  const mfrs = Array.isArray(d.manufacturers) ? d.manufacturers : [];
+  const svcs = Array.isArray(d.services) ? d.services : [];
+  const mfr = mfrs.map(m => esc(m.company || "?") +
+    ((m.hints && m.hints.length) ? " (" + m.hints.map(esc).join(", ") + ")" : "")).join("; ");
+  const svc = svcs.filter(s => s && s.name).map(s =>
     `<span class="pill${s.tracker ? " failed" : ""}">${esc(s.name)}</span>`).join(" ");
   const rows = [
-    ["MAC", esc(d.mac) + (d.address_inferred ? ' <span class="note">(type inferred from address)</span>' : "")],
-    ["Address type", esc(d.address_kind_label)],
+    ["MAC", esc(d.mac || "") + (d.address_inferred ? ' <span class="note">(type inferred from address)</span>' : "")],
+    ["Address type", esc(d.address_kind_label || "—")],
     ["Vendor", esc(d.vendor || "—")],
     ["Name", esc(d.name) || "<i>(none advertised)</i>"],
-    ["Signal", d.rssi_dbm != null ? `${d.rssi_dbm} dBm — ${esc(d.proximity)}` : "—"],
+    ["Signal", d.rssi_dbm != null ? `${d.rssi_dbm} dBm — ${esc(d.proximity || "")}` : "—"],
     ["Mfr data", mfr || "—"],
     ["Services", svc || "—"],
     ["Appearance", esc(d.appearance || "—")],
     ["TX power", d.tx_power != null ? d.tx_power + " dBm" : "—"],
   ];
+  if (d.is_hid) rows.push(["Class", "⌨ HID (mouse/keyboard class)"]);
+  if (d.is_av_remote) rows.push(["Class", "📺 AV remote class"]);
   const body = rows.map(([k, v]) =>
     `<tr><td class="note" style="width:110px;vertical-align:top">${k}</td><td>${v}</td></tr>`).join("");
   const flag = d.is_tracker
     ? '<span class="threat-tag">⚑ POSSIBLE TRACKER</span>'
     : (d.rotating ? '<span class="pill">rotating identity</span>' : "");
   return `<div class="card" style="margin:6px 0;${d.is_tracker ? "background:#1f1212" : ""}">` +
-    `<div class="row" style="justify-content:space-between"><b>${esc(d.vendor || d.name || d.mac)}</b>${flag}</div>` +
+    `<div class="row" style="justify-content:space-between"><b>${esc(d.vendor || d.name || d.mac || "?")}</b>${flag}</div>` +
     `<table style="margin-top:4px">${body}</table>` +
     (d.tscm_note ? `<p class="note" style="color:#ffd24a;margin:4px 0 0">${esc(d.tscm_note)}</p>` : "") +
-    `<p class="note" style="margin:2px 0 0">${esc(d.address_note)}</p></div>`;
+    `<p class="note" style="margin:2px 0 0">${esc(d.address_note || "")}</p></div>`;
 }
 
 async function loadInventory() {
@@ -3964,6 +4896,131 @@ window.invMark = async (id, owned) => {
   loadInventory();
 };
 
+/* ---------- network check (LAN device checker) ---------- */
+let _netDevices = [];
+function renderNetwork() {
+  const unrecOnly = $("net-unrec-only") && $("net-unrec-only").checked;
+  const rows = _netDevices.filter(d => !unrecOnly || d.flagged);
+  const header = "<tr><th>Status</th><th>IP</th><th>MAC</th><th>Vendor</th>" +
+    "<th>Hostname</th><th>Also on RF</th><th>Actions</th></tr>";
+  const body = rows.map(d => {
+    let pill, rowStyle = "";
+    if (d.blocked) { pill = '<span class="pill failed">BLOCKED</span>'; rowStyle = ' class="threat-row"'; }
+    else if (d.is_gateway) pill = '<span class="pill running">ROUTER</span>';
+    else if (d.owned) pill = '<span class="pill ok">KNOWN</span>';
+    else { pill = '<span class="pill UNVERIFIED">UNRECOGNIZED</span>'; rowStyle = ' style="background:var(--err-bg)"'; }
+    const rnd = d.randomized_mac ? ' <span class="note" title="randomized/private MAC — a phone or privacy device">rnd</span>' : "";
+    // "gather more information": age + RF cross-reference
+    const rel = (d.related || []);
+    let relCell = "—";
+    if (rel.length) {
+      const top = rel[0];
+      const bandTxt = top.kind === "ble" ? "BLE ~2.44 GHz"
+        : (top.freq_mhz ? fmtF(top.freq_mhz) : "WiFi");
+      relCell = `<span title="matched by ${esc(top.match)} to a ${esc(top.kind).toUpperCase()} device — DF it to locate">` +
+        `${esc(top.kind).toUpperCase()} · ${esc(bandTxt)}${rel.length > 1 ? ` +${rel.length - 1}` : ""}</span>`;
+    }
+    let actions;
+    if (d.blocked)
+      actions = `<button class="btn" onclick="netUnblock(${d.id})">UNBLOCK</button> ` +
+        `<button class="btn" onclick="netRouterGuide(${d.id})">ROUTER STEPS</button>`;
+    else {
+      actions = `<button class="btn" onclick="netOwn(${d.id},${d.owned ? 0 : 1})">` +
+        `${d.owned ? "UNMARK" : "✓ MARK OWNED"}</button> ` +
+        `<button class="btn danger" onclick="netBlock(${d.id})" title="Block this device at the router — the lawful way (no transmitting)">⛔ BLOCK (router)</button>`;
+      if (rel.length)
+        actions += ` <button class="btn" onclick="netLocate(${d.id})" title="Direction-find the matched RF emission to physically locate this device">📍 LOCATE</button>`;
+    }
+    return `<tr${rowStyle}><td>${pill}</td><td>${esc(d.ip) || "—"}</td>` +
+      `<td>${esc(d.identifier)}${rnd}</td><td>${esc(d.vendor) || "—"}</td>` +
+      `<td>${esc(d.name) || "<i>—</i>"}</td><td>${relCell}</td><td>${actions}</td></tr>`;
+  }).join("");
+  $("tbl-network").innerHTML = header + (body ||
+    "<tr><td colspan=7 class='note'>no devices yet — press SCAN NETWORK</td></tr>");
+}
+
+// render the guided router-block steps into the note area (the LEGAL enforcement)
+function showRouterGuide(g) {
+  if (!g) return;
+  const el = $("net-enforce-note");
+  el.style.display = "";
+  const link = g.admin_url
+    ? `<a href="${esc(g.admin_url)}" target="_blank" rel="noopener">${esc(g.admin_url)}</a>`
+    : "your router's admin page";
+  el.innerHTML =
+    `<b>Block at the router — the lawful way (the app never transmits):</b><br>` +
+    `1. Open ${link}${g.router_brand && g.router_brand !== "unknown" ? " (" + esc(g.router_brand) + ")" : ""} and sign in.<br>` +
+    `2. ${esc(g.steps)}<br>` +
+    `3. Block this MAC: <code>${esc(g.mac)}</code>` +
+    (g.device_label ? ` (${esc(g.device_label)})` : "") + `<br>` +
+    `<span class="note">${esc(g.note || "")}</span>`;
+}
+async function loadNetwork() {
+  try {
+    const r = await api("/api/netscan/devices");
+    _netDevices = r.devices || [];
+    renderNetwork();
+  } catch (e) { $("tbl-network").innerHTML = `<tr><td>${esc(e.message)}</td></tr>`; }
+}
+if ($("btn-netscan")) $("btn-netscan").onclick = async () => {
+  const b = $("btn-netscan");
+  b.disabled = true; $("net-msg").textContent = "scanning the local network…";
+  try {
+    const ping = $("net-ping").checked;
+    const r = await api("/api/netscan/run", { ping });
+    _netDevices = r.devices || [];
+    renderNetwork();
+    const m = r.meta || {};
+    const unrec = _netDevices.filter(d => d.flagged).length;
+    $("net-msg").textContent =
+      `${m.count} device${m.count === 1 ? "" : "s"} on ${m.network || "this network"}` +
+      (m.arp_only ? " (ARP cache only)" : "") +
+      ` · ${unrec} unrecognized`;
+  } catch (e) { $("net-msg").textContent = "scan failed: " + e.message; }
+  b.disabled = false;
+};
+if ($("net-unrec-only")) $("net-unrec-only").onchange = renderNetwork;
+window.netOwn = async (id, owned) => {
+  try { await api(`/api/netscan/devices/${id}/own`, { owned }); await loadNetwork(); }
+  catch (e) { $("net-msg").textContent = e.message; }
+};
+window.netBlock = async (id) => {
+  const d = _netDevices.find(x => x.id === id);
+  const who = d ? (d.vendor || d.name || d.ip || d.identifier) : "this device";
+  const reason = window.prompt(
+    `Block ${who} (${d ? d.identifier : ""}) at the router?\n\n` +
+    "The app does NOT transmit or jam. This records a confirmed block + audit " +
+    "entry and shows you exactly how to drop it in the router you're on.\n\n" +
+    "Reason for the block (required, logged):", "");
+  if (reason == null) return;                 // cancelled
+  if (!reason.trim()) { $("net-msg").textContent = "block needs a reason — nothing changed"; return; }
+  try {
+    const r = await api(`/api/netscan/devices/${id}/block`, { confirm: true, reason: reason.trim() });
+    await loadNetwork();
+    showRouterGuide(r.router_guide);
+  } catch (e) { $("net-msg").textContent = "block failed: " + e.message; }
+};
+window.netRouterGuide = async (id) => {
+  try { showRouterGuide(await api(`/api/netscan/devices/${id}/router_guide`)); }
+  catch (e) { $("net-msg").textContent = e.message; }
+};
+window.netUnblock = async (id) => {
+  try { await api(`/api/netscan/devices/${id}/unblock`, {}); await loadNetwork(); }
+  catch (e) { $("net-msg").textContent = e.message; }
+};
+// LOCATE — direction-find the RF emission this network device also produces
+// (receive-only). Tunes the monitor to the correlated WiFi/BLE frequency so the
+// operator can walk signal strength to the physical device.
+window.netLocate = async (id) => {
+  const d = _netDevices.find(x => x.id === id);
+  const rel = d && d.related && d.related[0];
+  if (!rel) { $("net-msg").textContent = "no correlated RF emission to locate — run a WiFi/BLE inventory first"; return; }
+  const freq = rel.freq_mhz || (rel.kind === "ble" ? 2440 : 2437);
+  const label = `${d.vendor || d.name || d.ip} (${rel.kind.toUpperCase()})`;
+  $("net-msg").textContent = `tuning the monitor to ${fmtF(freq)} — walk the signal strength to the device`;
+  listenAt(freq, label);            // receive-only monitor dock; existing tune+listen path
+};
+
 /* ---------- calibration ---------- */
 $("btn-cal").onclick = async () => {
   try {
@@ -3989,6 +5046,7 @@ function renderCalRows(cal) {
 
 /* ---------- boot ---------- */
 loadSessions();
+loadSweepHistory();
 loadLabelPrefs();
 [["leg-show", "show"], ["leg-identified", "identified"], ["leg-known", "known"],
  ["leg-anomaly", "anomaly"], ["leg-caution", "caution"], ["leg-scanning", "scanning"]]
@@ -4061,6 +5119,482 @@ document.querySelectorAll("#sweep-info-tabs button[data-tab]").forEach(b =>
   });
   c.addEventListener("dblclick", () => { if (canPick()) App.liveWindow = null; });
 })();
+
+/* ========== DEVICE CAPTURE LAB (guided DUT characterization) ========== */
+const DevLab = {
+  pkg: null,
+  meta: null,
+  stream: null,
+  photoDataUrl: null,
+};
+
+function dlNfSvg(kind) {
+  // Simple inline diagrams (no external assets)
+  const common = 'xmlns="http://www.w3.org/2000/svg" width="72" height="56" viewBox="0 0 72 56"';
+  if (kind === "loop")
+    return `<svg ${common}><circle cx="36" cy="28" r="18" fill="none" stroke="#1abc9c" stroke-width="3"/><line x1="36" y1="10" x2="36" y2="4" stroke="#1abc9c" stroke-width="2"/><text x="36" y="52" text-anchor="middle" fill="#7b8794" font-size="9">H-loop</text></svg>`;
+  if (kind === "stub")
+    return `<svg ${common}><line x1="36" y1="48" x2="36" y2="12" stroke="#f39c12" stroke-width="3"/><circle cx="36" cy="10" r="3" fill="#f39c12"/><text x="36" y="54" text-anchor="middle" fill="#7b8794" font-size="9">E-stub</text></svg>`;
+  if (kind === "clamp")
+    return `<svg ${common}><path d="M20 30 a16 16 0 1 1 32 0" fill="none" stroke="#3498db" stroke-width="3"/><rect x="28" y="28" width="16" height="12" rx="2" fill="none" stroke="#3498db" stroke-width="2"/><text x="36" y="52" text-anchor="middle" fill="#7b8794" font-size="9">clamp</text></svg>`;
+  if (kind === "patch")
+    return `<svg ${common}><rect x="18" y="14" width="36" height="28" rx="3" fill="none" stroke="#9b59b6" stroke-width="2"/><rect x="26" y="20" width="20" height="16" fill="#9b59b633" stroke="#9b59b6"/><text x="36" y="52" text-anchor="middle" fill="#7b8794" font-size="9">patch</text></svg>`;
+  if (kind === "whip")
+    return `<svg ${common}><line x1="36" y1="48" x2="36" y2="8" stroke="#2ecc71" stroke-width="2"/><path d="M36 8 q8 10 0 20" fill="none" stroke="#2ecc71" stroke-width="2"/><text x="36" y="54" text-anchor="middle" fill="#7b8794" font-size="9">whip</text></svg>`;
+  return `<svg ${common}><rect x="20" y="16" width="32" height="24" rx="4" fill="none" stroke="#7b8794" stroke-width="2" stroke-dasharray="4 3"/><text x="36" y="52" text-anchor="middle" fill="#7b8794" font-size="9">other</text></svg>`;
+}
+
+function dlDrawSpectrum(spec) {
+  const c = $("dl-spec");
+  if (!c) return;
+  const ctx = c.getContext("2d");
+  const W = c.width, H = c.height;
+  ctx.fillStyle = "#0a0e14";
+  ctx.fillRect(0, 0, W, H);
+  const freqs = (spec && spec.freqs_mhz) || [];
+  const pwr = (spec && spec.power_db) || [];
+  if (freqs.length < 2 || pwr.length < 2) {
+    ctx.fillStyle = "#7b8794";
+    ctx.font = "12px monospace";
+    ctx.fillText("No spectrum yet — run CAPTURE NOW", 12, H / 2);
+    return;
+  }
+  const pmin = Math.min(...pwr), pmax = Math.max(...pwr);
+  const span = Math.max(1, pmax - pmin);
+  ctx.strokeStyle = "#1abc9c";
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (let i = 0; i < pwr.length; i++) {
+    const x = (i / (pwr.length - 1)) * (W - 8) + 4;
+    const y = H - 8 - ((pwr[i] - pmin) / span) * (H - 16);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+  // peak marker
+  let imax = 0;
+  for (let i = 1; i < pwr.length; i++) if (pwr[i] > pwr[imax]) imax = i;
+  const px = (imax / (pwr.length - 1)) * (W - 8) + 4;
+  ctx.strokeStyle = "#e74c3c";
+  ctx.beginPath(); ctx.moveTo(px, 4); ctx.lineTo(px, H - 4); ctx.stroke();
+  ctx.fillStyle = "#cfd8e3";
+  ctx.font = "11px monospace";
+  ctx.fillText(`peak ${pwr[imax].toFixed(1)} dB  floor ${(spec.floor_db ?? pmin).toFixed(1)}  SNR ${(spec.snr_db ?? 0).toFixed(1)} dB`, 8, 14);
+}
+
+function dlShowCaptureVisual(cap) {
+  const ok = cap && cap.capture_ok;
+  const snr = (cap && cap.features && cap.features.snr_db != null)
+    ? cap.features.snr_db
+    : (cap && cap.spectrum && cap.spectrum.snr_db);
+  if ($("dl-cap-status")) {
+    $("dl-cap-status").textContent = (cap && cap.capture_status) || "—";
+    $("dl-cap-status").style.color = ok ? "var(--green)" : "var(--amber)";
+  }
+  if ($("dl-cap-snr"))
+    $("dl-cap-snr").textContent = snr != null ? `SNR ${snr} dB` : "SNR —";
+  const bar = $("dl-snr-bar");
+  if (bar) {
+    const pct = Math.max(0, Math.min(100, ((snr || 0) / 40) * 100));
+    bar.style.width = pct + "%";
+    bar.style.background = ok ? "var(--green)" : (snr > 3 ? "var(--amber)" : "var(--red)");
+  }
+  dlDrawSpectrum(cap && cap.spectrum);
+}
+
+async function loadDeviceLab() {
+  try {
+    DevLab.meta = await api("/api/device_lab/meta");
+    const r = DevLab.meta.radio || {};
+    if ($("dl-radio"))
+      $("dl-radio").textContent = "Radio: " +
+        (r.model || r.driver || r.active_source || "not connected — CONNECT before RF steps");
+    // Libre RXA omni / RXB directional / NF probes
+    const fillSel = (el, list, valKey) => {
+      if (!el || !list) return;
+      el.innerHTML = list.map(a =>
+        `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join("");
+    };
+    fillSel($("dl-rxa-ant"), DevLab.meta.omni_antennas);
+    fillSel($("dl-rxb-ant"), DevLab.meta.dir_antennas);
+    fillSel($("dl-cap-nf"), DevLab.meta.near_field_antennas);
+    // NF gallery with diagrams
+    const gal = $("dl-nf-gallery");
+    if (gal && DevLab.meta.near_field_antennas) {
+      const cur = ($("dl-nf-ant") && $("dl-nf-ant").value) || "hfield_loop";
+      gal.innerHTML = DevLab.meta.near_field_antennas.map(a =>
+        `<button type="button" class="btn dl-nf-card" data-nf="${esc(a.id)}"
+          style="display:flex;flex-direction:column;align-items:center;width:110px;padding:8px;
+          ${a.id === cur ? "border-color:var(--cyan)" : ""}"
+          title="${esc(a.use || "")}">
+          ${dlNfSvg(a.svg || "other")}
+          <span style="font-size:10px;margin-top:4px;text-align:center">${esc(a.name)}</span>
+        </button>`).join("");
+      gal.querySelectorAll(".dl-nf-card").forEach(btn => {
+        btn.onclick = () => {
+          if ($("dl-nf-ant")) $("dl-nf-ant").value = btn.dataset.nf;
+          if ($("dl-cap-nf")) $("dl-cap-nf").value = btn.dataset.nf;
+          gal.querySelectorAll(".dl-nf-card").forEach(b => {
+            b.style.borderColor = b.dataset.nf === btn.dataset.nf ? "var(--cyan)" : "";
+          });
+        };
+      });
+    }
+    const cat = $("dl-catalog");
+    if (cat && DevLab.meta.catalog) {
+      cat.innerHTML = DevLab.meta.catalog.map(c =>
+        `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join("");
+    }
+    const packs = await api("/api/device_lab/packages");
+    if ($("dl-packages")) {
+      $("dl-packages").innerHTML =
+        "<tr><th>ID</th><th>Name</th><th>Status</th><th>Freq</th><th></th></tr>" +
+        (packs.packages || []).map(p =>
+          `<tr><td>${esc(p.id)}</td><td>${esc(p.name)}</td>` +
+          `<td><span class="pill">${esc(p.status || "")}</span></td>` +
+          `<td>${p.center_mhz != null ? fmtF(p.center_mhz) : "—"}</td>` +
+          `<td><button class="btn" onclick="devLabOpen('${esc(p.id)}')">OPEN</button></td></tr>`
+        ).join("") || "<tr><td colspan=5 class='note'>no packages yet</td></tr>";
+    }
+  } catch (e) {
+    if ($("dl-msg")) $("dl-msg").textContent = "lab meta failed: " + e.message;
+  }
+}
+
+function devLabShowGuide(g) {
+  if (!g) return;
+  if ($("dl-guide-title")) $("dl-guide-title").textContent = g.title || "";
+  if ($("dl-guide-do")) {
+    $("dl-guide-do").innerHTML = (g.do || []).map(x => `<li>${esc(x)}</li>`).join("");
+  }
+  if ($("dl-guide-why"))
+    $("dl-guide-why").textContent = g.why ? ("Why: " + g.why) : "";
+}
+
+function devLabShowStep(step) {
+  document.querySelectorAll(".dl-step").forEach(el => { el.style.display = "none"; });
+  const map = {
+    photo: "dl-step-photo",
+    identify: "dl-step-identify",
+    antenna: "dl-step-antenna",
+    freq_confirm: "dl-step-freq",
+    capture_ten_ft: "dl-step-capture",
+    capture_next_room: "dl-step-capture",
+    capture_near_field: "dl-step-capture",
+    stimulate: "dl-step-stim",
+    demod: "dl-step-demod",
+    ready_to_commit: "dl-step-commit",
+    committed: "dl-step-commit",
+  };
+  const id = map[step] || "dl-step-photo";
+  if ($(id)) $(id).style.display = "";
+  if (step && step.startsWith("capture_")) {
+    const did = step.replace("capture_", "");
+    const dist = (DevLab.meta && DevLab.meta.distances || []).find(d => d.id === did);
+    if ($("dl-cap-title"))
+      $("dl-cap-title").textContent =
+        (did === "ten_ft" ? "5" : did === "next_room" ? "6" : "7") +
+        " · Capture @ " + (dist ? dist.label : did);
+    if ($("dl-cap-instr"))
+      $("dl-cap-instr").textContent = dist ? dist.instruction :
+        "Position the DUT, then capture.";
+    if ($("dl-cap-go")) $("dl-cap-go").dataset.distance = did;
+    // default port: RXA omni for room, RXB or NF for near-field
+    const defPort = (dist && dist.default_port) || (did === "near_field" ? "RXB" : "RXA");
+    if ($("dl-cap-port")) $("dl-cap-port").value = defPort;
+    if ($("dl-cap-nf-wrap"))
+      $("dl-cap-nf-wrap").style.display = did === "near_field" ? "" : "none";
+    // show last spectrum for this distance if any
+    const prev = DevLab.pkg && DevLab.pkg.captures && DevLab.pkg.captures[did];
+    if (prev) dlShowCaptureVisual(prev);
+    else {
+      dlDrawSpectrum(null);
+      if ($("dl-cap-status")) $("dl-cap-status").textContent = "Waiting for capture…";
+      if ($("dl-snr-bar")) $("dl-snr-bar").style.width = "0%";
+    }
+  }
+}
+
+function devLabRenderPkg(pkg, guide) {
+  DevLab.pkg = pkg;
+  if ($("dl-panel")) $("dl-panel").style.display = "";
+  if ($("dl-pkg-id")) $("dl-pkg-id").textContent = pkg.id || "";
+  if ($("dl-status")) $("dl-status").textContent = pkg.status || pkg.step || "";
+  devLabShowGuide(guide);
+  devLabShowStep(pkg.step);
+  if ($("dl-center") && pkg.center_mhz != null) $("dl-center").value = pkg.center_mhz;
+  if ($("dl-bw") && pkg.bw_khz != null) $("dl-bw").value = pkg.bw_khz;
+  if ($("dl-center2") && pkg.center_mhz != null) $("dl-center2").value = pkg.center_mhz;
+  if ($("dl-bw2") && pkg.bw_khz != null) $("dl-bw2").value = pkg.bw_khz;
+  if ($("dl-catalog") && pkg.device_type_id) $("dl-catalog").value = pkg.device_type_id;
+  if ($("dl-name") && pkg.device_name) $("dl-name").value = pkg.device_name;
+  if ($("dl-desc") && pkg.device_description != null) $("dl-desc").value = pkg.device_description || "";
+  if ($("dl-desc2") && pkg.device_description != null) $("dl-desc2").value = pkg.device_description || "";
+  if ($("dl-guesses") && pkg.freq_guesses_mhz)
+    $("dl-guesses").textContent = "Suggested frequencies (MHz): " +
+      (pkg.freq_guesses_mhz || []).join(", ") +
+      (pkg.lookup && pkg.lookup.notes ? " — " + pkg.lookup.notes : "");
+  if ($("dl-lookup-note") && pkg.lookup && pkg.lookup.note)
+    $("dl-lookup-note").textContent = pkg.lookup.note;
+  if ($("dl-cap-results")) {
+    const caps = pkg.captures || {};
+    $("dl-cap-results").innerHTML = Object.keys(caps).map(k => {
+      const c = caps[k];
+      const f = c.features || {};
+      return `<div class="note"><b>${esc(k)}</b>: SNR ${f.snr_db} dB · ` +
+        `${esc(f.modulation_class || "")} · duty ${f.duty_cycle}` +
+        (c.behavior && c.behavior.label ? ` · ${esc(c.behavior.label)}` : "") +
+        `</div>`;
+    }).join("") || "";
+  }
+  if ($("dl-summary")) {
+    $("dl-summary").textContent = JSON.stringify({
+      name: pkg.device_name,
+      description: pkg.device_description,
+      type: pkg.device_type_name,
+      center_mhz: pkg.center_mhz, bw_khz: pkg.bw_khz,
+      antenna: pkg.antenna,
+      rx_port: pkg.rx_port_label || "RX-B (left)",
+      tx_port: pkg.tx_port_label || "TX/RX-A",
+      radio: (pkg.radio || {}).model || (pkg.radio || {}).driver,
+      captures: Object.keys(pkg.captures || {}),
+      stimulate: pkg.stimulate && (pkg.stimulate.verdict || pkg.stimulate.skipped),
+      demod: pkg.demod && ((pkg.demod.interpretation && pkg.demod.interpretation.summary)
+        || (pkg.demod.features && pkg.demod.features.modulation_class) || pkg.demod.skipped),
+    }, null, 2);
+  }
+  if ($("dl-log")) {
+    $("dl-log").innerHTML = (pkg.tech_log || []).slice().reverse().map(e =>
+      `<div>${new Date((e.utc || 0) * 1000).toLocaleTimeString()} — ${esc(e.msg)}</div>`
+    ).join("");
+  }
+  if (pkg.status === "committed" && $("dl-commit-msg"))
+    $("dl-commit-msg").textContent = "Ready to commit — package committed.";
+}
+
+window.devLabOpen = async (id) => {
+  try {
+    const r = await api("/api/device_lab/" + id);
+    devLabRenderPkg(r.package, r.guide);
+  } catch (e) { if ($("dl-msg")) $("dl-msg").textContent = e.message; }
+};
+
+if ($("dl-start")) $("dl-start").onclick = async () => {
+  try {
+    const r = await api("/api/device_lab/start", {});
+    DevLab.photoDataUrl = null;
+    if ($("dl-preview")) $("dl-preview").style.display = "none";
+    devLabRenderPkg(r.package, r.guide);
+    if ($("dl-msg")) $("dl-msg").textContent = "Package started — follow the blue instructions.";
+    loadDeviceLab();
+  } catch (e) { if ($("dl-msg")) $("dl-msg").textContent = e.message; }
+};
+if ($("dl-refresh")) $("dl-refresh").onclick = () => loadDeviceLab();
+
+if ($("dl-cam-start")) $("dl-cam-start").onclick = async () => {
+  try {
+    if (DevLab.stream) DevLab.stream.getTracks().forEach(t => t.stop());
+    DevLab.stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: "environment" }, audio: false });
+    $("dl-video").srcObject = DevLab.stream;
+    if ($("dl-msg")) $("dl-msg").textContent = "Camera live — frame the DUT, then SNAP PHOTO.";
+  } catch (e) {
+    if ($("dl-msg")) $("dl-msg").textContent =
+      "Camera failed: " + e.message + " — use UPLOAD instead, or allow camera permission.";
+  }
+};
+if ($("dl-snap")) $("dl-snap").onclick = () => {
+  const v = $("dl-video"), c = $("dl-canvas");
+  if (!v || !c) return;
+  c.style.display = "";
+  c.getContext("2d").drawImage(v, 0, 0, c.width, c.height);
+  DevLab.photoDataUrl = c.toDataURL("image/jpeg", 0.85);
+  const img = $("dl-preview");
+  if (img) { img.src = DevLab.photoDataUrl; img.style.display = ""; }
+  if ($("dl-msg")) $("dl-msg").textContent = "Photo snapped — SAVE PHOTO → CONTINUE.";
+};
+if ($("dl-upload")) $("dl-upload").onchange = (ev) => {
+  const f = ev.target.files && ev.target.files[0];
+  if (!f) return;
+  const rd = new FileReader();
+  rd.onload = () => {
+    DevLab.photoDataUrl = rd.result;
+    const img = $("dl-preview");
+    if (img) { img.src = DevLab.photoDataUrl; img.style.display = ""; }
+    if ($("dl-msg")) $("dl-msg").textContent = "Photo loaded — SAVE PHOTO → CONTINUE.";
+  };
+  rd.readAsDataURL(f);
+};
+
+async function devLabPhotoSubmit(skip) {
+  if (!DevLab.pkg) return;
+  try {
+    const body = {
+      name: ($("dl-name") && $("dl-name").value) || "",
+      description: ($("dl-desc") && $("dl-desc").value) || "",
+      notes: ($("dl-photo-notes") && $("dl-photo-notes").value) || "",
+    };
+    if (skip) body.skip_photo = true;
+    else {
+      if (!DevLab.photoDataUrl) {
+        if ($("dl-msg")) $("dl-msg").textContent = "Snap or upload a photo first (or SKIP PHOTO).";
+        return;
+      }
+      body.photo = DevLab.photoDataUrl;
+    }
+    const r = await api("/api/device_lab/" + DevLab.pkg.id + "/photo", body);
+    devLabRenderPkg(r.package, r.guide);
+  } catch (e) { if ($("dl-msg")) $("dl-msg").textContent = e.message; }
+}
+if ($("dl-photo-next")) $("dl-photo-next").onclick = () => devLabPhotoSubmit(false);
+if ($("dl-photo-skip")) $("dl-photo-skip").onclick = () => devLabPhotoSubmit(true);
+
+if ($("dl-id-next")) $("dl-id-next").onclick = async () => {
+  if (!DevLab.pkg) return;
+  try {
+    const r = await api("/api/device_lab/" + DevLab.pkg.id + "/identify", {
+      catalog_id: $("dl-catalog") && $("dl-catalog").value,
+      name: ($("dl-name") && $("dl-name").value) || "",
+      description: ($("dl-desc2") && $("dl-desc2").value)
+        || ($("dl-desc") && $("dl-desc").value) || "",
+      center_mhz: parseFloat($("dl-center") && $("dl-center").value),
+      bw_khz: parseFloat($("dl-bw") && $("dl-bw").value),
+    });
+    devLabRenderPkg(r.package, r.guide);
+  } catch (e) { if ($("dl-msg")) $("dl-msg").textContent = e.message; }
+};
+
+if ($("dl-ant-next")) $("dl-ant-next").onclick = async () => {
+  if (!DevLab.pkg) return;
+  try {
+    const r = await api("/api/device_lab/" + DevLab.pkg.id + "/antenna", {
+      rxa_antenna: $("dl-rxa-ant") && $("dl-rxa-ant").value,
+      rxb_antenna: $("dl-rxb-ant") && $("dl-rxb-ant").value,
+      nf_antenna: ($("dl-nf-ant") && $("dl-nf-ant").value) || "hfield_loop",
+      notes: ($("dl-ant-notes") && $("dl-ant-notes").value) || "",
+    });
+    devLabRenderPkg(r.package, r.guide);
+  } catch (e) { if ($("dl-msg")) $("dl-msg").textContent = e.message; }
+};
+
+if ($("dl-freq-next")) $("dl-freq-next").onclick = async () => {
+  if (!DevLab.pkg) return;
+  try {
+    const r = await api("/api/device_lab/" + DevLab.pkg.id + "/freq", {
+      center_mhz: parseFloat($("dl-center2") && $("dl-center2").value),
+      bw_khz: parseFloat($("dl-bw2") && $("dl-bw2").value),
+    });
+    devLabRenderPkg(r.package, r.guide);
+    if ($("dl-msg")) $("dl-msg").textContent =
+      "Freq locked. Position DUT at 10 feet, then CAPTURE NOW.";
+  } catch (e) { if ($("dl-msg")) $("dl-msg").textContent = e.message; }
+};
+
+if ($("dl-cap-go")) $("dl-cap-go").onclick = async () => {
+  if (!DevLab.pkg) return;
+  const distance_id = $("dl-cap-go").dataset.distance || "ten_ft";
+  if ($("dl-msg")) $("dl-msg").textContent = "Capturing IQ… keep DUT in position.";
+  if ($("dl-cap-status")) $("dl-cap-status").textContent = "Capturing…";
+  if ($("dl-snr-bar")) { $("dl-snr-bar").style.width = "30%"; $("dl-snr-bar").style.background = "var(--blue)"; }
+  try {
+    const port = ($("dl-cap-port") && $("dl-cap-port").value) || "RXA";
+    const body = {
+      distance_id,
+      rx_port: port,
+      notes: ($("dl-cap-notes") && $("dl-cap-notes").value) || "",
+      center_mhz: DevLab.pkg.center_mhz,
+      bw_khz: DevLab.pkg.bw_khz,
+    };
+    if (distance_id === "near_field")
+      body.antenna_id = ($("dl-cap-nf") && $("dl-cap-nf").value)
+        || ($("dl-nf-ant") && $("dl-nf-ant").value) || DevLab.pkg.nf_antenna;
+    const r = await api("/api/device_lab/" + DevLab.pkg.id + "/capture", body);
+    devLabRenderPkg(r.package, r.guide);
+    dlShowCaptureVisual(r.capture);
+    const f = (r.capture && r.capture.features) || {};
+    if ($("dl-msg")) $("dl-msg").textContent =
+      `${r.capture && r.capture.capture_status} · ${distance_id} on ${port} · SNR ${f.snr_db} dB · ${f.modulation_class || "—"}`;
+  } catch (e) {
+    if ($("dl-msg")) $("dl-msg").textContent = "Capture failed: " + e.message;
+    if ($("dl-cap-status")) {
+      $("dl-cap-status").textContent = "FAILED — " + e.message;
+      $("dl-cap-status").style.color = "var(--red)";
+    }
+  }
+};
+
+if ($("dl-stim-go")) $("dl-stim-go").onclick = async () => {
+  if (!DevLab.pkg) return;
+  if ($("dl-msg")) $("dl-msg").textContent = "TX probe running…";
+  try {
+    const r = await api("/api/device_lab/" + DevLab.pkg.id + "/stimulate", {
+      center_mhz: DevLab.pkg.center_mhz,
+      override_band: !!( $("dl-stim-override") && $("dl-stim-override").checked ),
+    });
+    devLabRenderPkg(r.package, r.guide);
+    const s = r.stimulate || {};
+    if ($("dl-stim-result"))
+      $("dl-stim-result").innerHTML =
+        `<p><b>${esc((s.verdict || "").replace(/_/g, " "))}</b></p>` +
+        `<p class="note">${esc(s.plain || "")}</p>`;
+  } catch (e) { if ($("dl-msg")) $("dl-msg").textContent = "Stimulate failed: " + e.message; }
+};
+if ($("dl-stim-skip")) $("dl-stim-skip").onclick = async () => {
+  if (!DevLab.pkg) return;
+  try {
+    const r = await api("/api/device_lab/" + DevLab.pkg.id + "/stimulate", { skip: true });
+    devLabRenderPkg(r.package, r.guide);
+  } catch (e) { if ($("dl-msg")) $("dl-msg").textContent = e.message; }
+};
+
+if ($("dl-demod-go")) $("dl-demod-go").onclick = async () => {
+  if (!DevLab.pkg) return;
+  if ($("dl-msg")) $("dl-msg").textContent = "Analyzing / demodulating DUT…";
+  try {
+    const mode = ($("dl-demod-mode") && $("dl-demod-mode").value) || "";
+    const r = await api("/api/device_lab/" + DevLab.pkg.id + "/demod", {
+      center_mhz: DevLab.pkg.center_mhz, mode });
+    devLabRenderPkg(r.package, r.guide);
+    const d = r.demod || {};
+    const interp = d.interpretation || {};
+    if ($("dl-demod-result"))
+      $("dl-demod-result").innerHTML =
+        `<p><b>${esc(interp.summary || (d.features && d.features.modulation_class) || "done")}</b></p>` +
+        `<p class="note">${esc((d.candidates || []).slice(0, 3).map(c => c.name).join(" · "))}</p>`;
+    if (d.audio && $("dl-audio")) {
+      $("dl-audio").src = d.audio;
+      $("dl-audio").style.display = "";
+    }
+    if ($("dl-msg")) $("dl-msg").textContent =
+      "Ready to commit — review summary and click COMMIT PACKAGE.";
+  } catch (e) { if ($("dl-msg")) $("dl-msg").textContent = "Demod failed: " + e.message; }
+};
+if ($("dl-demod-skip")) $("dl-demod-skip").onclick = async () => {
+  if (!DevLab.pkg) return;
+  try {
+    const r = await api("/api/device_lab/" + DevLab.pkg.id + "/demod", { skip: true });
+    devLabRenderPkg(r.package, r.guide);
+    if ($("dl-msg")) $("dl-msg").textContent = "Ready to commit.";
+  } catch (e) { if ($("dl-msg")) $("dl-msg").textContent = e.message; }
+};
+
+if ($("dl-commit")) $("dl-commit").onclick = async () => {
+  if (!DevLab.pkg) return;
+  try {
+    const r = await api("/api/device_lab/" + DevLab.pkg.id + "/commit", {
+      notes: ($("dl-commit-notes") && $("dl-commit-notes").value) || "",
+      save_signature: !($("dl-save-sig") && !$("dl-save-sig").checked),
+    });
+    devLabRenderPkg(r.package, r.guide);
+    if ($("dl-commit-msg")) $("dl-commit-msg").textContent =
+      r.message || "Ready to commit — package saved.";
+    if ($("dl-msg")) $("dl-msg").textContent = r.message || "Committed.";
+    if (DevLab.stream) {
+      DevLab.stream.getTracks().forEach(t => t.stop());
+      DevLab.stream = null;
+    }
+    loadDeviceLab();
+  } catch (e) { if ($("dl-msg")) $("dl-msg").textContent = e.message; }
+};
 
 initWakeLock();
 poll();

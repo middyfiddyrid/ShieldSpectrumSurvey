@@ -18,7 +18,7 @@ from .report import export_csv, generate_report
 from .sweep.calibration import run_calibration
 from .sweep.planner import plan_full_sweep
 from .allocations import bug_band_ranges
-from .sweep.runner import SweepController
+from .sweep.runner import SweepController, postprocess_session
 
 log = logging.getLogger("survey.server")
 WEB_DIR = os.path.join(os.path.dirname(__file__), "web")
@@ -78,6 +78,11 @@ def create_app(db, cfg, demo=False) -> Flask:
     app = Flask(__name__, static_folder=None)
     st = AppState(db, cfg)
     st.demo = demo
+    # Admin/operator-verify mode: lets an AUTHORIZED operator (the app owner on
+    # their own machine, testing against a KNOWN signal they control) listen to
+    # confirm the app's blinded call was right. Content-listening stays audited.
+    # Never on in the public demo. Set app.admin: true in config.yaml to enable.
+    st.admin = bool(cfg.get("app", "admin", default=False)) and not demo
     app.config["APP_STATE"] = st
 
     # hands-free second radio: keep seeking the Pluto so it auto-joins as the
@@ -122,7 +127,7 @@ def create_app(db, cfg, demo=False) -> Flask:
                     "/api/analyze/threat_vectors", "/api/case_files", "/case_files",
                     "/api/triage", "/api/novelty", "/api/record",
                     "/api/attribution", "/api/decode/override", "/api/ble/scan",
-                    "/api/stimulate")
+                    "/api/stimulate", "/api/netscan")
 
     @app.before_request
     def _demo_guard():
@@ -133,11 +138,18 @@ def create_app(db, cfg, demo=False) -> Flask:
 
     @app.get("/")
     def index():
-        return send_from_directory(WEB_DIR, "index.html")
+        # no-cache (still 304-revalidated): the UI and app.js must never skew
+        # across an app update — a stale index.html with a fresh app.js leaves
+        # click targets pointing at elements that don't exist
+        resp = send_from_directory(WEB_DIR, "index.html")
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
 
     @app.get("/static/<path:name>")
     def static_files(name):
-        return send_from_directory(WEB_DIR, name)
+        resp = send_from_directory(WEB_DIR, name)
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
 
     # ---------- session ----------
 
@@ -175,6 +187,96 @@ def create_app(db, cfg, demo=False) -> Flask:
             return err("no such session", 404)
         st.session_id = row["id"]
         return jsonify({"session_id": st.session_id})
+
+    @app.get("/api/sweeps/history")
+    def sweep_history():
+        """Return editable metadata for the open session's completed sweeps.
+
+        Raw segment measurements remain immutable.  Counts are included so an
+        operator can recognize the correct historical run before editing it.
+        """
+        session = st.session()
+        if not session:
+            return err("no session", 409)
+        rows = db.query(
+            "SELECT w.*, COUNT(s.id) AS signal_count, "
+            "COALESCE(SUM(CASE WHEN s.anomaly_score>=60 THEN 1 ELSE 0 END),0) AS high_count, "
+            "COALESCE(SUM(CASE WHEN s.anomaly_score>=30 AND s.anomaly_score<60 "
+            "THEN 1 ELSE 0 END),0) AS medium_count, "
+            "COALESCE(SUM(CASE WHEN s.anomaly_score<30 THEN 1 ELSE 0 END),0) AS low_count "
+            "FROM sweeps w LEFT JOIN signals s ON s.sweep_id=w.id "
+            "WHERE w.session_id=? GROUP BY w.id ORDER BY w.started_utc DESC, w.id DESC",
+            (session["id"],))
+        for row in rows:
+            try:
+                meta = json.loads(row.get("meta") or "{}")
+            except (TypeError, ValueError):
+                meta = {}
+            if not isinstance(meta, dict):
+                meta = {}
+            edits = meta.get("operator_edits")
+            last_edit = edits[-1] if isinstance(edits, list) and edits else None
+            row["operator_notes"] = meta.get("operator_notes", "")
+            row["last_edited_utc"] = (last_edit or {}).get("edited_utc")
+            row.pop("meta", None)
+        return jsonify({
+            "session": {"id": session["id"], "address": session["address"],
+                        "created_utc": session["created_utc"]},
+            "sweeps": rows,
+        })
+
+    @app.post("/api/sweep/history/update")
+    def sweep_history_update():
+        """Correct a historical sweep and recompute every derived session score."""
+        if st.controller.state.get("running"):
+            return err("stop the active sweep or recording before editing history", 409)
+        body = request.get_json(silent=True) or {}
+        try:
+            target_session_id = int(body.get("session_id"))
+        except (TypeError, ValueError):
+            # Browser tabs share AppState, so the history table sends the id of
+            # the session it is displaying instead of trusting global UI state.
+            session = st.session()
+            if not session:
+                return err("valid session_id required", 409)
+            target_session_id = int(session["id"])
+        try:
+            sweep_id = int(body.get("sweep_id"))
+        except (TypeError, ValueError):
+            return err("valid sweep_id required")
+        phase = str(body.get("phase") or "").strip().lower()
+        if phase not in ("ambient", "interior"):
+            return err("phase must be ambient (outside) or interior")
+        room = str(body.get("room") or "").strip()[:120]
+        notes = str(body.get("notes") or "").strip()[:2000]
+        if phase == "ambient":
+            room = room or "exterior"
+        else:
+            room = room or "unspecified"
+
+        existing = db.query_one(
+            "SELECT id,status FROM sweeps WHERE id=? AND session_id=?",
+            (sweep_id, target_session_id))
+        if not existing:
+            return err("sweep not found in the selected session", 404)
+        if existing["status"] == "running":
+            return err("a running sweep cannot be edited", 409)
+
+        updated = db.update_sweep_metadata(
+            sweep_id, target_session_id, phase, room, notes)
+        postprocess_session(db, cfg, target_session_id)
+        counts = db.query_one(
+            "SELECT COUNT(*) AS signal_count, "
+            "COALESCE(SUM(CASE WHEN anomaly_score>=60 THEN 1 ELSE 0 END),0) AS high_count, "
+            "COALESCE(SUM(CASE WHEN anomaly_score>=30 AND anomaly_score<60 "
+            "THEN 1 ELSE 0 END),0) AS medium_count, "
+            "COALESCE(SUM(CASE WHEN anomaly_score<30 THEN 1 ELSE 0 END),0) AS low_count "
+            "FROM signals WHERE sweep_id=? AND session_id=?",
+            (sweep_id, target_session_id))
+        log.info("historical sweep %s corrected to %s/%s and session %s rescored",
+                 sweep_id, phase, room, target_session_id)
+        return jsonify({"ok": True, "sweep": updated, "counts": counts,
+                        "message": "metadata saved; session scores recomputed"})
 
     # ---------- engagement / pre-sweep workflow ----------
 
@@ -528,6 +630,7 @@ def create_app(db, cfg, demo=False) -> Flask:
             "busy": st.controller.busy(),
             "live": live,
             "demo": st.demo,
+            "admin": st.admin,
         })
 
     # ---------- baseline ----------
@@ -608,6 +711,33 @@ def create_app(db, cfg, demo=False) -> Flask:
         if st.session_id:
             db.set_device_info(st.session_id, info.to_dict())
         return jsonify(info.to_dict())
+
+    @app.post("/api/device/install_driver")
+    def install_driver():
+        """Launch the bundled Pluto/USB radio driver installer FROM INSIDE the
+        app, so the operator never has to hunt for a .exe on the drive. Windows
+        only; non-blocking — the installer opens its own window. Returns which
+        installer it launched, or a clear error if it isn't bundled."""
+        import sys as _sys
+        import subprocess as _sub
+        if not _sys.platform.startswith("win"):
+            return err("the radio driver installer is Windows-only", 400)
+        candidates = [
+            cfg.abs_path(os.path.join("drivers", "PlutoSDR-M2k-USB-Drivers.exe")),
+            cfg.abs_path("PlutoSDR-M2k-USB-Drivers.exe"),
+        ]
+        exe = next((p for p in candidates if os.path.isfile(p)), None)
+        if not exe:
+            return err("driver installer not found — it should be in the app's "
+                       "drivers folder", 404)
+        try:
+            _sub.Popen([exe], shell=False)
+        except Exception as e:  # noqa: BLE001
+            return err(f"could not launch the driver installer: {e}", 500)
+        return jsonify({"launched": True, "installer": os.path.basename(exe),
+                        "message": "The radio driver installer is opening in its "
+                                   "own window. Approve its prompts, then replug "
+                                   "the Pluto and press CONNECT."})
 
     @app.get("/api/device/roles")
     def device_roles():
@@ -690,24 +820,41 @@ def create_app(db, cfg, demo=False) -> Flask:
             note = ("BAND GUESS ONLY — no SDR connected for IQ capture (Pluto or "
                     "B220); matched on frequency/bandwidth alone")
         candidates = identify(center_mhz * 1e6, feats, ref)
+        from .behavior import behavior_from_identify
         from .pocsag import looks_like_pocsag
+        from .rf_match import match_inventory, summarize_matches
         pocsag_likely = bool(feats and looks_like_pocsag(feats))
+        behavior = behavior_from_identify(center_mhz, bw_khz, feats)
         # persist onto the originating detection so ID chips survive reloads
         # and show up in Results/Triage. 'band' mode = frequency-only guess.
         id_mode = "iq" if feats else "band"
         persisted = False
         session = st.session()
-        if body.get("signal_id") and session:
+        inv_matches, inv_summary = [], ""
+        if session:
             try:
-                persisted = db.set_signal_identification(
-                    int(body["signal_id"]), session["id"], candidates,
-                    id_mode) is not None
-            except Exception:  # noqa: BLE001 - persistence must not break the ID
-                log.exception("could not persist identify result")
+                inv = db.query(
+                    "SELECT kind,identifier,name,rssi_dbm,channel,freq_mhz,"
+                    "extra,owned FROM inventory WHERE session_id=? "
+                    "AND kind IN ('wifi','ble')", (session["id"],))
+                inv_matches = match_inventory(center_mhz, bw_khz, inv)
+                inv_summary = summarize_matches(inv_matches)
+            except Exception:  # noqa: BLE001
+                log.exception("identify inventory match failed")
+            if body.get("signal_id"):
+                try:
+                    persisted = db.set_signal_identification(
+                        int(body["signal_id"]), session["id"], candidates,
+                        id_mode) is not None
+                except Exception:  # noqa: BLE001 - persistence must not break the ID
+                    log.exception("could not persist identify result")
         return jsonify({"center_mhz": center_mhz, "bw_khz": bw_khz,
                         "source": st.controller.active_source, "features": feats,
                         "note": note, "candidates": candidates, "spectrogram": spec,
                         "pocsag_likely": pocsag_likely,
+                        "behavior": behavior,
+                        "inventory_matches": inv_matches,
+                        "inventory_summary": inv_summary,
                         "id_mode": id_mode, "persisted": persisted})
 
     def _mcfg(msrc, key, default):
@@ -909,10 +1056,23 @@ def create_app(db, cfg, demo=False) -> Flask:
                     note = f"capture failed: {e}"
 
         candidates = identify(center_mhz * 1e6, feats, ref)
+        from .behavior import behavior_from_identify
+        from .rf_match import match_inventory, summarize_matches
         pocsag_likely = bool(feats and looks_like_pocsag(feats))
+        behavior = behavior_from_identify(center_mhz, bw_khz, feats)
         novelty = None
+        inv_matches, inv_summary = [], ""
         session = st.session()
         if session:
+            try:
+                inv = db.query(
+                    "SELECT kind,identifier,name,rssi_dbm,channel,freq_mhz,"
+                    "extra,owned FROM inventory WHERE session_id=? "
+                    "AND kind IN ('wifi','ble')", (session["id"],))
+                inv_matches = match_inventory(center_mhz, bw_khz, inv)
+                inv_summary = summarize_matches(inv_matches)
+            except Exception:  # noqa: BLE001
+                log.exception("analyze inventory match failed")
             try:
                 from .novelty import compute_novelty
                 novelty = compute_novelty(db, session["address"], center_mhz,
@@ -926,6 +1086,19 @@ def create_app(db, cfg, demo=False) -> Flask:
             # decoded payload and re-derive the verdict without a 'decoded' claim.
             decode = None
             interpretation = interpret(feats, None)
+        # Persist the one-line verdict on the originating detection so the live
+        # ledger / results can show "what is this" without re-analyzing. Only
+        # for a real IQ analysis (interpretation exists), never in the demo.
+        if (not st.demo and interpretation and body.get("signal_id")
+                and session):
+            try:
+                db.set_signal_analysis(
+                    int(body["signal_id"]), session["id"],
+                    interpretation.get("summary", ""),
+                    interpretation.get("readable", ""),
+                    (decode or {}).get("protocol") or "")
+            except Exception:  # noqa: BLE001 — persistence is best-effort
+                log.exception("analysis persist failed")
         return jsonify({
             "center_mhz": center_mhz, "label": label, "mode": mode,
             "bw_khz": bw_khz, "in_range": in_range, "note": note,
@@ -933,6 +1106,9 @@ def create_app(db, cfg, demo=False) -> Flask:
             "candidates": candidates, "analyzer": analyzer, "waterfall": spec,
             "audio": audio, "decode": decode, "interpretation": interpretation,
             "pocsag_likely": pocsag_likely,
+            "behavior": behavior,
+            "inventory_matches": inv_matches,
+            "inventory_summary": inv_summary,
             "signal_present": bool(feats and feats.get("signal_present")),
             "novelty": novelty})
 
@@ -1530,7 +1706,97 @@ def create_app(db, cfg, demo=False) -> Flask:
             q += " AND sweep_id=?"
             params.append(int(sweep_id))
         q += " ORDER BY center_mhz"
-        return jsonify(db.query(q, params))
+        from .nextstep import enrich_signal_rows
+        # Wi-Fi/BLE inventory for RF correlation (BSSID / MAC identifiers)
+        inv = db.query(
+            "SELECT kind,identifier,name,rssi_dbm,channel,freq_mhz,extra,owned,vendor "
+            "FROM inventory WHERE session_id=? AND kind IN ('wifi','ble')",
+            (session["id"],))
+        return jsonify(enrich_signal_rows(
+            db.query(q, params), inventory=inv, base_dir=cfg.base_dir))
+
+    def _session_signal(signal_id):
+        """A signals row scoped to the open session, or None."""
+        session = st.session()
+        if not session:
+            return None
+        return db.query_one("SELECT * FROM signals WHERE id=? AND session_id=?",
+                            (signal_id, session["id"]))
+
+    @app.get("/api/signals/<int:signal_id>/image.svg")
+    def signal_image(signal_id):
+        """On-demand spectrum picture of one detection, cropped from its
+        segment's stored max-hold/average arrays — the same render the wiki's
+        post-sweep observation archive produces, but available DURING the sweep
+        (the segment row is written before its signals). ?size=thumb returns
+        the chrome-free ledger thumbnail. Deterministic from immutable data,
+        so it's cacheable."""
+        from .sigcapture import _crop_segment, render_capture_svg, render_thumb_svg
+        s = _session_signal(signal_id)
+        if not s:
+            return err("signal not found in this session", 404)
+        seg = db.query_one("SELECT data_json FROM segments WHERE id=?",
+                           (s["segment_id"],)) if s["segment_id"] else None
+        try:
+            seg_data = json.loads(seg["data_json"]) if seg and seg["data_json"] else None
+        except (TypeError, ValueError):
+            seg_data = None
+        if not seg_data:
+            return err("no stored trace for this signal's segment", 404)
+        # same window the observation archive uses, so both pictures agree
+        half = max((s["bw_khz"] or 100) / 1000.0 * 5, 0.25)
+        crop = _crop_segment(seg_data, s["center_mhz"], half)
+        if crop is None:
+            return err("segment trace is empty", 404)
+        meta = {"center_mhz": s["center_mhz"], "peak_dbm": s["peak_dbm"],
+                "floor_dbm": s["floor_dbm"], "bw_khz": s["bw_khz"],
+                "persistence": s["persistence"],
+                "label": s["matched_label"] or s["display_label"]
+                or f"{s['center_mhz']:.4f} MHz "
+                   + ("unverified" if s["classification"] == "UNVERIFIED" else "signal"),
+                "session_id": s["session_id"], "address": "",
+                "room": s["room"] or "", "module": s["module"] or "",
+                "captured": ""}
+        if request.args.get("size") == "thumb":
+            svg = render_thumb_svg(crop, meta)
+        else:
+            session = st.session()
+            meta["address"] = (session or {}).get("address", "")
+            svg = render_capture_svg(crop, meta, deidentified=bool(st.demo))
+        resp = Response(svg, mimetype="image/svg+xml")
+        resp.headers["Cache-Control"] = "private, max-age=3600"
+        return resp
+
+    @app.get("/api/segments/<int:segment_id>")
+    def segment_detail(segment_id):
+        """One completed segment's stored accumulation (max-hold + average +
+        hit counts) plus its detections — the ledger's 'take me back to the
+        segment this was found in' review view. Read-only, no radio; the
+        realtime trace was never persisted, by design."""
+        session = st.session()
+        if not session:
+            return err("no session")
+        seg = db.query_one(
+            "SELECT seg.*, sw.session_id AS session_id, sw.phase, sw.module, sw.room "
+            "FROM segments seg JOIN sweeps sw ON seg.sweep_id=sw.id WHERE seg.id=?",
+            (segment_id,))
+        if not seg or seg["session_id"] != session["id"]:
+            return err("segment not found in this session", 404)
+        try:
+            data = json.loads(seg.pop("data_json") or "null")
+        except (TypeError, ValueError):
+            data = None
+        from .nextstep import enrich_signal_rows
+        inv = db.query(
+            "SELECT kind,identifier,name,rssi_dbm,channel,freq_mhz,extra,owned,vendor "
+            "FROM inventory WHERE session_id=? AND kind IN ('wifi','ble')",
+            (session["id"],))
+        sigs = enrich_signal_rows(db.query(
+            "SELECT * FROM signals WHERE segment_id=? ORDER BY center_mhz",
+            (segment_id,)), inventory=inv, base_dir=cfg.base_dir)
+        seg["data"] = data
+        seg["signals"] = sigs
+        return jsonify(seg)
 
     @app.get("/api/anomalies")
     def anomalies():
@@ -1890,6 +2156,507 @@ def create_app(db, cfg, demo=False) -> Flask:
             return err(f"Discord post failed: {e}", 502)
         return jsonify({"posted": True, "anomalies": len(lines)})
 
+    # ---------- Device Capture Lab (guided DUT characterization) ----------
+
+    def _lab_radio_info():
+        dev = st.controller.device
+        info = {}
+        if dev is not None and getattr(dev, "info", None):
+            try:
+                di = dev.info
+                if hasattr(di, "to_dict"):
+                    info = di.to_dict()
+                else:
+                    info = {
+                        "model": getattr(di, "model", "") or "",
+                        "driver": getattr(di, "driver", "") or "",
+                        "port": getattr(di, "port", "") or "",
+                        "firmware": getattr(di, "firmware", "") or "",
+                    }
+            except Exception:  # noqa: BLE001
+                info = {"model": type(dev).__name__}
+        info["active_source"] = getattr(st.controller, "active_source", None)
+        return info
+
+    @app.get("/api/device_lab/meta")
+    def device_lab_meta():
+        from .device_lab import (
+            ANTENNA_TYPES, DEVICE_CATALOG, DISTANCES, LIBRE_PORTS,
+            OMNI_ANTENNAS, DIR_ANTENNAS, NEAR_FIELD_ANTENNAS,
+        )
+        return jsonify({
+            "antenna_types": ANTENNA_TYPES,
+            "omni_antennas": OMNI_ANTENNAS,
+            "dir_antennas": DIR_ANTENNAS,
+            "near_field_antennas": NEAR_FIELD_ANTENNAS,
+            "libre_ports": LIBRE_PORTS,
+            "distances": list(DISTANCES),
+            "catalog": [{"id": e["id"], "name": e["name"],
+                         "freq_guess_mhz": e["freq_guess_mhz"],
+                         "notes": e["notes"]} for e in DEVICE_CATALOG],
+            "radio": _lab_radio_info(),
+        })
+
+    @app.get("/api/device_lab/packages")
+    def device_lab_list():
+        from .device_lab import list_packages
+        return jsonify({"packages": list_packages(cfg.base_dir)})
+
+    @app.post("/api/device_lab/start")
+    def device_lab_start():
+        from .device_lab import new_package, save_package, log_step, next_instruction
+        session = st.session()
+        pkg = new_package(_lab_radio_info(),
+                          session_id=(session["id"] if session else None))
+        log_step(pkg, "Lab package created — photograph the DUT.")
+        save_package(cfg.base_dir, pkg)
+        return jsonify({"package": pkg, "guide": next_instruction(pkg)})
+
+    @app.get("/api/device_lab/<pkg_id>")
+    def device_lab_get(pkg_id):
+        from .device_lab import load_package, next_instruction
+        pkg = load_package(cfg.base_dir, pkg_id)
+        if not pkg:
+            return err("package not found", 404)
+        return jsonify({"package": pkg, "guide": next_instruction(pkg)})
+
+    @app.post("/api/device_lab/<pkg_id>/photo")
+    def device_lab_photo(pkg_id):
+        from .device_lab import (load_package, save_package, save_photo_b64,
+                                 log_step, match_catalog, populate_from_catalog,
+                                 next_instruction)
+        pkg = load_package(cfg.base_dir, pkg_id)
+        if not pkg:
+            return err("package not found", 404)
+        body = request.get_json(silent=True) or {}
+        data_url = body.get("photo") or body.get("data_url") or ""
+        name_hint = (body.get("name") or body.get("description") or "").strip()
+        try:
+            if data_url:
+                pkg["photo_path"] = save_photo_b64(cfg.base_dir, pkg_id, data_url)
+            elif body.get("skip_photo"):
+                pkg["photo_path"] = ""
+            else:
+                return err("need photo data URL or skip_photo=true")
+        except ValueError as e:
+            return err(str(e))
+        pkg["device_name"] = name_hint or pkg.get("device_name") or ""
+        pkg["device_description"] = (body.get("description") or body.get("device_description")
+                                     or pkg.get("device_description") or "").strip()
+        pkg["photo_notes"] = (body.get("notes") or "").strip()
+        # seed catalog from free text + description; photo alone is not OCR
+        blob = " ".join([
+            name_hint, pkg.get("device_description") or "",
+            pkg.get("photo_notes") or "",
+        ])
+        hits = match_catalog(blob)
+        pkg["lookup"] = {
+            "candidates": [{"id": h["id"], "name": h["name"], "score": h["score"],
+                            "freq_guess_mhz": h["freq_guess_mhz"]} for h in hits[:6]],
+            "note": ("Pick a class below. Describe the device (ports, brand, wireless "
+                     "type) and/or type make/model — e.g. 'Wyze cam', 'Toyota key fob'."),
+        }
+        if hits:
+            populate_from_catalog(pkg, hits[0]["id"])
+        else:
+            populate_from_catalog(pkg, "unknown_box")
+        pkg["step"] = "identify"
+        log_step(pkg, f"Photo saved; catalog seed → {pkg.get('device_type_name')}")
+        save_package(cfg.base_dir, pkg)
+        return jsonify({"package": pkg, "guide": next_instruction(pkg)})
+
+    @app.post("/api/device_lab/<pkg_id>/identify")
+    def device_lab_identify(pkg_id):
+        from .device_lab import (load_package, save_package, populate_from_catalog,
+                                 log_step, next_instruction, match_catalog)
+        pkg = load_package(cfg.base_dir, pkg_id)
+        if not pkg:
+            return err("package not found", 404)
+        body = request.get_json(silent=True) or {}
+        if body.get("catalog_id"):
+            populate_from_catalog(pkg, body["catalog_id"])
+        if body.get("name"):
+            pkg["device_name"] = str(body["name"]).strip()
+        if body.get("description") is not None or body.get("device_description") is not None:
+            pkg["device_description"] = str(
+                body.get("description") or body.get("device_description") or "").strip()
+        blob = " ".join([
+            pkg.get("device_name") or "",
+            pkg.get("device_description") or "",
+        ])
+        hits = match_catalog(blob)
+        if hits and not body.get("catalog_id"):
+            populate_from_catalog(pkg, hits[0]["id"])
+        if body.get("center_mhz") is not None:
+            pkg["center_mhz"] = float(body["center_mhz"])
+        if body.get("bw_khz") is not None:
+            pkg["bw_khz"] = float(body["bw_khz"])
+        pkg["step"] = "antenna"
+        log_step(pkg, f"Class set: {pkg.get('device_type_name')} @ "
+                      f"{pkg.get('center_mhz')} MHz"
+                      + (f" — {pkg.get('device_description')[:80]}"
+                         if pkg.get("device_description") else ""))
+        save_package(cfg.base_dir, pkg)
+        return jsonify({"package": pkg, "guide": next_instruction(pkg)})
+
+    @app.post("/api/device_lab/<pkg_id>/antenna")
+    def device_lab_antenna(pkg_id):
+        from .device_lab import load_package, save_package, log_step, next_instruction
+        pkg = load_package(cfg.base_dir, pkg_id)
+        if not pkg:
+            return err("package not found", 404)
+        body = request.get_json(silent=True) or {}
+        # New: Libre RXA omni + RXB directional + optional NF default
+        rxa = (body.get("rxa_antenna") or body.get("antenna") or "").strip()
+        rxb = (body.get("rxb_antenna") or "").strip()
+        nf = (body.get("nf_antenna") or "").strip()
+        if not rxa and not body.get("antenna"):
+            return err("select omni antenna for Libre RXA")
+        if rxa:
+            pkg["rxa_antenna"] = rxa
+            pkg["antenna"] = rxa  # summary field
+        if rxb:
+            pkg["rxb_antenna"] = rxb
+        if nf:
+            pkg["nf_antenna"] = nf
+        pkg["antenna_notes"] = (body.get("notes") or "").strip()
+        pkg["radio"] = _lab_radio_info()
+        pkg["step"] = "freq_confirm"
+        log_step(pkg, f"Antennas: RXA/omni={pkg.get('rxa_antenna')} "
+                      f"RXB/dir={pkg.get('rxb_antenna')} NF={pkg.get('nf_antenna')}")
+        save_package(cfg.base_dir, pkg)
+        return jsonify({"package": pkg, "guide": next_instruction(pkg)})
+
+    @app.post("/api/device_lab/<pkg_id>/freq")
+    def device_lab_freq(pkg_id):
+        from .device_lab import load_package, save_package, log_step, next_instruction
+        pkg = load_package(cfg.base_dir, pkg_id)
+        if not pkg:
+            return err("package not found", 404)
+        body = request.get_json(silent=True) or {}
+        if body.get("center_mhz") is None:
+            return err("need center_mhz")
+        pkg["center_mhz"] = float(body["center_mhz"])
+        if body.get("bw_khz") is not None:
+            pkg["bw_khz"] = float(body["bw_khz"])
+        pkg["freq_confirmed"] = True
+        pkg["step"] = "capture_ten_ft"
+        log_step(pkg, f"Frequency confirmed: {pkg['center_mhz']} MHz")
+        save_package(cfg.base_dir, pkg)
+        return jsonify({"package": pkg, "guide": next_instruction(pkg)})
+
+    @app.post("/api/device_lab/<pkg_id>/capture")
+    def device_lab_capture(pkg_id):
+        """IQ capture at one of the three distances. Requires connected SDR."""
+        from .device_lab import (load_package, save_package, log_step,
+                                 next_instruction, advance_after_distance, DISTANCES)
+        from .identify import iq_features, identify, load_reference
+        pkg = load_package(cfg.base_dir, pkg_id)
+        if not pkg:
+            return err("package not found", 404)
+        body = request.get_json(silent=True) or {}
+        distance_id = (body.get("distance_id") or "").strip()
+        if distance_id not in {d["id"] for d in DISTANCES}:
+            return err("distance_id must be ten_ft | next_room | near_field")
+        center = float(body.get("center_mhz") or pkg.get("center_mhz") or 0)
+        if not center:
+            return err("set center_mhz first")
+        pkg["center_mhz"] = center
+        if body.get("bw_khz") is not None:
+            pkg["bw_khz"] = float(body["bw_khz"])
+
+        dev, mlock, mstop, msrc = st.controller.monitor_target()
+        is_sdr = dev is not None and hasattr(dev, "capture_iq") and \
+            getattr(dev, "is_swept_sdr", False)
+        if not is_sdr:
+            return err("connect an SDR (B220/Pluto) to capture IQ for the lab", 409)
+        if st.controller.busy(msrc):
+            return err("radio busy — stop sweep/monitor first", 409)
+
+        sr = int(cfg.get(msrc if msrc != "pluto" else "pluto", "sample_rate",
+                         default=cfg.get("pluto", "sample_rate", default=20_000_000)))
+        # prefer monitor section sample rate
+        try:
+            sr = int(cfg.get(msrc or "pluto", "sample_rate", default=sr))
+        except Exception:  # noqa: BLE001
+            pass
+        n = int(cfg.get("pluto", "identify_samples", default=131072))
+        # Libre port: RXA=right/omni, RXB=left/directional (defaults per distance)
+        from .device_lab import port_to_side, spectrum_preview, DISTANCES as _DISTS
+        dist_meta = next((d for d in _DISTS if d["id"] == distance_id), None)
+        port_id = (body.get("rx_port") or pkg.get("rx_port")
+                   or (dist_meta or {}).get("default_port") or "RXA")
+        port_id = str(port_id).upper().replace(" ", "")
+        if port_id not in ("RXA", "RXB"):
+            port_id = "RXA"
+        lab_side = port_to_side(port_id)
+        ant_id = (body.get("antenna_id") or body.get("antenna")
+                  or (pkg.get("nf_antenna") if distance_id == "near_field"
+                      else (pkg.get("rxa_antenna") if port_id == "RXA"
+                            else pkg.get("rxb_antenna"))) or "")
+        try:
+            mstop.set()
+            with mlock:
+                if hasattr(dev, "select_module"):
+                    try:
+                        dev.select_module(lab_side)
+                    except Exception:  # noqa: BLE001
+                        log.warning("device lab: could not select_module(%s)", lab_side)
+                iq = dev.capture_iq(center * 1e6, sr, n)
+                if hasattr(dev, "select_module"):
+                    try:
+                        dev.select_module("right")  # restore default
+                    except Exception:  # noqa: BLE001
+                        pass
+            feats = iq_features(iq, sr)
+            spec = spectrum_preview(iq, sr)
+            ref = load_reference()
+            candidates = identify(center * 1e6, feats, ref, top_n=5)
+        except Exception as e:  # noqa: BLE001
+            log.exception("device lab capture failed")
+            return err(f"capture failed: {e}", 500)
+
+        from .behavior import behavior_from_identify
+        beh = behavior_from_identify(center, pkg.get("bw_khz"), feats)
+        snr = feats.get("snr_db")
+        ok = bool(feats.get("signal_present")) and (snr is None or snr >= 6)
+        rec = {
+            "distance_id": distance_id,
+            "utc": time.time(),
+            "center_mhz": center,
+            "sample_rate": sr,
+            "n_samples": n,
+            "features": feats,
+            "spectrum": spec,
+            "capture_ok": ok,
+            "capture_status": (
+                "GOOD — clear energy above floor" if ok
+                else "WEAK/EMPTY — check DUT power, port, antenna, frequency"),
+            "behavior": beh,
+            "candidates": candidates[:3],
+            "radio": msrc,
+            "rx_port": port_id,
+            "rx_side": lab_side,
+            "rx_port_label": (
+                "Libre RXA (omni)" if port_id == "RXA" else "Libre RXB (directional)"),
+            "antenna_id": ant_id,
+            "antenna": ant_id or pkg.get("antenna"),
+            "notes": (body.get("notes") or "").strip(),
+        }
+        pkg["rx_port"] = port_id
+        pkg["rx_port_label"] = rec["rx_port_label"]
+        pkg.setdefault("captures", {})[distance_id] = rec
+        pkg["step"] = advance_after_distance(pkg, distance_id)
+        log_step(pkg, f"Captured {distance_id} @ {center} MHz — "
+                      f"SNR {feats.get('snr_db')} dB, class {feats.get('modulation_class')}")
+        save_package(cfg.base_dir, pkg)
+        return jsonify({"package": pkg, "guide": next_instruction(pkg),
+                        "capture": rec})
+
+    @app.post("/api/device_lab/<pkg_id>/stimulate")
+    def device_lab_stimulate(pkg_id):
+        """TX interaction probe for the DUT (ISM-gated via stimulate engine)."""
+        from .device_lab import load_package, save_package, log_step, next_instruction
+        import contextlib
+        from .stimulate import SplitStimRadio, StimulationEngine
+        pkg = load_package(cfg.base_dir, pkg_id)
+        if not pkg:
+            return err("package not found", 404)
+        body = request.get_json(silent=True) or {}
+        if body.get("skip"):
+            pkg["stimulate"] = {"skipped": True, "utc": time.time()}
+            pkg["step"] = "demod"
+            log_step(pkg, "TX probe skipped by tech")
+            save_package(cfg.base_dir, pkg)
+            return jsonify({"package": pkg, "guide": next_instruction(pkg)})
+
+        center = float(body.get("center_mhz") or pkg.get("center_mhz") or 0)
+        if not center:
+            return err("need center_mhz")
+        # default ±10 MHz band around DUT, clamped later by engine
+        half = float(body.get("half_span_mhz") or 10.0)
+        lo, hi = center - half, center + half
+        setup = str(cfg.get("stimulate", "setup", default="single")).lower()
+        locks = []
+        if setup == "split":
+            tx_src = str(cfg.get("stimulate", "tx_source", default="pluto")).lower()
+            rx_src = str(cfg.get("stimulate", "rx_source", default="b220")).lower()
+            devs = st.controller.devices
+            tx, rx = devs.get(tx_src), devs.get(rx_src)
+            if tx is None or rx is None:
+                return err(f"split stim needs TX={tx_src} and RX={rx_src} connected", 409)
+            radio = SplitStimRadio(cfg, tx, rx)
+            for s in (tx_src, rx_src):
+                lk = st.controller.device_locks.get(s)
+                if lk is not None:
+                    locks.append(lk)
+        else:
+            dev, mlock, mstop, msrc = st.controller.monitor_target()
+            if dev is None or not hasattr(dev, "stim_mode"):
+                return err("active radio can't TX — use B220 2TX/2RX or split setup", 409)
+            if st.controller.busy(msrc):
+                return err("radio busy", 409)
+            radio = dev
+            mstop.set()
+            if mlock is not None:
+                locks.append(mlock)
+        try:
+            eng = StimulationEngine(cfg, radio)
+            with contextlib.ExitStack() as stack:
+                for lk in locks:
+                    stack.enter_context(lk)
+                res = eng.probe(center * 1e6, lo * 1e6, hi * 1e6,
+                                override_band=bool(body.get("override_band")))
+            result = res.to_dict()
+        except Exception as e:  # noqa: BLE001
+            log.exception("device lab stimulate failed")
+            return err(f"stimulate failed: {e}", 500)
+        pkg["stimulate"] = result
+        pkg["step"] = "demod"
+        log_step(pkg, f"TX probe: {result.get('verdict')}")
+        save_package(cfg.base_dir, pkg)
+        return jsonify({"package": pkg, "guide": next_instruction(pkg),
+                        "stimulate": result})
+
+    @app.post("/api/device_lab/<pkg_id>/demod")
+    def device_lab_demod(pkg_id):
+        """Analyze/demod the intentional DUT (lab testing — not bulk ambient)."""
+        from .device_lab import load_package, save_package, log_step, next_instruction
+        from .identify import iq_features, identify, load_reference, spectrogram
+        from .demod import demodulate, pick_mode, wav_bytes
+        from .decode_router import route_decode, interpret, DATA_MODES
+        from .sweep.sdr_source import welch_psd
+        import base64
+        pkg = load_package(cfg.base_dir, pkg_id)
+        if not pkg:
+            return err("package not found", 404)
+        body = request.get_json(silent=True) or {}
+        if body.get("skip"):
+            pkg["demod"] = {"skipped": True, "utc": time.time()}
+            pkg["step"] = "ready_to_commit"
+            pkg["status"] = "ready_to_commit"
+            log_step(pkg, "Demod skipped")
+            save_package(cfg.base_dir, pkg)
+            return jsonify({"package": pkg, "guide": next_instruction(pkg)})
+
+        center = float(body.get("center_mhz") or pkg.get("center_mhz") or 0)
+        if not center:
+            return err("need center_mhz")
+        mode = (body.get("mode") or pick_mode(center)).lower()
+        dev, mlock, mstop, msrc = st.controller.monitor_target()
+        is_sdr = dev is not None and hasattr(dev, "capture_iq") and \
+            getattr(dev, "is_swept_sdr", False)
+        if not is_sdr:
+            return err("connect SDR for demod", 409)
+        if st.controller.busy(msrc):
+            return err("radio busy", 409)
+        fs = float(cfg.get("pluto", "stream_sample_rate", default=2_400_000))
+        try:
+            fs = float(cfg.get(msrc or "pluto", "stream_sample_rate", default=fs))
+        except Exception:  # noqa: BLE001
+            pass
+        n = int(fs * 2.0)
+        cal = float(cfg.get(msrc or "pluto", "cal_offset_db", default=-30.0))
+        lab_side = str(pkg.get("rx_port") or "left").lower()
+        if lab_side not in ("left", "right"):
+            lab_side = "left"
+        try:
+            mstop.set()
+            with mlock:
+                if hasattr(dev, "select_module"):
+                    try:
+                        dev.select_module(lab_side)  # RX-B for lab
+                    except Exception:  # noqa: BLE001
+                        pass
+                iq = dev.capture_iq(center * 1e6, fs, n)
+                if hasattr(dev, "select_module"):
+                    try:
+                        dev.select_module("right")  # restore sweep default RX-A
+                    except Exception:  # noqa: BLE001
+                        pass
+            feats = iq_features(iq, fs)
+            candidates = identify(center * 1e6, feats, load_reference(), top_n=5)
+            routed = route_decode(iq, fs, feats, prefer=mode if mode else None)
+            interpretation = interpret(feats, routed.get("protocol"))
+            audio = None
+            if mode not in DATA_MODES and feats.get("signal_present"):
+                try:
+                    pcm, arate = demodulate(iq, fs, mode, 0.0)
+                    audio = ("data:audio/wav;base64,"
+                             + base64.b64encode(wav_bytes(pcm, arate)).decode())
+                except Exception:  # noqa: BLE001
+                    log.exception("lab demod audio failed")
+            wf = spectrogram(iq, fs, n_time=60, nperseg=256)
+            rec = {
+                "utc": time.time(),
+                "center_mhz": center,
+                "mode": mode,
+                "features": feats,
+                "candidates": candidates,
+                "decode": {k: routed.get(k) for k in
+                           ("protocol", "messages", "confidence", "note")
+                           if k in routed} if routed else None,
+                "interpretation": interpretation,
+                "audio": audio,
+                "signal_present": bool(feats.get("signal_present")),
+                "waterfall_shape": [len(wf.get("db") or []),
+                                    len((wf.get("db") or [[]])[0])],
+            }
+        except Exception as e:  # noqa: BLE001
+            log.exception("device lab demod failed")
+            return err(f"demod failed: {e}", 500)
+        pkg["demod"] = rec
+        pkg["step"] = "ready_to_commit"
+        pkg["status"] = "ready_to_commit"
+        log_step(pkg, f"Demod/analyze done — {interpretation.get('summary') if interpretation else feats.get('modulation_class')}")
+        save_package(cfg.base_dir, pkg)
+        return jsonify({"package": pkg, "guide": next_instruction(pkg),
+                        "demod": rec})
+
+    @app.post("/api/device_lab/<pkg_id>/commit")
+    def device_lab_commit(pkg_id):
+        from .device_lab import load_package, save_package, log_step, next_instruction
+        from .sig_library import add_ref, make_ref_from_signal
+        pkg = load_package(cfg.base_dir, pkg_id)
+        if not pkg:
+            return err("package not found", 404)
+        body = request.get_json(silent=True) or {}
+        pkg["commit_notes"] = (body.get("notes") or "").strip()
+        pkg["status"] = "committed"
+        pkg["step"] = "committed"
+        pkg["committed_utc"] = time.time()
+        sig_ref = None
+        if body.get("save_signature", True):
+            near = (pkg.get("captures") or {}).get("near_field") or {}
+            feats = near.get("features") or (pkg.get("demod") or {}).get("features")
+            sig = {
+                "center_mhz": pkg.get("center_mhz"),
+                "bw_khz": pkg.get("bw_khz"),
+                "persistence": (feats or {}).get("duty_cycle"),
+                "behavior": near.get("behavior") or {},
+                "_features": feats,
+            }
+            label = (pkg.get("device_name") or pkg.get("device_type_name")
+                     or f"DUT {pkg_id}")
+            ref = make_ref_from_signal(
+                sig, label=label,
+                notes=(pkg.get("commit_notes") or "")[:400]
+                      + f" | ant={pkg.get('antenna')}",
+                site_type="device_lab")
+            add_ref(cfg.base_dir, ref)
+            sig_ref = ref
+            pkg["signature_ref_id"] = ref.get("id")
+        log_step(pkg, "READY TO COMMIT — package committed"
+                      + (f"; signature {sig_ref.get('id')}" if sig_ref else ""))
+        save_package(cfg.base_dir, pkg)
+        return jsonify({
+            "package": pkg,
+            "guide": next_instruction(pkg),
+            "message": "Ready to commit — package saved."
+                       + (" Signature library entry stored." if sig_ref else ""),
+            "signature_ref": sig_ref,
+        })
+
     # ---------- wireless inventory ----------
 
     @app.post("/api/inventory/scan")
@@ -1904,6 +2671,46 @@ def create_app(db, cfg, demo=False) -> Flask:
             upsert_inventory(db, session["id"], devices)
         return jsonify({"kind": kind, "found": len(devices), "message": message})
 
+    @app.post("/api/inventory/scan_for_signal")
+    def inventory_scan_for_signal():
+        """One-click: scan Wi-Fi + BLE, then re-enrich one RF hit with matches.
+        Content-free — protocol IDs only (BSSID/OUI/BLE)."""
+        from .inventory import scan_ble, scan_wifi, upsert_inventory
+        from .nextstep import enrich_signal_rows
+        session = st.session()
+        if not session:
+            return err("create a session first")
+        body = request.get_json(silent=True) or {}
+        sid = body.get("signal_id")
+        messages = []
+        total = 0
+        for kind, scanner in (("wifi", scan_wifi), ("ble", scan_ble)):
+            try:
+                devices, message = scanner()
+                if devices:
+                    upsert_inventory(db, session["id"], devices)
+                    total += len(devices)
+                messages.append(f"{kind}: {message}")
+            except Exception as e:  # noqa: BLE001
+                messages.append(f"{kind}: failed ({e})")
+        inv = db.query(
+            "SELECT kind,identifier,name,rssi_dbm,channel,freq_mhz,extra,owned,vendor "
+            "FROM inventory WHERE session_id=? AND kind IN ('wifi','ble')",
+            (session["id"],))
+        row = None
+        if sid:
+            raw = db.query_one(
+                "SELECT * FROM signals WHERE id=? AND session_id=?",
+                (int(sid), session["id"]))
+            if raw:
+                row = enrich_signal_rows(
+                    [dict(raw)], inventory=inv, base_dir=cfg.base_dir)[0]
+        return jsonify({
+            "scanned": total, "messages": messages,
+            "signal": row,
+            "inventory_count": len(inv),
+        })
+
     @app.get("/api/inventory")
     def inventory_get():
         from .inventory import inventory_rows
@@ -1914,10 +2721,288 @@ def create_app(db, cfg, demo=False) -> Flask:
 
     @app.post("/api/inventory/mark")
     def inventory_mark():
+        session = st.session()
+        if not session:
+            return err("no session")
         body = request.get_json(force=True)
-        db.execute("UPDATE inventory SET owned=? WHERE id=?",
-                   (int(bool(body.get("owned"))), body.get("id")))
+        # session-scoped: the owned flag is the allowlist the LAN checker trusts,
+        # so a device id from another session must not be flippable here
+        row = db.set_inventory_owned(body.get("id"), session["id"],
+                                     bool(body.get("owned")))
+        if not row:
+            return err("device not found in this session", 404)
         return jsonify({"saved": True})
+
+    # ---------- guided field experiments (no content demod) ----------
+
+    @app.get("/api/experiments/guide")
+    def experiments_guide():
+        from .experiments import KINDS, next_step_hint
+        return jsonify({
+            "kinds": list(KINDS),
+            "guides": {k: next_step_hint(k) for k in KINDS},
+        })
+
+    @app.post("/api/experiments/record")
+    def experiments_record():
+        """Record phone-test / inventory-subtract / DECT / keyfob outcome on a signal."""
+        from .experiments import build_record, summarize_outcome
+        session = st.session()
+        if not session:
+            return err("no session")
+        body = request.get_json(silent=True) or {}
+        sid = body.get("signal_id")
+        if not sid:
+            return err("need signal_id")
+        try:
+            rec = build_record(body.get("kind") or "", body)
+        except ValueError as e:
+            return err(str(e))
+        row = db.append_signal_experiment(int(sid), session["id"], rec)
+        if not row:
+            return err("signal not found in this session", 404)
+        return jsonify({
+            "saved": True,
+            "record": rec,
+            "summary": summarize_outcome(rec),
+            "signal_id": int(sid),
+        })
+
+    # ---------- local signature library ----------
+
+    @app.get("/api/siglib")
+    def siglib_list():
+        from .sig_library import load_index
+        return jsonify({"refs": load_index(cfg.base_dir)})
+
+    @app.post("/api/siglib/save")
+    def siglib_save():
+        """Save a de-identified shape from a confirmed signal as a local ref."""
+        from .behavior import classify_behavior
+        from .sig_library import add_ref, make_ref_from_signal
+        session = st.session()
+        if not session:
+            return err("no session")
+        body = request.get_json(silent=True) or {}
+        sid = body.get("signal_id")
+        label = (body.get("label") or "").strip()
+        if not sid or not label:
+            return err("need signal_id and label")
+        raw = db.query_one(
+            "SELECT * FROM signals WHERE id=? AND session_id=?",
+            (int(sid), session["id"]))
+        if not raw:
+            return err("signal not found in this session", 404)
+        sig = dict(raw)
+        try:
+            sig["behavior"] = classify_behavior(sig)
+        except Exception:  # noqa: BLE001
+            pass
+        ref = make_ref_from_signal(
+            sig, label=label, notes=body.get("notes") or "",
+            site_type=body.get("site_type") or "")
+        add_ref(cfg.base_dir, ref)
+        return jsonify({"saved": True, "ref": ref})
+
+    @app.post("/api/siglib/delete")
+    def siglib_delete():
+        from .sig_library import delete_ref
+        body = request.get_json(silent=True) or {}
+        rid = (body.get("id") or "").strip()
+        if not rid:
+            return err("need id")
+        ok = delete_ref(cfg.base_dir, rid)
+        return jsonify({"deleted": ok})
+
+    @app.post("/api/siglib/match")
+    def siglib_match():
+        from .behavior import classify_behavior
+        from .sig_library import load_index, match_local
+        body = request.get_json(silent=True) or {}
+        center = body.get("center_mhz")
+        if center is None:
+            return err("need center_mhz")
+        sig = {"center_mhz": float(center), "bw_khz": body.get("bw_khz"),
+               "persistence": body.get("persistence")}
+        try:
+            bclass = classify_behavior(sig).get("class_id") or ""
+        except Exception:  # noqa: BLE001
+            bclass = ""
+        refs = load_index(cfg.base_dir)
+        return jsonify({
+            "matches": match_local(float(center), body.get("bw_khz"), bclass, refs),
+            "library_size": len(refs),
+        })
+
+    # ---------- LAN device checker (read-only discovery + operator-gated block) ----------
+
+    def _lan_view(session_id):
+        """LAN inventory rows annotated with the derived flags + correlation to
+        the wireless (WiFi/BLE) inventory, so a flagged device carries as much
+        identifying info as we have. The allowlist is the operator's owned
+        devices; classification never writes."""
+        from .netscan import classify_device, NetworkScanner
+        rows = db.lan_devices(session_id)
+        owned = {r["identifier"] for r in rows if r["owned"]}
+        gateway = NetworkScanner().default_gateway()   # mark the router row
+        # wireless inventory for cross-reference (WiFi APs + BLE advertisers)
+        wireless = db.query(
+            "SELECT kind, identifier, name, vendor, rssi_dbm, freq_mhz, channel, "
+            "extra FROM inventory WHERE session_id=? AND kind IN ('wifi','ble')",
+            (session_id,))
+
+        def _oui(mac):
+            return (mac or "").replace(":", "").upper()[:6]
+
+        out = []
+        for r in rows:
+            c = classify_device({"mac": r["identifier"], "ip": r.get("ip")}, owned)
+            r["known"] = bool(r["owned"])
+            r["randomized_mac"] = c["randomized_mac"]
+            r["is_gateway"] = bool(gateway and r.get("ip") == gateway)
+            r["flagged"] = (not r["owned"]) and not r["blocked"]
+            # correlate to RF: same exact MAC, else same vendor OUI — a hint at
+            # which WiFi/BLE emission this wired/network device also produces
+            oui = _oui(r["identifier"])
+            related = []
+            for wdev in wireless:
+                exact = wdev["identifier"] == r["identifier"]
+                same_oui = oui and _oui(wdev["identifier"]) == oui
+                same_vendor = (r.get("vendor") and wdev.get("vendor")
+                               and r["vendor"] == wdev["vendor"])
+                if exact or same_oui or same_vendor:
+                    related.append({
+                        "kind": wdev["kind"], "match": "exact" if exact
+                        else ("oui" if same_oui else "vendor"),
+                        "name": wdev.get("name") or "", "vendor": wdev.get("vendor") or "",
+                        "rssi_dbm": wdev.get("rssi_dbm"),
+                        "freq_mhz": wdev.get("freq_mhz"),
+                        "channel": wdev.get("channel") or ""})
+            related.sort(key=lambda x: (x["match"] != "exact",
+                                        -(x["rssi_dbm"] or -200)))
+            r["related"] = related[:6]
+            out.append(r)
+        return out
+
+    def _router_meta():
+        """Gateway + router brand (from the gateway's own MAC) for this session's
+        latest LAN scan — read-only, used to guide a lawful router block."""
+        from .netscan import NetworkScanner, vendor_for
+        gw = NetworkScanner().default_gateway()
+        brand = ""
+        if gw:
+            row = db.query_one(
+                "SELECT identifier FROM inventory WHERE kind='lan' AND ip=? "
+                "ORDER BY last_seen DESC LIMIT 1", (gw,))
+            if row:
+                brand = vendor_for(row["identifier"]) or ""
+        return gw, brand
+
+    @app.post("/api/netscan/run")
+    def netscan_run():
+        """Discover devices on THIS machine's local subnet (read-only: ARP cache
+        + optional ping sweep + reverse DNS). No credentials, no interception,
+        no active blocking. Upserts into the inventory (kind='lan')."""
+        session = st.session()
+        if not session:
+            return err("create a session first")
+        from .netscan import NetworkScanner
+        ping = bool((request.get_json(silent=True) or {}).get("ping", True))
+        try:
+            devices, meta = NetworkScanner().scan(ping=ping)
+        except Exception as e:  # noqa: BLE001 — no adapter, permissions, etc.
+            log.exception("netscan failed")
+            return err(f"network scan failed: {e}")
+        if devices:
+            db.upsert_lan_devices(session["id"], devices)
+        return jsonify({"meta": meta, "devices": _lan_view(session["id"])})
+
+    @app.get("/api/netscan/devices")
+    def netscan_devices():
+        session = st.session()
+        if not session:
+            return err("no session")
+        return jsonify({"devices": _lan_view(session["id"])})
+
+    @app.post("/api/netscan/devices/<int:inv_id>/own")
+    def netscan_own(inv_id):
+        """Mark/unmark a device as client-owned (the allowlist). Owned devices
+        are never flagged."""
+        session = st.session()
+        if not session:
+            return err("no session")
+        owned = bool(request.get_json(force=True).get("owned"))
+        row = db.set_inventory_owned(inv_id, session["id"], owned)
+        if not row:
+            return err("device not found in this session", 404)
+        return jsonify({"saved": True})
+
+    @app.get("/api/netscan/devices/<int:inv_id>/router_guide")
+    def netscan_router_guide(inv_id):
+        """The lawful way to force a device off: the router admin URL, the MAC to
+        block, and brand-specific steps for the router actually on site. Read-only
+        — the app never transmits or touches the router itself."""
+        session = st.session()
+        if not session:
+            return err("no session")
+        row = db.query_one("SELECT * FROM inventory WHERE id=? AND session_id=? "
+                           "AND kind='lan'", (inv_id, session["id"]))
+        if not row:
+            return err("device not found in this session", 404)
+        from .netscan import router_block_guide
+        gw, brand = _router_meta()
+        return jsonify(router_block_guide(
+            gw, brand, row["identifier"],
+            row.get("vendor") or row.get("name") or row.get("ip") or ""))
+
+    @app.post("/api/netscan/devices/<int:inv_id>/block")
+    def netscan_block(inv_id):
+        """Operator-CONFIRMED block of a LAN device. Requires confirm=true and a
+        reason — there is NO automatic blocking and the app NEVER transmits/jams.
+        Records the decision + audit row and returns the guided router steps (the
+        lawful way to enforce). Blocked in the public demo."""
+        session = st.session()
+        if not session:
+            return err("no session")
+        body = request.get_json(force=True)
+        if not body.get("confirm"):
+            return err("confirm=true is required to block a device", 400)
+        reason = (body.get("reason") or "").strip()
+        if not reason:
+            return err("a reason is required (recorded in the block audit log)", 400)
+        operator = (body.get("operator") or session.get("operator") or "").strip()
+        row = db.set_inventory_block(inv_id, session["id"], True, operator, reason)
+        if not row:
+            return err("device not found in this session", 404)
+        from .netscan import router_block_guide
+        gw, brand = _router_meta()
+        guide = router_block_guide(gw, brand, row["identifier"],
+                                   row.get("vendor") or row.get("name") or "")
+        return jsonify({
+            "blocked": True, "device": row, "router_guide": guide,
+            "note": "Staged and logged. Enforce it at the router with the steps "
+                    "shown — the app does not transmit or alter the network."})
+
+    @app.post("/api/netscan/devices/<int:inv_id>/unblock")
+    def netscan_unblock(inv_id):
+        session = st.session()
+        if not session:
+            return err("no session")
+        body = request.get_json(silent=True) or {}
+        operator = (body.get("operator") or session.get("operator") or "").strip()
+        row = db.set_inventory_block(inv_id, session["id"], False, operator,
+                                     body.get("reason", ""))
+        if not row:
+            return err("device not found in this session", 404)
+        return jsonify({"blocked": False, "device": row})
+
+    @app.get("/api/netscan/blocks")
+    def netscan_blocks():
+        """The block/unblock audit log for this session (internal only)."""
+        session = st.session()
+        if not session:
+            return err("no session")
+        return jsonify(db.list_net_blocks(session["id"]))
 
     @app.post("/api/ble/scan")
     def ble_scan_detail():

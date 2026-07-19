@@ -143,6 +143,46 @@ def render_capture_svg(data: dict, meta: dict, width=1200, height=560,
 </svg>"""
 
 
+def render_thumb_svg(data: dict, meta: dict, width=240, height=80) -> str:
+    """Tiny chrome-free fingerprint for table thumbnails: max-hold filled +
+    average line + center marker only. The full render_capture_svg text/grid
+    would be illegible at 70 px wide; this stays readable at any size."""
+    freqs, avg, maxp = data["freqs"], data["avg"], data["maxpeak"]
+    n = len(freqs)
+    if n < 2:
+        return "<svg xmlns='http://www.w3.org/2000/svg'/>"
+    lo = min(min(avg), min(maxp), meta.get("floor_dbm") or 0.0) - 3
+    hi = max(maxp) + 3
+    if hi - lo < 10:
+        hi = lo + 10
+
+    def X(i):
+        return width * i / (n - 1)
+
+    def Y(v):
+        v = max(lo, min(hi, v))
+        return height - 2 - (height - 6) * (v - lo) / (hi - lo)
+
+    def path(arr):
+        return "M " + " L ".join(f"{X(i):.1f} {Y(arr[i]):.1f}" for i in range(n))
+
+    fill = path(maxp) + f" L {width} {height} L 0 {height} Z"
+    center = meta.get("center_mhz")
+    cx = None
+    if center is not None and freqs[0] < freqs[-1] and freqs[0] <= center <= freqs[-1]:
+        cx = width * (center - freqs[0]) / (freqs[-1] - freqs[0])
+    marker = (f"<line x1='{cx:.1f}' y1='0' x2='{cx:.1f}' y2='{height}' "
+              f"stroke='#e74c3c' stroke-width='1' stroke-dasharray='3,3' opacity='.8'/>"
+              if cx is not None else "")
+    return (f"<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 {width} {height}' "
+            f"preserveAspectRatio='none'>"
+            f"<rect width='{width}' height='{height}' fill='#04070c'/>"
+            f"<path d='{fill}' fill='rgba(255,208,0,0.14)'/>"
+            f"<path d='{path(maxp)}' fill='none' stroke='#ffd000' stroke-width='1.2'/>"
+            f"<path d='{path(avg)}' fill='none' stroke='#00c8ff' stroke-width='1'/>"
+            f"{marker}</svg>")
+
+
 # ---------------------------------------------------------------------------
 # Auto-archive: every detected signal becomes a wiki observation per sweep
 # ---------------------------------------------------------------------------

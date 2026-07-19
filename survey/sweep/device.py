@@ -577,28 +577,64 @@ class OfficialRFEDevice(BaseDevice):
             self.rfe = None
 
 
+def _isolate(cfg, source: str) -> BaseDevice:
+    """Open `source` behind a supervised worker subprocess (worker_proxy) so a
+    native driver fault (UHD/libiio fastfail) kills only the worker."""
+    from .worker_proxy import SubprocessDevice
+    return SubprocessDevice(cfg, source)
+
+
 def open_device(cfg, source=None) -> BaseDevice:
     """Driver selection. Source precedence: explicit `source` arg (operator's
     runtime pick) -> env SWEEP_SOURCE -> config device.source -> 'rfexplorer'.
-    Within RF Explorer: simulator (explicit only) -> official lib -> raw UART."""
-    source = (source or os.environ.get("SWEEP_SOURCE")
-              or cfg.get("device", "source", default="rfexplorer")).strip().lower()
+    Within RF Explorer: simulator (explicit only) -> official lib -> raw UART.
+
+    SDR sources (pluto/b220 — in-process native code that can fastfail the
+    whole app) open behind a worker SUBPROCESS by default (device.
+    isolate_workers, default true; see worker_proxy.py). Isolation needs a
+    serializable config snapshot, so duck-typed test configs (get()-only, no
+    .data dict) keep the legacy in-process path automatically."""
+    raw_source = (source or os.environ.get("SWEEP_SOURCE")
+                  or cfg.get("device", "source", default="rfexplorer")).strip()
+    source = raw_source.lower()
+
+    def _isolation_on() -> bool:
+        from .worker_proxy import isolation_available
+        return (bool(cfg.get("device", "isolate_workers", default=True))
+                and isolation_available(cfg))
+
     # SIMULATE WINS OVER EVERY SOURCE. This check used to sit below the SDR
     # branches, so `--simulate` with device.source=b220/pluto configured opened
     # (and tried to FLASH) the REAL radio — a demo run must never touch hardware.
     if cfg.get("device", "simulate", default=False):
+        # test/preview knob: run even the simulator behind the worker so the
+        # whole IPC + crash-recovery path can be exercised with no hardware
+        if (cfg.get("device", "isolate_simulator", default=False)
+                and _isolation_on()):
+            return _isolate(cfg, "simulate")
         from .simulator import SimulatedDevice
         dev = SimulatedDevice()
         dev.connect()
         return dev
 
+    # unit-test escape hatch: a "test:<file>:<Class>" source runs the named
+    # fake inside the worker (crash injection etc.); env-gated in the worker.
+    if (source.startswith("test:")
+            and os.environ.get("SWEEP_ALLOW_TEST_DEVICE") == "1"
+            and _isolation_on()):
+        return _isolate(cfg, raw_source)   # raw: ClassName is case-sensitive
+
     if source in ("pluto", "sdr", "ad936x"):
+        if _isolation_on():
+            return _isolate(cfg, source)
         from .sdr_source import PlutoSource
         dev = PlutoSource(cfg)
         dev.connect()
         return dev
 
     if source in ("b220", "usrp", "uhd"):
+        if _isolation_on():
+            return _isolate(cfg, source)
         from .uhd_source import B220Source
         dev = B220Source(cfg)
         dev.connect()

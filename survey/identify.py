@@ -168,6 +168,25 @@ def iq_features(iq, fs: float) -> dict:
     tones = _count_tones(psd_db)
     fsk = _fsk_analysis(iq, fs, active)
     symbol_rate = _symbol_rate_hz(iq, fs)
+    # Burst period (ms) from envelope autocorrelation — keyfob vs HID keepalive
+    burst_period_ms = 0.0
+    if duty < 0.85 and symbol_rate > 0:
+        burst_period_ms = round(1000.0 / symbol_rate, 2) if symbol_rate > 1 else 0.0
+    elif duty < 0.85:
+        # fall back: first strong lag on raw envelope AC (period of onsets)
+        mag0 = mag.astype(np.float64) - float(np.mean(mag))
+        n = min(mag0.size, 1 << 14)
+        if n > 64 and not np.allclose(mag0[:n], 0):
+            ac = np.correlate(mag0[:n], mag0[:n], mode="full")[n - 1:]
+            if ac[0] > 0:
+                ac = ac / ac[0]
+                # look for lags ~0.5 ms .. 200 ms
+                lo_i = max(2, int(fs * 0.0005))
+                hi_i = min(ac.size - 1, int(fs * 0.2))
+                if hi_i > lo_i:
+                    k = int(np.argmax(ac[lo_i:hi_i])) + lo_i
+                    if ac[k] >= 0.15:
+                        burst_period_ms = round(1000.0 * k / fs, 2)
 
     feats = {
         "occupied_bw_khz": round(occ_bw / 1e3, 1),
@@ -178,6 +197,7 @@ def iq_features(iq, fs: float) -> dict:
         "fsk_states": fsk["states"],
         "fsk_shift_khz": round(fsk["shift_hz"] / 1e3, 1),
         "symbol_rate_kbd": round(symbol_rate / 1e3, 2),
+        "burst_period_ms": burst_period_ms,
         "snr_db": round(snr_db, 1),
         "signal_present": signal_present,
     }

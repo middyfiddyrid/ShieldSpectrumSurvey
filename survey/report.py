@@ -18,6 +18,17 @@ from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import inch
 from reportlab.platypus import (Flowable, Image, PageBreak, Paragraph,
                                 SimpleDocTemplate, Spacer, Table, TableStyle)
+from xml.sax.saxutils import escape as _xml_escape
+
+
+def _para_safe(text: str) -> str:
+    """Escape a string that came from OUTSIDE the operator (a WiFi SSID, a LAN
+    reverse-DNS hostname, a scanned device name) before it goes into a ReportLab
+    Paragraph — its mini-markup parser treats & and < as tags, so an unescaped
+    '&' or a truncated '<img…' aborts PDF generation. A rogue device on the
+    client LAN must never be able to break the report."""
+    return _xml_escape(str(text or ""))
+
 
 PAGE_W, PAGE_H = letter
 
@@ -146,12 +157,24 @@ def _fmt_freq(mhz):
 
 def _why_cell(s):
     """The 'why it didn't verify' cell: the classification reason plus, on its own
-    line, the plain-language explanation of how the anomaly score was reached."""
+    line, the plain-language explanation of how the anomaly score was reached.
+    Appends behavior class (honest 'consistent with' language) when present —
+    never upgrades shape guesses to product identity in the client PDF."""
     why = (s["match_reason"] or "")
     reason = s.get("score_reason") or ""
     if reason:
         why = (why + "<br/>" + reason).lstrip("<br/>")
-    return why[:400]
+    # behavior may be attached by enrich before report build, or absent
+    beh = s.get("behavior") if isinstance(s.get("behavior"), dict) else None
+    if beh and beh.get("label"):
+        line = f"Behavior: {beh['label']}"
+        if beh.get("phrase"):
+            line += f" — {beh['phrase'][:160]}"
+        why = (why + "<br/>" + line).lstrip("<br/>")
+    inv = s.get("inventory_summary") or ""
+    if inv:
+        why = (why + "<br/>Inventory: " + inv[:140]).lstrip("<br/>")
+    return why[:500]
 
 
 def _table(data, col_widths, header_bg=C_BG, font_size=7.5):
@@ -505,6 +528,18 @@ def generate_report(db, cfg, session_id: int, reports_dir: str) -> dict:
     sweeps = db.query("SELECT * FROM sweeps WHERE session_id=? ORDER BY id", (session_id,))
     signals = db.query("SELECT * FROM signals WHERE session_id=? ORDER BY center_mhz",
                        (session_id,))
+    # Attach behavior + inventory (content-free) so anomaly wording stays honest
+    try:
+        from .nextstep import enrich_signal_rows
+        inv = db.query(
+            "SELECT kind,identifier,name,rssi_dbm,channel,freq_mhz,extra,owned,vendor "
+            "FROM inventory WHERE session_id=? AND kind IN ('wifi','ble')",
+            (session_id,))
+        base = getattr(cfg, "base_dir", None) or ""
+        signals = enrich_signal_rows(
+            [dict(s) for s in signals], inventory=inv, base_dir=base)
+    except Exception:  # noqa: BLE001 — report must still render without enrich
+        signals = [dict(s) for s in signals]
     directional = db.query("SELECT * FROM directional WHERE session_id=? ORDER BY ts_utc",
                            (session_id,))
     device = json.loads(session["device_info"]) if session["device_info"] else None
@@ -756,7 +791,7 @@ def generate_report(db, cfg, session_id: int, reports_dir: str) -> dict:
             if not d["owned"] and d["rssi_dbm"] is not None and d["rssi_dbm"] >= -55.0:
                 status = "UNACCOUNTED — STRONG SIGNAL"
             rows.append([d["kind"].upper(),
-                         Paragraph((d["name"] or "(no name)")[:40], ss["Cell"]),
+                         Paragraph(_para_safe((d["name"] or "(no name)")[:40]), ss["Cell"]),
                          d["identifier"],
                          f"{d['rssi_dbm']:.0f}" if d["rssi_dbm"] is not None else "—",
                          (d["channel"] or "") +

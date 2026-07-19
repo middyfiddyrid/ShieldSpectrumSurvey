@@ -215,6 +215,20 @@ CREATE TABLE IF NOT EXISTS decode_overrides (
     reason TEXT DEFAULT '',
     created_utc REAL
 );
+-- LAN device access-control audit. Blocking a device is an ACTIVE change to the
+-- client's network, so every block/unblock is operator-confirmed and recorded
+-- here with who/when/why. Append-only artifact; never automatic.
+CREATE TABLE IF NOT EXISTS net_blocks (
+    id INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL,
+    inventory_id INTEGER,
+    mac TEXT,
+    ip TEXT,
+    action TEXT,                       -- block | unblock
+    operator TEXT DEFAULT '',
+    reason TEXT DEFAULT '',
+    created_utc REAL
+);
 -- Phase-interferometry DF (B220 dual-RX): best bearing per lock, logged when
 -- the loop stops. Receive-only; bearings are relative to the antenna bar.
 CREATE TABLE IF NOT EXISTS df_log (
@@ -322,6 +336,45 @@ class Database:
                 c.execute("ALTER TABLE signals ADD COLUMN id_candidates_json TEXT DEFAULT ''")
             if "id_updated_utc" not in cols:
                 c.execute("ALTER TABLE signals ADD COLUMN id_updated_utc REAL")
+            # Bin indices of the detection within its segment's stored arrays
+            # (segments.data_json). The detector always computed these but they
+            # were dropped at insert time — persisting them lets the ledger crop
+            # the exact hit window for thumbnails/highlights instead of guessing
+            # from center±bw/2 (the power-weighted center can sit off-middle).
+            if "bin_start" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN bin_start INTEGER")
+            if "bin_end" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN bin_end INTEGER")
+            # One-line ANALYZE verdict (decode_router.interpret) persisted per
+            # detection, so "what is this" survives into the live ledger and
+            # results lists instead of living only in one HTTP response.
+            if "analysis_summary" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN analysis_summary TEXT DEFAULT ''")
+            if "analysis_readable" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN analysis_readable TEXT DEFAULT ''")
+            if "analysis_protocol" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN analysis_protocol TEXT DEFAULT ''")
+            if "analysis_utc" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN analysis_utc REAL")
+            # Guided field experiments (phone test, inventory subtract, …) as
+            # JSON list of outcome records — accuracy without content demod.
+            if "experiments_json" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN "
+                          "experiments_json TEXT DEFAULT ''")
+            # LAN device checker: IP/vendor enrichment + operator block state on
+            # the shared inventory table (kind='lan'). blocked is set ONLY by an
+            # operator-confirmed action, never by discovery.
+            cols = {r["name"] for r in c.execute("PRAGMA table_info(inventory)")}
+            if "ip" not in cols:
+                c.execute("ALTER TABLE inventory ADD COLUMN ip TEXT DEFAULT ''")
+            if "vendor" not in cols:
+                c.execute("ALTER TABLE inventory ADD COLUMN vendor TEXT DEFAULT ''")
+            if "blocked" not in cols:
+                c.execute("ALTER TABLE inventory ADD COLUMN blocked INTEGER DEFAULT 0")
+            if "block_utc" not in cols:
+                c.execute("ALTER TABLE inventory ADD COLUMN block_utc REAL")
+            if "block_reason" not in cols:
+                c.execute("ALTER TABLE inventory ADD COLUMN block_reason TEXT DEFAULT ''")
 
     def _conn(self):
         conn = sqlite3.connect(self.path, timeout=30)
@@ -356,6 +409,64 @@ class Database:
     def set_device_info(self, session_id, info: dict):
         self.execute("UPDATE sessions SET device_info=? WHERE id=?",
                      (json.dumps(info), session_id))
+
+    def update_sweep_metadata(self, sweep_id, session_id, phase, room, notes=""):
+        """Correct historical sweep metadata without changing raw measurements.
+
+        ``phase`` and ``room`` are duplicated onto signal rows for fast reporting,
+        so both tables must change together.  Capture rows linked to those signals
+        also inherit the corrected room.  The sweep's JSON metadata keeps an audit
+        trail of every edit and the operator's current note.
+
+        Returns the updated sweep, or ``None`` when the sweep is not part of the
+        requested session.  Callers are responsible for running session-wide
+        post-processing after this transaction commits.
+        """
+        now = time.time()
+        with _LOCK, self._conn() as c:
+            row = c.execute(
+                "SELECT * FROM sweeps WHERE id=? AND session_id=?",
+                (sweep_id, session_id)).fetchone()
+            if not row:
+                return None
+
+            raw_meta = row["meta"]
+            try:
+                meta = json.loads(raw_meta) if raw_meta else {}
+            except (TypeError, ValueError):
+                meta = {"legacy_meta": raw_meta}
+            if not isinstance(meta, dict):
+                meta = {"legacy_meta": meta}
+            history = meta.get("operator_edits")
+            if not isinstance(history, list):
+                history = []
+            history.append({
+                "edited_utc": now,
+                "prior_phase": row["phase"],
+                "phase": phase,
+                "prior_room": row["room"] or "",
+                "room": room,
+                "notes": notes,
+            })
+            meta["operator_notes"] = notes
+            meta["operator_edits"] = history[-50:]
+
+            c.execute(
+                "UPDATE sweeps SET phase=?, room=?, meta=? "
+                "WHERE id=? AND session_id=?",
+                (phase, room, json.dumps(meta), sweep_id, session_id))
+            c.execute(
+                "UPDATE signals SET phase=?, room=? "
+                "WHERE sweep_id=? AND session_id=?",
+                (phase, room, sweep_id, session_id))
+            c.execute(
+                "UPDATE captures SET room=? WHERE session_id=? AND signal_id IN "
+                "(SELECT id FROM signals WHERE sweep_id=? AND session_id=?)",
+                (room, session_id, sweep_id, session_id))
+
+        return self.query_one(
+            "SELECT * FROM sweeps WHERE id=? AND session_id=?",
+            (sweep_id, session_id))
 
     def set_source_status(self, session_id, source, status, count, message=""):
         self.execute(
@@ -425,6 +536,106 @@ class Database:
             "SELECT id, id_top_name, id_top_score, id_device_class, id_mode, "
             "id_updated_utc FROM signals WHERE id=? AND session_id=?",
             (signal_id, session_id))
+
+    def append_signal_experiment(self, signal_id, session_id, rec: dict):
+        """Append one field-experiment outcome to signals.experiments_json."""
+        from .experiments import append_experiment_json, summarize_outcome
+        row = self.query_one(
+            "SELECT experiments_json FROM signals WHERE id=? AND session_id=?",
+            (signal_id, session_id))
+        if not row:
+            return None
+        new_json = append_experiment_json(row.get("experiments_json") or "", rec)
+        self.execute(
+            "UPDATE signals SET experiments_json=? WHERE id=? AND session_id=?",
+            (new_json, signal_id, session_id))
+        return self.query_one(
+            "SELECT * FROM signals WHERE id=? AND session_id=?",
+            (signal_id, session_id))
+
+    def set_signal_analysis(self, signal_id, session_id, summary, readable,
+                            protocol=""):
+        """Persist the one-line ANALYZE verdict (decode_router.interpret) on a
+        detection so the ledger/results can show it without re-analyzing.
+        Session-scoped like the other per-signal writers; returns the row."""
+        self.execute(
+            "UPDATE signals SET analysis_summary=?, analysis_readable=?, "
+            "analysis_protocol=?, analysis_utc=? WHERE id=? AND session_id=?",
+            (summary or "", readable or "", protocol or "", time.time(),
+             signal_id, session_id))
+        return self.query_one(
+            "SELECT id, analysis_summary, analysis_readable, analysis_protocol, "
+            "analysis_utc FROM signals WHERE id=? AND session_id=?",
+            (signal_id, session_id))
+
+    # --- LAN device checker (inventory kind='lan') ---
+
+    def upsert_lan_devices(self, session_id: int, devices: list[dict]):
+        """Store/refresh discovered LAN hosts on the inventory table, keyed by
+        (session, kind='lan', MAC). Never touches `owned` or `blocked` — those
+        are operator decisions, preserved across rescans. Returns rows touched."""
+        now = time.time()
+        n = 0
+        for d in devices:
+            self.execute(
+                "INSERT INTO inventory (session_id,kind,identifier,name,ip,vendor,"
+                "rssi_dbm,channel,freq_mhz,extra,first_seen,last_seen) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(session_id,kind,identifier) DO UPDATE SET "
+                "name=CASE WHEN excluded.name!='' THEN excluded.name ELSE inventory.name END, "
+                "ip=excluded.ip, vendor=excluded.vendor, extra=excluded.extra, "
+                "last_seen=excluded.last_seen",
+                (session_id, "lan", d["identifier"], d.get("name", ""),
+                 d.get("ip", ""), d.get("vendor", ""), None,
+                 d.get("channel", ""), d.get("freq_mhz"), d.get("extra", ""),
+                 now, now))
+            n += 1
+        return n
+
+    def lan_devices(self, session_id: int) -> list[dict]:
+        return self.query(
+            "SELECT * FROM inventory WHERE session_id=? AND kind='lan' "
+            "ORDER BY blocked DESC, owned ASC, last_seen DESC", (session_id,))
+
+    def set_inventory_owned(self, inventory_id, session_id, owned: bool):
+        """Operator allowlist toggle, session-scoped. Returns the row."""
+        self.execute(
+            "UPDATE inventory SET owned=? WHERE id=? AND session_id=?",
+            (int(bool(owned)), inventory_id, session_id))
+        return self.query_one(
+            "SELECT * FROM inventory WHERE id=? AND session_id=?",
+            (inventory_id, session_id))
+
+    def set_inventory_block(self, inventory_id, session_id, blocked: bool,
+                            operator="", reason=""):
+        """Operator-confirmed block/unblock of a LAN device. Session-scoped.
+        Writes the inventory flag AND an append-only net_blocks audit row.
+        NEVER called automatically — only from the confirmed endpoint. Returns
+        the updated inventory row, or None if not in this session."""
+        row = self.query_one(
+            "SELECT * FROM inventory WHERE id=? AND session_id=?",
+            (inventory_id, session_id))
+        if not row:
+            return None
+        now = time.time()
+        self.execute(
+            "UPDATE inventory SET blocked=?, block_utc=?, block_reason=? "
+            "WHERE id=? AND session_id=?",
+            (int(bool(blocked)), now if blocked else None,
+             reason if blocked else "", inventory_id, session_id))
+        self.execute(
+            "INSERT INTO net_blocks (session_id,inventory_id,mac,ip,action,"
+            "operator,reason,created_utc) VALUES (?,?,?,?,?,?,?,?)",
+            (session_id, inventory_id, row["identifier"], row.get("ip") or "",
+             "block" if blocked else "unblock", operator, reason, now))
+        return self.query_one(
+            "SELECT * FROM inventory WHERE id=? AND session_id=?",
+            (inventory_id, session_id))
+
+    def list_net_blocks(self, session_id):
+        return self.query(
+            "SELECT * FROM net_blocks WHERE session_id=? ORDER BY created_utc DESC",
+            (session_id,))
 
     def add_decode_override(self, session_id, signal_id, center_mhz, mode,
                             operator, reason):
