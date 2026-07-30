@@ -301,6 +301,22 @@ class AD936xSource(BaseDevice):
     def _read_iq(self) -> np.ndarray: raise NotImplementedError
     def _flush_buffer(self): pass
 
+    def set_gain(self, mode: str = None, db: float = None):
+        """Live RX gain change — BASE-level so every SDR source (Pluto AND
+        B220/UHD) exposes it and the worker proxy forwards it. Updates the
+        persisted gain state and applies it now; the safe manual-range fallback
+        chain lives in each concrete _set_gain so a bad value can't take the
+        radio down. NOTE: changing gain invalidates the cal_offset_db baseline
+        until re-swept — callers that care about absolute dBm must warn."""
+        if mode is not None:
+            self._gain_mode = str(mode)
+        if db is not None:
+            self._gain_db = float(db)
+        self._set_gain(self._gain_mode, self._gain_db)
+
+    def get_gain_db(self) -> float:
+        return float(self._gain_db)
+
     # -- lifecycle --
 
     def connect(self) -> DeviceInfo:

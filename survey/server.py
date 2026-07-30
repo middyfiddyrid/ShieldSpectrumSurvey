@@ -66,6 +66,13 @@ class AppState:
         self.session_id = last["id"] if last else None
         self.baseline_status = {"running": False, "result": None, "error": None}
         self.calibration_status = {"running": False, "result": None, "error": None}
+        self.post_sweep_lock = threading.Lock()
+        self.post_sweep_status = {
+            "running": False, "stage": "idle", "message": "",
+            "progress": 0, "total": 0, "session_id": self.session_id,
+            "sweep_id": None, "overview": None, "prompt": None,
+            "started_utc": None, "finished_utc": None, "error": None,
+        }
         self.reports_dir = cfg.abs_path("reports")
 
     def session(self):
@@ -127,7 +134,7 @@ def create_app(db, cfg, demo=False) -> Flask:
                     "/api/analyze/threat_vectors", "/api/case_files", "/case_files",
                     "/api/triage", "/api/novelty", "/api/record",
                     "/api/attribution", "/api/decode/override", "/api/ble/scan",
-                    "/api/stimulate", "/api/netscan")
+                    "/api/stimulate", "/api/netscan", "/api/droid")
 
     @app.before_request
     def _demo_guard():
@@ -156,28 +163,47 @@ def create_app(db, cfg, demo=False) -> Flask:
     @app.post("/api/session")
     def create_session():
         body = request.get_json(force=True)
+        kind = "lab" if (body.get("kind") or "field").strip().lower() == "lab" else "field"
         address = (body.get("address") or "").strip()
-        if not address:
-            return err("address required")
-        try:
-            geo = geocode(address, st.cache)
-        except RuntimeError as e:
-            return err(e, 502)
+        # A LAB/BENCH session is test work at your own bench: there is no client
+        # site to geocode, and the licensed-transmitter radii that geocoding
+        # feeds are meaningless for it. Let it be created without an address.
+        if kind == "lab":
+            if not address:
+                address = "Lab / bench"
+            geo = {"lat": None, "lon": None, "geocoder": "none (lab/bench session)"}
+        else:
+            if not address:
+                return err("address required")
+            try:
+                geo = geocode(address, st.cache)
+            except RuntimeError as e:
+                return err(e, 502)
         r_b = float(body.get("radius_broadcast")
                     or cfg.get("radius", "broadcast_miles", default=25))
         r_l = float(body.get("radius_lmr")
                     or cfg.get("radius", "land_mobile_miles", default=5))
         operator = body.get("operator") or cfg.get("branding", "operator", default="")
         st.session_id = db.create_session(address, geo["lat"], geo["lon"],
-                                          geo["geocoder"], r_b, r_l, operator)
+                                          geo["geocoder"], r_b, r_l, operator, kind)
         st.baseline_status = {"running": False, "result": None, "error": None}
-        return jsonify({"session_id": st.session_id, "geocode": geo})
+        return jsonify({"session_id": st.session_id, "geocode": geo, "kind": kind})
 
     @app.get("/api/sessions")
     def list_sessions():
-        return jsonify(db.query(
-            "SELECT id, created_utc, address, operator, status FROM sessions "
-            "ORDER BY created_utc DESC LIMIT 100"))
+        """EVERY session, newest first — deliberately unbounded.
+
+        This used to be LIMIT 100. These are client engagement records: silently
+        dropping the oldest ones once the hundredth is created is a data-loss
+        trap the operator cannot see (the list just stops). The row is five small
+        columns, so returning all of them costs nothing at any realistic count.
+        """
+        rows = db.query(
+            "SELECT s.id, s.created_utc, s.address, s.operator, s.status, "
+            "COALESCE(s.kind,'field') AS kind, "
+            "(SELECT COUNT(*) FROM sweeps w WHERE w.session_id=s.id) AS sweep_count "
+            "FROM sessions s ORDER BY s.created_utc DESC")
+        return jsonify(rows)
 
     @app.post("/api/session/open")
     def open_session():
@@ -188,6 +214,25 @@ def create_app(db, cfg, demo=False) -> Flask:
         st.session_id = row["id"]
         return jsonify({"session_id": st.session_id})
 
+    @app.post("/api/session/kind")
+    def set_session_kind():
+        """Retag a session FIELD <-> LAB.
+
+        Needed because every pre-existing session was backfilled to 'field':
+        bench work recorded before this existed has to be markable, or it stays
+        client-report eligible forever.
+        """
+        body = request.get_json(force=True)
+        kind = (body.get("kind") or "").strip().lower()
+        if kind not in ("field", "lab"):
+            return err("kind must be 'field' or 'lab'")
+        sid = body.get("id") or st.session_id
+        row = db.query_one("SELECT id FROM sessions WHERE id=?", (sid,))
+        if not row:
+            return err("no such session", 404)
+        db.execute("UPDATE sessions SET kind=? WHERE id=?", (kind, row["id"]))
+        return jsonify({"id": row["id"], "kind": kind})
+
     @app.get("/api/sweeps/history")
     def sweep_history():
         """Return editable metadata for the open session's completed sweeps.
@@ -195,7 +240,16 @@ def create_app(db, cfg, demo=False) -> Flask:
         Raw segment measurements remain immutable.  Counts are included so an
         operator can recognize the correct historical run before editing it.
         """
-        session = st.session()
+        # ?session_id= lets the landing view drill into ANY session's sweeps
+        # without switching the open session — reviewing last month's job must
+        # not silently move the operator out of today's engagement.
+        want = request.args.get("session_id")
+        if want:
+            session = db.query_one("SELECT * FROM sessions WHERE id=?", (int(want),))
+            if not session:
+                return err("no such session", 404)
+        else:
+            session = st.session()
         if not session:
             return err("no session", 409)
         rows = db.query(
@@ -221,7 +275,9 @@ def create_app(db, cfg, demo=False) -> Flask:
             row.pop("meta", None)
         return jsonify({
             "session": {"id": session["id"], "address": session["address"],
-                        "created_utc": session["created_utc"]},
+                        "created_utc": session["created_utc"],
+                        "kind": session.get("kind") or "field",
+                        "is_open": session["id"] == st.session_id},
             "sweeps": rows,
         })
 
@@ -616,6 +672,8 @@ def create_app(db, cfg, demo=False) -> Flask:
         if ls:
             live.update({"center_mhz": ls.get("center_mhz"), "mode": ls.get("mode"),
                          "ts": ls.get("ts")})
+        with st.post_sweep_lock:
+            post_sweep = dict(st.post_sweep_status)
         return jsonify({
             "session": session,
             "source": (st.controller.active_source
@@ -627,6 +685,7 @@ def create_app(db, cfg, demo=False) -> Flask:
             "sweeps": sweeps,
             "baseline": st.baseline_status,
             "calibration": st.calibration_status,
+            "post_sweep": post_sweep,
             "busy": st.controller.busy(),
             "live": live,
             "demo": st.demo,
@@ -868,6 +927,193 @@ def create_app(db, cfg, demo=False) -> Flask:
             if v is not None:
                 return v
         return cfg.get("pluto", key, default=default)
+
+    def _post_sweep_update(**changes):
+        if changes.get("overview") is not None:
+            compact = dict(changes["overview"])
+            compact.pop("emitters", None)
+            changes["overview"] = compact
+        with st.post_sweep_lock:
+            st.post_sweep_status.update(changes)
+
+    def _content_free_live_check(group):
+        """Sample RF shape on a distinct second radio; never demod content."""
+        from .identify import iq_features
+        from .behavior import behavior_from_identify
+
+        row = group.get("best") or {}
+        center_mhz = float(row.get("center_mhz") or 0.0)
+        bw_khz = row.get("bw_khz")
+        dev, mlock, mstop, msrc = st.controller.ensure_monitor()
+        if not msrc or msrc == st.controller.active_source:
+            return None, "A second radio is not connected."
+        if not (dev is not None and hasattr(dev, "capture_iq")
+                and getattr(dev, "is_swept_sdr", False)):
+            return None, "The second radio cannot characterize modulation."
+        if st.controller.busy(msrc):
+            return None, "The second radio is busy."
+        modules = getattr(getattr(dev, "info", None), "modules", None) or []
+        if modules:
+            low = min(m.min_mhz for m in modules)
+            high = max(m.max_mhz for m in modules)
+            if not low <= center_mhz <= high:
+                return {"signal_present": False, "snr_db": None,
+                        "note": "outside the second radio's tuning range",
+                        "source": msrc}, None
+        try:
+            fs = float(_mcfg(msrc, "sample_rate", 20_000_000))
+            n = int(_mcfg(msrc, "identify_samples", 131072))
+            mstop.set()
+            with mlock:
+                iq = dev.capture_iq(center_mhz * 1e6, fs, n)
+            feats = iq_features(iq, fs)
+            return {
+                "signal_present": bool(feats.get("signal_present")),
+                "snr_db": feats.get("snr_db"),
+                "occupied_bw_khz": feats.get("occupied_bw_khz"),
+                "modulation_class": feats.get("modulation_class"),
+                "continuity": feats.get("continuity"),
+                "behavior": behavior_from_identify(center_mhz, bw_khz, feats),
+                "source": msrc, "content_free": True,
+            }, None
+        except Exception as exc:  # noqa: BLE001
+            log.warning("content-free post-sweep check failed at %.4f MHz: %s",
+                        center_mhz, exc)
+            return {"signal_present": False, "snr_db": None,
+                    "note": f"second-radio check failed: {exc}",
+                    "source": msrc, "content_free": True}, None
+
+    def _run_post_sweep(session_id, sweep_id):
+        from .nextstep import enrich_signal_rows
+        from .post_sweep import build_ambient_overview, candidates_for_live_check
+
+        try:
+            _post_sweep_update(
+                running=True, stage="consolidating", progress=0, total=0,
+                message="Consolidating repeated hits into likely emitters...",
+                prompt=None, error=None, finished_utc=None)
+            rows = db.query(
+                "SELECT * FROM signals WHERE session_id=? "
+                "AND phase IN ('ambient','interior') ORDER BY center_mhz",
+                (session_id,))
+            inv = db.query(
+                "SELECT kind,identifier,name,rssi_dbm,channel,freq_mhz,extra,"
+                "owned,vendor FROM inventory WHERE session_id=? "
+                "AND kind IN ('wifi','ble')", (session_id,))
+            enriched = enrich_signal_rows(rows, inventory=inv, base_dir=cfg.base_dir)
+            overview = build_ambient_overview(enriched)
+            _post_sweep_update(
+                stage="inventory", overview=overview,
+                message=(f"Accounted for inventory and known sources across "
+                         f"{overview['unique_emitter_count']} likely emitters."))
+            candidates = candidates_for_live_check(overview, limit=12)
+            if not candidates:
+                _post_sweep_update(
+                    running=False, stage="complete", progress=0, total=0,
+                    message="Automatic review complete - no unexplained emitters need a live check.",
+                    finished_utc=time.time(), prompt=None)
+                return
+
+            dev, _lock, _stop, msrc = st.controller.ensure_monitor()
+            can_live_check = bool(
+                msrc and msrc != st.controller.active_source and dev is not None
+                and hasattr(dev, "capture_iq")
+                and getattr(dev, "is_swept_sdr", False))
+            if not can_live_check:
+                _post_sweep_update(
+                    running=False, stage="needs_radio", progress=0,
+                    total=len(candidates), overview=overview,
+                    message=("Stored sweep review is complete. Connect a second SDR "
+                             "for automatic, content-free live confirmation."),
+                    prompt={
+                        "kind": "connect_second_radio", "title": "Connect the second radio",
+                        "detail": ("A Pluto or B220 can check modulation and whether "
+                                   "each unexplained signal is still live. RF Explorer "
+                                   "can still be used for warmer/colder direction finding."),
+                        "action": "CHECK SECOND RADIO AGAIN",
+                    }, finished_utc=time.time())
+                return
+
+            live_results, total = {}, len(candidates)
+            _post_sweep_update(
+                stage="characterizing", progress=0, total=total,
+                message=("Second radio is checking unexplained emitters - RF shape only; "
+                         "audio and message content remain unopened."))
+            for index, group in enumerate(candidates, 1):
+                result, unavailable = _content_free_live_check(group)
+                if unavailable:
+                    overview = build_ambient_overview(enriched, live_results)
+                    _post_sweep_update(
+                        running=False, stage="needs_radio", progress=index - 1,
+                        total=total, overview=overview, message=unavailable,
+                        prompt={
+                            "kind": "connect_second_radio", "title": "Second radio unavailable",
+                            "detail": "Reconnect or free the monitor radio, then continue the check.",
+                            "action": "CHECK SECOND RADIO AGAIN",
+                        }, finished_utc=time.time())
+                    return
+                live_results[group.get("signal_id")] = result or {}
+                partial = build_ambient_overview(enriched, live_results)
+                partial_prompt = None
+                if partial.get("priority_count"):
+                    partial_prompt = {
+                        "kind": "directional", "title": "Localization can begin now",
+                        "detail": ("Attach the directional antenna. The other radio "
+                                   "will continue checking the remaining watch-list "
+                                   "signals in the background."),
+                        "action": "OPEN DIRECTIONAL GUIDE",
+                    }
+                _post_sweep_update(
+                    progress=index, overview=partial, prompt=partial_prompt,
+                    message=(f"Content-free live check {index} of {total}: "
+                             f"{group.get('frequency_mhz', 0):.4f} MHz"))
+
+            overview = build_ambient_overview(enriched, live_results)
+            priority = overview.get("priority_count", 0)
+            if priority:
+                message = (f"Automatic review complete - {priority} substantive "
+                           "transmission" + ("s" if priority != 1 else "") +
+                           " need directional follow-up.")
+                prompt = {
+                    "kind": "directional", "title": "Begin physical localization",
+                    "detail": ("Attach the directional antenna and walk toward the "
+                               "strongest reading. The app will prompt for the near-field "
+                               "probe when the signal is hot enough."),
+                    "action": "OPEN DIRECTIONAL GUIDE",
+                }
+            else:
+                message = ("Automatic review complete - no transmission crossed the "
+                           "substantive alert threshold.")
+                prompt = None
+            _post_sweep_update(
+                running=False, stage="complete", progress=total, total=total,
+                overview=overview, message=message, prompt=prompt,
+                finished_utc=time.time())
+        except Exception as exc:  # noqa: BLE001
+            log.exception("post-sweep automatic review failed")
+            _post_sweep_update(running=False, stage="error",
+                               message="Automatic review failed.", error=str(exc),
+                               finished_utc=time.time())
+
+    def _start_post_sweep(session_id, sweep_id, force=False):
+        with st.post_sweep_lock:
+            current = st.post_sweep_status
+            same = (current.get("session_id") == session_id
+                    and current.get("sweep_id") == sweep_id)
+            if current.get("running"):
+                return False
+            if same and current.get("stage") == "complete" and not force:
+                return False
+            st.post_sweep_status = {
+                "running": True, "stage": "queued",
+                "message": "Automatic post-sweep review queued...",
+                "progress": 0, "total": 0, "session_id": session_id,
+                "sweep_id": sweep_id, "overview": None, "prompt": None,
+                "started_utc": time.time(), "finished_utc": None, "error": None,
+            }
+        threading.Thread(target=_run_post_sweep,
+                         args=(session_id, sweep_id), daemon=True).start()
+        return True
 
     @app.post("/api/inspect")
     def inspect_signal():
@@ -1715,6 +1961,37 @@ def create_app(db, cfg, demo=False) -> Flask:
         return jsonify(enrich_signal_rows(
             db.query(q, params), inventory=inv, base_dir=cfg.base_dir))
 
+    @app.get("/api/post_sweep/status")
+    def post_sweep_status():
+        with st.post_sweep_lock:
+            return jsonify(dict(st.post_sweep_status))
+
+    @app.post("/api/post_sweep/start")
+    def post_sweep_start():
+        session = st.session()
+        if not session:
+            return err("no session")
+        body = request.get_json(silent=True) or {}
+        sweep_id = body.get("sweep_id")
+        if sweep_id is None:
+            latest = db.query_one(
+                "SELECT id FROM sweeps WHERE session_id=? AND status='done' "
+                "ORDER BY finished_utc DESC, id DESC LIMIT 1", (session["id"],))
+            sweep_id = latest.get("id") if latest else None
+        if sweep_id is None:
+            return err("finish a sweep first", 409)
+        valid = db.query_one(
+            "SELECT id FROM sweeps WHERE id=? AND session_id=? AND status='done'",
+            (int(sweep_id), session["id"]))
+        if not valid:
+            return err("that completed sweep is not in the open session", 404)
+        started = _start_post_sweep(
+            session["id"], int(sweep_id), force=bool(body.get("force")))
+        with st.post_sweep_lock:
+            payload = dict(st.post_sweep_status)
+        payload["started"] = started
+        return jsonify(payload)
+
     def _session_signal(signal_id):
         """A signals row scoped to the open session, or None."""
         session = st.session()
@@ -2183,6 +2460,7 @@ def create_app(db, cfg, demo=False) -> Flask:
         from .device_lab import (
             ANTENNA_TYPES, DEVICE_CATALOG, DISTANCES, LIBRE_PORTS,
             OMNI_ANTENNAS, DIR_ANTENNAS, NEAR_FIELD_ANTENNAS,
+            exercise_states_for,
         )
         return jsonify({
             "antenna_types": ANTENNA_TYPES,
@@ -2193,7 +2471,9 @@ def create_app(db, cfg, demo=False) -> Flask:
             "distances": list(DISTANCES),
             "catalog": [{"id": e["id"], "name": e["name"],
                          "freq_guess_mhz": e["freq_guess_mhz"],
-                         "notes": e["notes"]} for e in DEVICE_CATALOG],
+                         "notes": e["notes"],
+                         "states": exercise_states_for(e["id"])}
+                        for e in DEVICE_CATALOG],
             "radio": _lab_radio_info(),
         })
 
@@ -2321,7 +2601,9 @@ def create_app(db, cfg, demo=False) -> Flask:
             pkg["nf_antenna"] = nf
         pkg["antenna_notes"] = (body.get("notes") or "").strip()
         pkg["radio"] = _lab_radio_info()
-        pkg["step"] = "freq_confirm"
+        # near-field FIRST: find + freq-lock + walk-test where it is loudest,
+        # then back out through the range ladder
+        pkg["step"] = "capture_near_field"
         log_step(pkg, f"Antennas: RXA/omni={pkg.get('rxa_antenna')} "
                       f"RXB/dir={pkg.get('rxb_antenna')} NF={pkg.get('nf_antenna')}")
         save_package(cfg.base_dir, pkg)
@@ -2340,94 +2622,86 @@ def create_app(db, cfg, demo=False) -> Flask:
         if body.get("bw_khz") is not None:
             pkg["bw_khz"] = float(body["bw_khz"])
         pkg["freq_confirmed"] = True
-        pkg["step"] = "capture_ten_ft"
+        # stay=true → correct the tune without leaving the current step
+        # (the near-field live view uses this when the tech overrides the scan)
+        if not body.get("stay"):
+            pkg["step"] = "capture_ten_ft"
         log_step(pkg, f"Frequency confirmed: {pkg['center_mhz']} MHz")
         save_package(cfg.base_dir, pkg)
         return jsonify({"package": pkg, "guide": next_instruction(pkg)})
 
-    @app.post("/api/device_lab/<pkg_id>/capture")
-    def device_lab_capture(pkg_id):
-        """IQ capture at one of the three distances. Requires connected SDR."""
-        from .device_lab import (load_package, save_package, log_step,
-                                 next_instruction, advance_after_distance, DISTANCES)
-        from .identify import iq_features, identify, load_reference
-        pkg = load_package(cfg.base_dir, pkg_id)
-        if not pkg:
-            return err("package not found", 404)
-        body = request.get_json(silent=True) or {}
-        distance_id = (body.get("distance_id") or "").strip()
-        if distance_id not in {d["id"] for d in DISTANCES}:
-            return err("distance_id must be ten_ft | next_room | near_field")
-        center = float(body.get("center_mhz") or pkg.get("center_mhz") or 0)
-        if not center:
-            return err("set center_mhz first")
-        pkg["center_mhz"] = center
-        if body.get("bw_khz") is not None:
-            pkg["bw_khz"] = float(body["bw_khz"])
+    # ---- device-lab LIVE loop -------------------------------------------
+    # One continuous-grab session at a time (survey/lab_live.py). It owns the
+    # monitor radio until stopped; harvest() records a stop/state from the
+    # peak-hold accumulators WITHOUT stopping, so the tech walks the whole
+    # range ladder hands-free.
+    _lab_live: dict = {"s": None}
+    _lab_wide: dict = {"s": None}
+    _lab_live_lk = threading.Lock()
 
-        dev, mlock, mstop, msrc = st.controller.monitor_target()
-        is_sdr = dev is not None and hasattr(dev, "capture_iq") and \
-            getattr(dev, "is_swept_sdr", False)
-        if not is_sdr:
-            return err("connect an SDR (B220/Pluto) to capture IQ for the lab", 409)
+    def _lab_live_for(pkg_id):
+        s = _lab_live.get("s")
+        if s is not None and s.pkg_id == pkg_id and s.is_alive() and not s.ended:
+            return s
+        return None
+
+    def _lab_stop_live():
+        for holder in (_lab_live, _lab_wide):
+            s = holder.get("s")
+            if s is not None:
+                try:
+                    s.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+                holder["s"] = None
+
+    def _lab_gain_db(msrc):
+        try:
+            return float(cfg.get(msrc or "pluto", "gain_db", default=64.0))
+        except Exception:  # noqa: BLE001
+            return 64.0
+
+    def _lab_iq_ready():
+        """(dev, msrc) if an IQ-capable radio is free, else (None, err response)."""
+        dev, _mlock, _mstop, msrc = st.controller.monitor_target()
+        if dev is None or not callable(getattr(dev, "capture_iq", None)):
+            return None, err("connect an SDR (B220/Pluto) to capture IQ for the lab", 409)
         if st.controller.busy(msrc):
-            return err("radio busy — stop sweep/monitor first", 409)
+            return None, err("radio busy — stop sweep/monitor first", 409)
+        return (dev, msrc), None
 
+    def _lab_sample_rate(msrc):
         sr = int(cfg.get(msrc if msrc != "pluto" else "pluto", "sample_rate",
                          default=cfg.get("pluto", "sample_rate", default=20_000_000)))
-        # prefer monitor section sample rate
         try:
             sr = int(cfg.get(msrc or "pluto", "sample_rate", default=sr))
         except Exception:  # noqa: BLE001
             pass
-        n = int(cfg.get("pluto", "identify_samples", default=131072))
-        # Libre port: RXA=right/omni, RXB=left/directional (defaults per distance)
-        from .device_lab import port_to_side, spectrum_preview, DISTANCES as _DISTS
-        dist_meta = next((d for d in _DISTS if d["id"] == distance_id), None)
-        port_id = (body.get("rx_port") or pkg.get("rx_port")
-                   or (dist_meta or {}).get("default_port") or "RXA")
-        port_id = str(port_id).upper().replace(" ", "")
-        if port_id not in ("RXA", "RXB"):
-            port_id = "RXA"
-        lab_side = port_to_side(port_id)
-        ant_id = (body.get("antenna_id") or body.get("antenna")
-                  or (pkg.get("nf_antenna") if distance_id == "near_field"
-                      else (pkg.get("rxa_antenna") if port_id == "RXA"
-                            else pkg.get("rxb_antenna"))) or "")
-        try:
-            mstop.set()
-            with mlock:
-                if hasattr(dev, "select_module"):
-                    try:
-                        dev.select_module(lab_side)
-                    except Exception:  # noqa: BLE001
-                        log.warning("device lab: could not select_module(%s)", lab_side)
-                iq = dev.capture_iq(center * 1e6, sr, n)
-                if hasattr(dev, "select_module"):
-                    try:
-                        dev.select_module("right")  # restore default
-                    except Exception:  # noqa: BLE001
-                        pass
-            feats = iq_features(iq, sr)
-            spec = spectrum_preview(iq, sr)
-            ref = load_reference()
-            candidates = identify(center * 1e6, feats, ref, top_n=5)
-        except Exception as e:  # noqa: BLE001
-            log.exception("device lab capture failed")
-            return err(f"capture failed: {e}", 500)
+        return sr
 
+    def _finish_lab_capture(pkg, rec, distance_id, port_id, lab_side, ant_id,
+                            body, msrc):
+        """Enrich a raw capture record (one-shot or live-harvest), file it under
+        the distance stop, advance the ladder, and refresh identity fusion."""
         from .behavior import behavior_from_identify
+        from .device_lab import advance_after_distance, fuse_ident, log_step
+        from .identify import identify, load_reference
+        feats = rec.get("features") or {}
+        center = rec.get("center_mhz") or pkg.get("center_mhz")
+        try:
+            candidates = identify(float(center) * 1e6, feats or None,
+                                  load_reference(), top_n=5)
+        except Exception:  # noqa: BLE001
+            candidates = []
         beh = behavior_from_identify(center, pkg.get("bw_khz"), feats)
         snr = feats.get("snr_db")
-        ok = bool(feats.get("signal_present")) and (snr is None or snr >= 6)
-        rec = {
+        spec_snr = (rec.get("spectrum") or {}).get("snr_db")
+        if feats:
+            ok = bool(feats.get("signal_present")) and (snr is None or snr >= 6)
+        else:
+            ok = spec_snr is not None and spec_snr >= 6
+        rec.update({
             "distance_id": distance_id,
-            "utc": time.time(),
-            "center_mhz": center,
-            "sample_rate": sr,
-            "n_samples": n,
-            "features": feats,
-            "spectrum": spec,
             "capture_ok": ok,
             "capture_status": (
                 "GOOD — clear energy above floor" if ok
@@ -2441,14 +2715,452 @@ def create_app(db, cfg, demo=False) -> Flask:
                 "Libre RXA (omni)" if port_id == "RXA" else "Libre RXB (directional)"),
             "antenna_id": ant_id,
             "antenna": ant_id or pkg.get("antenna"),
+            "pad_db": pkg.get("pad_db") or 0,
             "notes": (body.get("notes") or "").strip(),
-        }
+        })
         pkg["rx_port"] = port_id
         pkg["rx_port_label"] = rec["rx_port_label"]
         pkg.setdefault("captures", {})[distance_id] = rec
+        if distance_id == "near_field" and rec.get("center_mhz"):
+            # the near-field lock IS the confirmed frequency
+            pkg["center_mhz"] = float(rec["center_mhz"])
+            pkg["freq_confirmed"] = True
         pkg["step"] = advance_after_distance(pkg, distance_id)
+        pkg["ident"] = fuse_ident(pkg)
         log_step(pkg, f"Captured {distance_id} @ {center} MHz — "
-                      f"SNR {feats.get('snr_db')} dB, class {feats.get('modulation_class')}")
+                      f"SNR {snr if snr is not None else spec_snr} dB"
+                      + (" (live peak-hold)" if rec.get("live_loop") else ""))
+        return rec
+
+    @app.post("/api/device_lab/<pkg_id>/live/start")
+    def device_lab_live_start(pkg_id):
+        """Start the continuous capture loop. Scans the catalog guesses until
+        energy locks unless the package frequency is already confirmed."""
+        from .device_lab import load_package, port_to_side
+        from .lab_live import LabLiveError, LiveSession
+        pkg = load_package(cfg.base_dir, pkg_id)
+        if not pkg:
+            return err("package not found", 404)
+        body = request.get_json(silent=True) or {}
+        ready, failure = _lab_iq_ready()
+        if failure is not None:
+            return failure
+        _dev, msrc = ready
+        port_id = str(body.get("rx_port") or "RXB").upper().replace(" ", "")
+        if port_id not in ("RXA", "RXB"):
+            port_id = "RXB"
+        center = body.get("center_mhz")
+        scan = body.get("scan")
+        if center is None and not scan:
+            if pkg.get("freq_confirmed") and pkg.get("center_mhz"):
+                center = pkg["center_mhz"]
+            else:
+                scan = [f for f in ([pkg.get("center_mhz")] +
+                                    list(pkg.get("freq_guesses_mhz") or [])) if f]
+        if center is None and not scan:
+            return err("no frequency guesses — set center_mhz first")
+        with _lab_live_lk:
+            _lab_stop_live()
+            try:
+                s = LiveSession(st.controller, pkg_id, center_mhz=center,
+                                scan_mhz=scan, side=port_to_side(port_id),
+                                sample_rate=_lab_sample_rate(msrc),
+                                initial_gain_db=_lab_gain_db(msrc))
+            except LabLiveError as e:
+                return err(str(e))
+            s.rx_port = port_id
+            s.start()
+            _lab_live["s"] = s
+        time.sleep(0.35)
+        if s.error:
+            return err(s.error, 409)
+        return jsonify({"ok": True, "state": s.snapshot()})
+
+    @app.get("/api/device_lab/<pkg_id>/live/state")
+    def device_lab_live_state(pkg_id):
+        s = _lab_live.get("s")
+        if s is None or s.pkg_id != pkg_id:
+            return jsonify({"running": False})
+        return jsonify(s.snapshot())
+
+    @app.post("/api/device_lab/<pkg_id>/live/retune")
+    def device_lab_live_retune(pkg_id):
+        body = request.get_json(silent=True) or {}
+        center = float(body.get("center_mhz") or 0)
+        if not center:
+            return err("need center_mhz")
+        s = _lab_live_for(pkg_id)
+        if not s:
+            return err("live loop not running — GO LIVE first", 409)
+        s.retune(center)
+        return jsonify({"ok": True, "center_mhz": center})
+
+    @app.post("/api/device_lab/<pkg_id>/live/walk")
+    def device_lab_live_walk(pkg_id):
+        """Start ({period_s}) or finish ({stop:true}) the near-field walk test.
+        The finish scores received power against the commanded cadence."""
+        from .device_lab import (WALK_VERDICT_PLAIN, fuse_ident, load_package,
+                                 log_step, next_instruction, save_package)
+        from .lab_live import LabLiveError
+        pkg = load_package(cfg.base_dir, pkg_id)
+        if not pkg:
+            return err("package not found", 404)
+        s = _lab_live_for(pkg_id)
+        if not s:
+            return err("live loop not running — GO LIVE first", 409)
+        body = request.get_json(silent=True) or {}
+        try:
+            if body.get("stop"):
+                res = s.end_walk()
+                res["plain"] = WALK_VERDICT_PLAIN.get(res.get("verdict"), "")
+                pkg["walk_test"] = res
+                pkg["ident"] = fuse_ident(pkg)
+                log_step(pkg, f"Walk test: {res.get('verdict')} r={res.get('r')} "
+                              f"swing={res.get('swing_db')} dB")
+                save_package(cfg.base_dir, pkg)
+                return jsonify({"walk": res, "package": pkg,
+                                "guide": next_instruction(pkg)})
+            s.start_walk(float(body.get("period_s") or 8.0))
+            return jsonify({"ok": True, "t0": s.walk_t0,
+                            "period_s": s.walk_period_s})
+        except LabLiveError as e:
+            return err(str(e), 409)
+
+    @app.post("/api/device_lab/<pkg_id>/live/stop")
+    def device_lab_live_stop(pkg_id):
+        with _lab_live_lk:
+            s = _lab_live.get("s")
+            if s is not None and s.pkg_id == pkg_id:
+                _lab_stop_live()
+        return jsonify({"ok": True})
+
+    @app.post("/api/device_lab/<pkg_id>/pad")
+    def device_lab_pad(pkg_id):
+        """Record an inline attenuator pad on the probe path (dB). Keeps the
+        package's absolute levels honest once the front end needs padding."""
+        from .device_lab import load_package, log_step, save_package
+        pkg = load_package(cfg.base_dir, pkg_id)
+        if not pkg:
+            return err("package not found", 404)
+        body = request.get_json(silent=True) or {}
+        try:
+            db = float(body.get("db") or 0)
+        except (TypeError, ValueError):
+            return err("db must be a number")
+        if db < 0 or db > 90:
+            return err("pad must be 0–90 dB")
+        pkg["pad_db"] = db
+        log_step(pkg, f"Attenuator pad set: {db:g} dB inline on probe path")
+        save_package(cfg.base_dir, pkg)
+        return jsonify({"ok": True, "pad_db": db, "package": pkg})
+
+    # ---- WIDE FIND: off/on differential full-span hunt ------------------
+
+    @app.post("/api/device_lab/<pkg_id>/wide_find/start")
+    def device_lab_wf_start(pkg_id):
+        """Two-pass stepped max-hold sweep. Pass 1 runs with the DUT POWERED
+        OFF; operator confirms power-on; pass 2 diffs against the baseline."""
+        from .device_lab import load_package, port_to_side
+        from .lab_live import LabLiveError, WF_SPANS, WideFindSession
+        pkg = load_package(cfg.base_dir, pkg_id)
+        if not pkg:
+            return err("package not found", 404)
+        body = request.get_json(silent=True) or {}
+        ready, failure = _lab_iq_ready()
+        if failure is not None:
+            return failure
+        _dev, msrc = ready
+        span = body.get("span") or "subghz"
+        if isinstance(span, str):
+            span_t = WF_SPANS.get(span)
+            if not span_t:
+                return err("span must be subghz | ism24 | wifi5 | full "
+                           "or {start_mhz, stop_mhz}")
+        else:
+            span_t = (float(span.get("start_mhz") or 0),
+                      float(span.get("stop_mhz") or 0))
+        port_id = str(body.get("rx_port") or "RXB").upper().replace(" ", "")
+        if port_id not in ("RXA", "RXB"):
+            port_id = "RXB"
+        with _lab_live_lk:
+            _lab_stop_live()
+            try:
+                s = WideFindSession(st.controller, pkg_id, span_t,
+                                    side=port_to_side(port_id),
+                                    sample_rate=_lab_sample_rate(msrc),
+                                    initial_gain_db=_lab_gain_db(msrc))
+            except LabLiveError as e:
+                return err(str(e))
+            s.start()
+            _lab_wide["s"] = s
+        time.sleep(0.3)
+        if s.error:
+            return err(s.error, 409)
+        return jsonify({"ok": True, "state": s.snapshot()})
+
+    @app.get("/api/device_lab/<pkg_id>/wide_find/state")
+    def device_lab_wf_state(pkg_id):
+        s = _lab_wide.get("s")
+        if s is None or s.pkg_id != pkg_id:
+            return jsonify({"running": False})
+        return jsonify(s.snapshot())
+
+    @app.post("/api/device_lab/<pkg_id>/wide_find/continue")
+    def device_lab_wf_continue(pkg_id):
+        """Operator-controlled advance. The run parks at every gate until this
+        is called — there is no countdown, because only the tech can see whether
+        the device is really off, or really booted and reconnected."""
+        from .lab_live import LabLiveError
+        s = _lab_wide.get("s")
+        if s is None or s.pkg_id != pkg_id or s.ended:
+            return err("wide find not running", 409)
+        try:
+            if s.phase == "await_off":
+                s.confirm_off()
+            else:
+                s.confirm_on()
+        except LabLiveError as e:
+            return err(str(e), 409)
+        return jsonify(s.snapshot())
+
+    @app.post("/api/device_lab/<pkg_id>/wide_find/pause")
+    def device_lab_wf_pause(pkg_id):
+        """PAUSE, not STOP. Stopping destroys the run and forces a restart from
+        the baseline; pausing holds it and keeps everything measured so far."""
+        s = _lab_wide.get("s")
+        if s is None or s.pkg_id != pkg_id or s.ended:
+            return err("wide find not running", 409)
+        body = request.get_json(silent=True) or {}
+        if body.get("resume"):
+            s.resume()
+        else:
+            s.pause()
+        return jsonify(s.snapshot())
+
+    @app.post("/api/device_lab/<pkg_id>/wide_find/stop")
+    def device_lab_wf_stop(pkg_id):
+        with _lab_live_lk:
+            s = _lab_wide.get("s")
+            if s is not None and s.pkg_id == pkg_id:
+                try:
+                    s.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+                _lab_wide["s"] = None
+        return jsonify({"ok": True})
+
+    @app.post("/api/device_lab/<pkg_id>/wide_find/adopt")
+    def device_lab_wf_adopt(pkg_id):
+        """Operator picked a candidate — lock it as the package frequency and
+        file the wide-find evidence."""
+        from .device_lab import (load_package, log_step, next_instruction,
+                                 save_package)
+        pkg = load_package(cfg.base_dir, pkg_id)
+        if not pkg:
+            return err("package not found", 404)
+        body = request.get_json(silent=True) or {}
+        try:
+            freq = float(body.get("freq_mhz") or 0)
+        except (TypeError, ValueError):
+            return err("need freq_mhz")
+        if not freq:
+            return err("need freq_mhz")
+        s = _lab_wide.get("s")
+        cands = body.get("candidates") or \
+            (s.candidates if (s is not None and s.pkg_id == pkg_id) else None)
+        pkg["wide_find"] = {"utc": time.time(), "adopted_mhz": freq,
+                            "candidates": cands or []}
+        pkg["center_mhz"] = freq
+        pkg["freq_confirmed"] = True
+        log_step(pkg, f"WIDE FIND adopted {freq} MHz "
+                      f"({len(cands or [])} diff peaks found)")
+        save_package(cfg.base_dir, pkg)
+        return jsonify({"package": pkg, "guide": next_instruction(pkg)})
+
+    @app.post("/api/device_lab/<pkg_id>/stops")
+    def device_lab_add_stop(pkg_id):
+        """Add an extra range-ladder stop ('down the hall', 'outside', …)."""
+        from .device_lab import (add_stop, load_package, log_step,
+                                 next_instruction, save_package)
+        pkg = load_package(cfg.base_dir, pkg_id)
+        if not pkg:
+            return err("package not found", 404)
+        body = request.get_json(silent=True) or {}
+        try:
+            stop = add_stop(pkg, body.get("label") or "")
+        except ValueError as e:
+            return err(str(e))
+        if pkg.get("step") == "states":
+            # ladder already finished — rewind to capture the new stop
+            pkg["step"] = "capture_stop:" + stop["id"]
+        log_step(pkg, f"Range stop added: {stop['label']}")
+        save_package(cfg.base_dir, pkg)
+        return jsonify({"package": pkg, "guide": next_instruction(pkg),
+                        "stop": stop})
+
+    @app.post("/api/device_lab/<pkg_id>/state_capture")
+    def device_lab_state_capture(pkg_id):
+        """Record one DUT exercise state from the live loop's accumulators
+        ({state_id}), or close the matrix ({done:true} → TX probe step)."""
+        from .device_lab import (exercise_states_for, fuse_ident, load_package,
+                                 log_step, next_instruction, save_package)
+        pkg = load_package(cfg.base_dir, pkg_id)
+        if not pkg:
+            return err("package not found", 404)
+        body = request.get_json(silent=True) or {}
+        if body.get("done"):
+            pkg["step"] = "stimulate"
+            log_step(pkg, "State matrix complete → optional TX probe")
+            save_package(cfg.base_dir, pkg)
+            return jsonify({"package": pkg, "guide": next_instruction(pkg)})
+        state_id = (body.get("state_id") or "").strip()
+        if not state_id:
+            return err("need state_id (or done:true)")
+        s = _lab_live_for(pkg_id)
+        if not s:
+            return err("live loop not running — GO LIVE first", 409)
+        try:
+            rec = s.harvest()
+        except Exception as e:  # noqa: BLE001
+            return err(f"harvest failed: {e}", 409)
+        from .identify import identify, load_reference
+        try:
+            candidates = identify(
+                float(rec.get("center_mhz") or pkg.get("center_mhz")) * 1e6,
+                rec.get("features") or None, load_reference(), top_n=5)
+        except Exception:  # noqa: BLE001
+            candidates = []
+        smeta = next((x for x in exercise_states_for(pkg.get("device_type_id") or "")
+                      if x["id"] == state_id), None)
+        rec.update({
+            "state_id": state_id,
+            "label": (smeta or {}).get("label") or body.get("label") or state_id,
+            "candidates": candidates[:3],
+            "pad_db": pkg.get("pad_db") or 0,
+            "notes": (body.get("notes") or "").strip(),
+        })
+        pkg.setdefault("states", {})[state_id] = rec
+        pkg["ident"] = fuse_ident(pkg)
+        log_step(pkg, f"State '{rec['label']}' captured — "
+                      f"SNR {(rec.get('spectrum') or {}).get('snr_db')} dB "
+                      f"over {rec.get('grabs')} grabs")
+        save_package(cfg.base_dir, pkg)
+        return jsonify({"package": pkg, "guide": next_instruction(pkg),
+                        "state": rec})
+
+    @app.post("/api/device_lab/<pkg_id>/video")
+    def device_lab_video(pkg_id):
+        """Save the walk-test camera recording (synced to the RF clock)."""
+        from .device_lab import (load_package, log_step, save_package,
+                                 save_video_b64)
+        pkg = load_package(cfg.base_dir, pkg_id)
+        if not pkg:
+            return err("package not found", 404)
+        body = request.get_json(silent=True) or {}
+        try:
+            path = save_video_b64(cfg.base_dir, pkg_id, body.get("video") or "")
+        except ValueError as e:
+            return err(str(e))
+        rec = {"path": path, "utc": time.time(),
+               "label": (body.get("label") or "walk_test").strip()[:40],
+               "t0_utc": body.get("t0_utc"),
+               "duration_s": body.get("duration_s")}
+        pkg.setdefault("videos", []).append(rec)
+        if pkg.get("walk_test") and rec["label"] == "walk_test":
+            pkg["walk_test"]["video"] = path
+        log_step(pkg, "Walk-test video saved (synced to RF clock)")
+        save_package(cfg.base_dir, pkg)
+        return jsonify({"ok": True, "video": rec, "package": pkg})
+
+    @app.get("/api/device_lab/media/<kind>/<path:name>")
+    def device_lab_media(kind, name):
+        if kind not in ("photos", "videos"):
+            return err("unknown media kind", 404)
+        from .device_lab import lab_dir
+        return send_from_directory(os.path.join(lab_dir(cfg.base_dir), kind),
+                                   name)
+
+    @app.post("/api/device_lab/<pkg_id>/capture")
+    def device_lab_capture(pkg_id):
+        """RF capture at a range-ladder stop. When the LIVE loop is running it
+        harvests the peak-hold accumulation (bursts included); otherwise it
+        falls back to a one-shot IQ grab. Requires an IQ-capable SDR."""
+        from .device_lab import (load_package, save_package,
+                                 next_instruction, stop_order)
+        from .identify import iq_features
+        pkg = load_package(cfg.base_dir, pkg_id)
+        if not pkg:
+            return err("package not found", 404)
+        body = request.get_json(silent=True) or {}
+        distance_id = (body.get("distance_id") or "").strip()
+        if distance_id not in stop_order(pkg):
+            return err("distance_id must be near_field | ten_ft | next_room "
+                       "or an added stop")
+        center = float(body.get("center_mhz") or pkg.get("center_mhz") or 0)
+        if not center:
+            return err("set center_mhz first")
+        pkg["center_mhz"] = center
+        if body.get("bw_khz") is not None:
+            pkg["bw_khz"] = float(body["bw_khz"])
+
+        from .device_lab import port_to_side, spectrum_preview, DISTANCES as _DISTS
+        dist_meta = next((d for d in _DISTS if d["id"] == distance_id), None)
+        port_id = (body.get("rx_port") or pkg.get("rx_port")
+                   or (dist_meta or {}).get("default_port") or "RXA")
+        port_id = str(port_id).upper().replace(" ", "")
+        if port_id not in ("RXA", "RXB"):
+            port_id = "RXA"
+        lab_side = port_to_side(port_id)
+        ant_id = (body.get("antenna_id") or body.get("antenna")
+                  or (pkg.get("nf_antenna") if distance_id == "near_field"
+                      else (pkg.get("rxa_antenna") if port_id == "RXA"
+                            else pkg.get("rxb_antenna"))) or "")
+
+        live = _lab_live_for(pkg_id)
+        if live:
+            # live loop owns the radio — harvest its peak-hold accumulation
+            try:
+                rec = live.harvest()
+            except Exception as e:  # noqa: BLE001
+                return err(f"live harvest failed: {e}", 409)
+            msrc = st.controller.monitor_target()[3]
+            rec["center_mhz"] = rec.get("center_mhz") or center
+        else:
+            ready, failure = _lab_iq_ready()
+            if failure is not None:
+                return failure
+            _dev, msrc = ready
+            dev, mlock, mstop, msrc = st.controller.monitor_target()
+            sr = _lab_sample_rate(msrc)
+            n = int(cfg.get("pluto", "identify_samples", default=131072))
+            try:
+                mstop.set()
+                with mlock:
+                    if hasattr(dev, "select_module"):
+                        try:
+                            dev.select_module(lab_side)
+                        except Exception:  # noqa: BLE001
+                            log.warning("device lab: could not select_module(%s)",
+                                        lab_side)
+                    iq = dev.capture_iq(center * 1e6, sr, n)
+                    if hasattr(dev, "select_module"):
+                        try:
+                            dev.select_module("right")  # restore default
+                        except Exception:  # noqa: BLE001
+                            pass
+                feats = iq_features(iq, sr)
+                spec = spectrum_preview(iq, sr)
+            except NotImplementedError:
+                return err("connected radio is amplitude-only — "
+                           "connect the B220 or Pluto", 409)
+            except Exception as e:  # noqa: BLE001
+                log.exception("device lab capture failed")
+                return err(f"capture failed: {e}", 500)
+            rec = {"utc": time.time(), "center_mhz": center, "sample_rate": sr,
+                   "n_samples": n, "features": feats, "spectrum": spec}
+
+        rec = _finish_lab_capture(pkg, rec, distance_id, port_id, lab_side,
+                                  ant_id, body, msrc)
         save_package(cfg.base_dir, pkg)
         return jsonify({"package": pkg, "guide": next_instruction(pkg),
                         "capture": rec})
@@ -2459,6 +3171,7 @@ def create_app(db, cfg, demo=False) -> Flask:
         from .device_lab import load_package, save_package, log_step, next_instruction
         import contextlib
         from .stimulate import SplitStimRadio, StimulationEngine
+        _lab_stop_live()  # live loop holds the monitor lock — release it
         pkg = load_package(cfg.base_dir, pkg_id)
         if not pkg:
             return err("package not found", 404)
@@ -2527,6 +3240,7 @@ def create_app(db, cfg, demo=False) -> Flask:
         from .decode_router import route_decode, interpret, DATA_MODES
         from .sweep.sdr_source import welch_psd
         import base64
+        _lab_stop_live()  # live loop holds the monitor lock — release it
         pkg = load_package(cfg.base_dir, pkg_id)
         if not pkg:
             return err("package not found", 404)
@@ -2617,6 +3331,7 @@ def create_app(db, cfg, demo=False) -> Flask:
     def device_lab_commit(pkg_id):
         from .device_lab import load_package, save_package, log_step, next_instruction
         from .sig_library import add_ref, make_ref_from_signal
+        _lab_stop_live()  # commit ends the session — release the radio
         pkg = load_package(cfg.base_dir, pkg_id)
         if not pkg:
             return err("package not found", 404)
@@ -3004,6 +3719,41 @@ def create_app(db, cfg, demo=False) -> Flask:
             return err("no session")
         return jsonify(db.list_net_blocks(session["id"]))
 
+    # ---------- droid check (Android handset, read-only over adb) ----------
+    @app.get("/api/droid/status")
+    def droid_status():
+        """Pre-flight: is adb installed, is a phone attached and authorized.
+        Cheap enough for the panel to poll on open."""
+        from . import droidscan
+        return jsonify(droidscan.status(cfg.base_dir))
+
+    @app.post("/api/droid/scan")
+    def droid_scan():
+        """Read-only inspection of the attached Android handset. Surfaces the
+        mechanisms screen-mirror/stalkerware depend on (MediaProjection,
+        accessibility services, notification listeners, device admins, overlays,
+        sideloaded packages, high-risk permissions) plus best-effort live TCP
+        endpoints.
+
+        Deliberately returns INDICATORS, never a clean/infected verdict — see the
+        module docstring. Nothing on the phone is modified; droidscan refuses any
+        adb verb that is not read-only. Not persisted: this is a live look the
+        operator walks with the client, and it keeps the handset's app list out
+        of the survey DB unless the operator copies findings into notes."""
+        from . import droidscan
+        stat = droidscan.status(cfg.base_dir)
+        if not stat.get("ready"):
+            return jsonify({"ready": False, "status": stat})
+        runner = droidscan.AdbRunner(stat["adb"], stat.get("serial", ""))
+        try:
+            result = droidscan.scan(runner)
+        except droidscan.ReadOnlyViolation as e:      # never expected; loud if so
+            log.exception("droidscan read-only guard tripped")
+            return err(f"blocked a non-read-only adb call: {e}", 500)
+        result["ready"] = True
+        result["status"] = stat
+        return jsonify(result)
+
     @app.post("/api/ble/scan")
     def ble_scan_detail():
         """Standalone BLE sweep: every advertiser with the full survey.ble dossier
@@ -3315,6 +4065,15 @@ def create_app(db, cfg, demo=False) -> Flask:
         session = st.session()
         if not session:
             return err("no session")
+        # LAB/BENCH work is not a client deliverable and must never reach the
+        # client portal. This is the single door every client report goes
+        # through, so the gate belongs HERE and not in the UI, where a stale
+        # tab or a direct call would walk straight past it.
+        if (session.get("kind") or "field") == "lab":
+            return err("this is a LAB / BENCH session — client reports are not "
+                       "generated for bench work, and it is never pushed to the "
+                       "client portal. Retag it as a FIELD session if this really "
+                       "is client work.", 409)
         try:
             result = generate_report(db, cfg, session["id"], st.reports_dir)
         except Exception as e:  # noqa: BLE001

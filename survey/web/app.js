@@ -60,6 +60,8 @@ const App = {
   hoverHL: null,           // {lo,hi} MHz — vertical highlight of the hovered ledger row
   _segCache: {},           // segment_id -> /api/segments payload (immutable once written)
   _ledgerKey: "",          // change-detection key so the ledger DOM isn't rebuilt every poll
+  postSweep: null, _postStartedSweep: null, _postPromptedKey: null,
+  dirAudioOn: true, _dirAudio: null, _dirLastBeep: 0, _dirReadings: [],
 };
 
 /* ---------- F1: keep the laptop screen awake while the app is open ----------
@@ -126,8 +128,14 @@ function show(view) {
   if (view === "directional") loadDirectional();
   if (view === "inventory") loadInventory();
   if (view === "network") loadNetwork();
+  if (view === "droid") loadDroid();
   if (view === "wiki") loadWiki();
   if (view === "devicelab") loadDeviceLab();
+  if (view === "recent") {
+    // returning to the landing re-reads whichever session is being viewed
+    if ($("pane-sessions") && $("pane-sessions").style.display !== "none") loadSessionsPane();
+    else loadRecentSweeps(App.viewingSessionId);
+  }
   if (view === "session") { loadCaseFiles(); loadEngagement(); loadTechTasks(); loadReportOptions(); loadSweepHistory(); }
   if (view === "poi") loadPoi();
   if (view === "cases") loadCases();
@@ -402,6 +410,14 @@ function dot(id, cls) {
 }
 
 function render(st) {
+  App.postSweep = (st.post_sweep && st.session &&
+                   st.post_sweep.session_id === st.session.id) ? st.post_sweep : null;
+  renderPostSweep(App.postSweep);
+  if ($("view-results") && $("view-results").classList.contains("active") &&
+      (!App.postSweep || App.postSweep.stage === "idle") && st.sweeps) {
+    const finished = st.sweeps.filter(s => s.phase === "interior" && s.status === "done");
+    if (finished.length) startPostSweep(finished[finished.length - 1].id);
+  }
   // public demo: flag the body once so CSS hides PII-bearing features
   if (st.demo && !document.body.classList.contains("demo")) {
     document.body.classList.add("demo");
@@ -470,10 +486,13 @@ function render(st) {
     App._activeSweep = { phase: st.sweep.phase, sweep_id: st.sweep.sweep_id };
     // remember so the ledger stays populated after the overlay closes
     if (st.sweep.sweep_id) App._lastFinishedSweepId = st.sweep.sweep_id;
+    // gates the post-sweep ledger rehydrate below: only a sweep observed in
+    // THIS page session may repopulate the ledger, so a cold open stays clean
+    App._sweepSeenThisSession = true;
   } else if (App._wasSweepRunning && !App.seq) {
     const info = App._activeSweep;
     if (info && info.sweep_id) App._lastFinishedSweepId = info.sweep_id;
-    if (info && info.phase === "interior") maybeOpenTriageAfterSweep(info.sweep_id);
+    if (info && info.phase === "interior") startPostSweep(info.sweep_id);
     // don't leave the operator staring at a finished sweep — suggest the NEXT step
     if (info) suggestNextStep(info.phase);
     // final ledger pull with behavior / inventory enrichment while the id is hot
@@ -578,16 +597,17 @@ function render(st) {
     // New sweeps replace the list via refreshLiveSweepSignals.
     //
     // cold open / page reload: rehydrate from last finished sweep
-    if ((!App.liveSweepSignals || !App.liveSweepSignals.length)) {
-      let sid = App._lastFinishedSweepId;
-      if (!sid && (st.sweeps || []).length) {
-        const done = (st.sweeps || []).filter(s => s.status === "done" && s.id);
-        if (done.length) sid = done[done.length - 1].id;
-      }
-      if (sid) {
-        App._lastFinishedSweepId = sid;
-        refreshLiveSweepSignals(sid);
-      }
+    // COLD OPEN STARTS CLEAN (operator ask 2026-07-26). This used to rehydrate
+    // the ledger from the last finished sweep on every page load — so opening
+    // the app, or refreshing during a NEW sweep, put the PREVIOUS sweep's hits
+    // on screen alongside the current job. That is contamination of live client
+    // work, not convenience. We now only re-populate for a sweep that actually
+    // ran in THIS page session; to revisit an older sweep, open it deliberately
+    // from sweep history. (A reload MID-sweep is unaffected: the running-sweep
+    // branch above pulls the live ledger by its own sweep_id.)
+    if ((!App.liveSweepSignals || !App.liveSweepSignals.length)
+        && App._sweepSeenThisSession && App._lastFinishedSweepId) {
+      refreshLiveSweepSignals(App._lastFinishedSweepId);
     }
   }
 
@@ -600,6 +620,7 @@ function render(st) {
     const frac = Math.max(0, Math.min(1, (d.current_dbm + 110) / 80));
     $("dir-meter").style.color =
       frac > 0.7 ? "var(--red)" : frac > 0.45 ? "var(--amber)" : "var(--green)";
+    updateDirectionalGuidance(d, frac);
     if (d.trace) drawTrace($("dirchart"), { freqs: d.trace.freqs, amps: d.trace.amps });
   }
 
@@ -1126,6 +1147,18 @@ async function refreshLiveSweepSignals(sweepId) {
   } catch (e) { /* ledger is best-effort during sweep */ }
 }
 
+/* Every detection on a client report has to carry a date. `detected_utc` is
+   stamped at INSERT and backfilled for historic rows from the parent sweep's
+   start, so old sweeps still date correctly. Cell shows clock time (the sweep
+   is one sitting); the tooltip carries the full date for the report. */
+function fmtDetected(s, full) {
+  const t = s && (s.detected_utc || s.analysis_utc);
+  if (!t) return full ? "no timestamp recorded" : "—";
+  const d = new Date(t * 1000);
+  if (isNaN(d.getTime())) return full ? "bad timestamp" : "—";
+  return full ? d.toLocaleString() : d.toLocaleTimeString();
+}
+
 function renderLiveLedger() {
   const sigs = App.liveSweepSignals || [];
   const tierName = s => statusLabel(signalTier(s));
@@ -1149,7 +1182,7 @@ function renderLiveLedger() {
                       s.inventory_summary || ""].join(":")).join("|");
   if (key === App._ledgerKey) return;
   App._ledgerKey = key;
-  const header = "<tr><th>#</th><th>Signal</th><th>Frequency</th><th>Peak</th><th>SNR</th>" +
+  const header = "<tr><th>#</th><th>Signal</th><th>Detected</th><th>Frequency</th><th>Peak</th><th>SNR</th>" +
     "<th>Width</th><th>Persist</th><th>Status</th><th>Identity / verdict</th><th>Next step</th></tr>";
   const body = shown.slice().reverse().map((s, i) => {
     const k = tierName(s);
@@ -1174,6 +1207,7 @@ function renderLiveLedger() {
       `<td class="thumb-cell"><img class="sig-thumb" loading="lazy" alt="" data-sid="${s.id}" ` +
       `src="/api/signals/${s.id}/image.svg?size=thumb" ` +
       `onerror="this.style.visibility='hidden'" title="click: expand signal picture + details"></td>` +
+      `<td class="det-utc" title="${esc(fmtDetected(s, true))}">${esc(fmtDetected(s))}</td>` +
       `<td><a class="freqlink" href="#" data-center="${s.center_mhz}" data-label="${esc(id)}" ` +
       `data-sid="${s.id}" data-attr="${esc(s.attribution_status || "")}">${fmtF(s.center_mhz)}</a></td>` +
       `<td>${s.peak_dbm} dBm</td>` +
@@ -1197,11 +1231,15 @@ function renderLiveLedger() {
 $("btn-create").onclick = async () => {
   try {
     $("session-msg").textContent = "geocoding…";
+    const kind = ($("in-kind") || {}).value || "field";
     const r = await api("/api/session", {
       address: $("in-address").value, radius_broadcast: $("in-rb").value,
-      radius_lmr: $("in-rl").value, operator: $("in-op").value });
-    $("session-msg").textContent = `session #${r.session_id} @ ${r.geocode.lat.toFixed(5)}, ` +
-      `${r.geocode.lon.toFixed(5)} (${r.geocode.geocoder})`;
+      radius_lmr: $("in-rl").value, operator: $("in-op").value, kind });
+    // a LAB session is not geocoded, so there is no lat/lon to report back
+    $("session-msg").textContent = (r.kind === "lab" || !r.geocode || r.geocode.lat == null)
+      ? `session #${r.session_id} created — LAB / BENCH (no client report, not pushed to portal)`
+      : `session #${r.session_id} @ ${r.geocode.lat.toFixed(5)}, ` +
+        `${r.geocode.lon.toFixed(5)} (${r.geocode.geocoder})`;
     $("btn-baseline").disabled = false;
   } catch (e) { $("session-msg").textContent = "ERROR: " + e.message; }
 };
@@ -1360,6 +1398,261 @@ function historyPhaseOptions(value) {
          `<option value="interior"${value === "interior" ? " selected" : ""}>INSIDE / INTERIOR</option>`;
 }
 
+/* ---------- RECENT SWEEPS (landing view) ----------------------------------
+   The app boots here instead of restoring the last view from the URL hash,
+   which used to drop the operator straight back into a finished sweep — its
+   hits reading as part of the NEW job. Top: the last few sweeps as cards.
+   Below: every sweep in the session, scrollable. Click either to open it. */
+const RECENT_CARD_COUNT = 4;
+
+function sweepWhen(w, full) {
+  if (!w || !w.started_utc) return "—";
+  const d = new Date(w.started_utc * 1000);
+  if (isNaN(d.getTime())) return "—";
+  return full ? d.toLocaleString() : d.toLocaleDateString() + " " + d.toLocaleTimeString();
+}
+
+function sweepDuration(w) {
+  if (!w || !w.started_utc || !w.finished_utc) return "incomplete";
+  return Math.max(0, (w.finished_utc - w.started_utc) / 60).toFixed(1) + " min";
+}
+
+function sweepRange(w) {
+  if (!w || w.range_low_mhz == null || w.range_high_mhz == null) return "—";
+  return `${fmtF(w.range_low_mhz)} – ${fmtF(w.range_high_mhz)}`;
+}
+
+// what was actually done: phase + profile, in the operator's words
+function sweepWhat(w) {
+  const phase = (w.phase || "—").toUpperCase();
+  return w.profile ? `${phase} · ${esc(w.profile)}` : phase;
+}
+
+function openSweep(id) {
+  if (!id) return;
+  App._lastFinishedSweepId = id;
+  // a DELIBERATE open may populate the ledger; the cold-open guard only blocks
+  // the automatic rehydrate that used to happen on every page load
+  App._sweepSeenThisSession = true;
+  ledgerLast = 0;
+  refreshLiveSweepSignals(id);
+  show("sweep");
+}
+
+/* Two-level landing: ALL SESSIONS  <->  the sweeps inside one session.
+   Drilling into a session is REVIEW ONLY — it does not change which session new
+   sweeps record into. Making it active is a separate, explicit button, so
+   browsing last month's job can never silently redirect today's work. */
+function showSessionsPane() {
+  const a = $("pane-sessions"), b = $("pane-sweeps");
+  if (a) a.style.display = "";
+  if (b) b.style.display = "none";
+  loadSessionsPane();
+}
+
+function showSweepsPane(sessionId, message) {
+  const a = $("pane-sessions"), b = $("pane-sweeps");
+  if (a) a.style.display = "none";
+  if (b) b.style.display = "";
+  loadRecentSweeps(sessionId, message);
+}
+
+async function loadRecentSweeps(sessionId, message) {
+  const cards = $("recent-cards"), table = $("tbl-recent-sweeps");
+  if (!cards || !table) return;
+  let data;
+  try {
+    data = await api("/api/sweeps/history"
+      + (sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ""));
+  } catch (e) {
+    cards.innerHTML = "";
+    table.innerHTML = "";
+    if ($("recent-msg")) {
+      $("recent-msg").textContent =
+        "no open session — press + NEW SESSION on the ALL SESSIONS screen";
+    }
+    if ($("recent-session-info")) $("recent-session-info").innerHTML = "";
+    return;
+  }
+  const sweeps = (data.sweeps || []).slice();   // already newest-first from the API
+  const session = data.session || {};
+  App.recentSweeps = sweeps;
+  App.viewingSessionId = session.id || null;
+  App.viewingSessionKind = session.kind || "field";
+  if (session.is_open) App.openSessionId = session.id;
+  // WHICH engagement am I looking at, is it the ACTIVE one, and is it client
+  // work or bench work? Getting this wrong is how bench data reaches a client.
+  const isLab = App.viewingSessionKind === "lab";
+  const badge = $("recent-kind-badge");
+  if (badge) {
+    badge.innerHTML = isLab
+      ? `<span class="kind-lab">LAB / BENCH</span>`
+      : `<span class="kind-field">FIELD</span>`;
+  }
+  const tk = $("btn-toggle-kind");
+  if (tk) tk.textContent = isLab ? "MARK AS FIELD" : "MARK AS LAB";
+  const title = $("recent-session-title");
+  if (title) title.textContent = `SESSION #${session.id || "—"}`;
+  const act = $("btn-activate-session");
+  if (act) act.style.display = session.is_open ? "none" : "";
+  const si = $("recent-session-info");
+  if (si) {
+    si.innerHTML = session.id
+      ? `${esc(session.address || "no address recorded")}` +
+        `<span class="note"> · opened ` +
+        `${esc(sweepWhen({ started_utc: session.created_utc }))}` +
+        (session.is_open ? " · <b>ACTIVE</b> — new sweeps record here" : "") + `</span>`
+      : `<span class="note">no session open — press <b>+ NEW SESSION</b></span>`;
+  }
+  const hint = $("recent-session-hint");
+  if (hint) {
+    hint.innerHTML = isLab
+      ? "Bench / test work. <b>No client report is generated for this session and " +
+        "it is never pushed to the client portal.</b>"
+      : (session.is_open
+          ? "Client work. New sweeps record into this session."
+          : "Client work. You are reviewing this session — new sweeps still record " +
+            "into the active one until you press MAKE ACTIVE.");
+  }
+  if ($("recent-msg")) {
+    $("recent-msg").textContent = `session #${session.id || "—"} · ` +
+      `${sweeps.length} sweep${sweeps.length === 1 ? "" : "s"}`;
+  }
+  if (!sweeps.length) {
+    cards.innerHTML = `<p class="note">No sweeps recorded in this session yet.</p>`;
+    table.innerHTML = "";
+    return;
+  }
+  // --- the last few, as cards
+  cards.innerHTML = sweeps.slice(0, RECENT_CARD_COUNT).map(w => {
+    const hi = w.high_count || 0;
+    const tone = w.status === "running" ? "#ffd24a"
+               : hi > 0 ? "#ff9b6b" : "#7bd88f";
+    return `<div class="recent-card" data-sweep="${w.id}" role="button" tabindex="0"` +
+      ` title="open this sweep's detections"` +
+      ` style="border:1px solid #24405c;border-left:3px solid ${tone};border-radius:6px;` +
+      `padding:10px 12px;cursor:pointer;background:#0d1319">` +
+      `<div style="color:#7fd1ff;font-weight:700">${sweepWhat(w)}</div>` +
+      `<div style="font-size:12px;color:#cdd6e0">${esc(w.room || "location not set")}</div>` +
+      `<div class="note" style="margin:4px 0">${esc(sweepWhen(w))}</div>` +
+      `<div class="note">${esc(sweepRange(w))} · ${esc(sweepDuration(w))}</div>` +
+      `<div style="margin-top:6px;font-size:12px">` +
+      `<b>${w.signal_count || 0}</b> signals` +
+      `<span class="note"> · ${hi} high · ${w.medium_count || 0} med · ` +
+      `${w.low_count || 0} low</span></div>` +
+      (w.status && w.status !== "done"
+        ? `<div class="note" style="color:#ffd24a">status: ${esc(w.status)}</div>` : "") +
+      `<div style="margin-top:6px">${sweepAction(w)}</div>` +
+      `</div>`;
+  }).join("");
+  // --- everything, as a scrollable list
+  table.innerHTML =
+    "<tr><th>Started</th><th>What was done</th><th>Room / location</th>" +
+    "<th>Range</th><th>Duration</th><th>Signals</th><th>Status</th><th></th></tr>" +
+    sweeps.map(w =>
+      `<tr data-sweep="${w.id}" style="cursor:pointer" title="open this sweep's detections">` +
+      `<td>${esc(sweepWhen(w))}</td>` +
+      `<td>${sweepWhat(w)}</td>` +
+      `<td>${esc(w.room || "—")}</td>` +
+      `<td>${esc(sweepRange(w))}</td>` +
+      `<td>${esc(sweepDuration(w))}</td>` +
+      `<td>${w.signal_count || 0}` +
+      `<span class="note"> (${w.high_count || 0}h/${w.medium_count || 0}m/${w.low_count || 0}l)</span></td>` +
+      `<td>${esc(w.status || "—")}</td>` +
+      `<td>${sweepAction(w)}</td></tr>`).join("");
+  if (message && $("recent-msg")) $("recent-msg").textContent = message;
+}
+
+/* RESUME vs REVIEW — an honest distinction, not a hopeful one.
+   Only a sweep that is STILL RUNNING can be resumed (that is the sustain/next-
+   segment gate in the runner). A sweep that finished, aborted or errored is a
+   closed record: there is no re-entering it, so the only truthful action is to
+   review its detections. Labelling a finished sweep "RESUME" would promise
+   something the backend cannot do. */
+function sweepAction(w) {
+  return w.status === "running"
+    ? `<button class="btn primary" data-sweep-resume="${w.id}">▶ RESUME</button>`
+    : `<button class="btn" data-sweep="${w.id}">REVIEW</button>`;
+}
+
+// one delegated handler for cards, rows AND the REVIEW / RESUME buttons —
+// survives every re-render
+document.addEventListener("click", (ev) => {
+  if (!ev.target || !ev.target.closest) return;
+  const res = ev.target.closest("[data-sweep-resume]");
+  if (res) {                       // still running: go watch it, don't reload it
+    show("sweep");
+    return;
+  }
+  const hit = ev.target.closest(
+    "#recent-cards [data-sweep], #tbl-recent-sweeps tr[data-sweep]");
+  if (!hit) return;
+  const id = parseInt(hit.getAttribute("data-sweep"), 10);
+  if (id) openSweep(id);
+});
+
+/* ALL SESSIONS pane. 85+ engagements and growing, so it scrolls inside its own
+   card and is filterable — otherwise the old ones are simply unreachable. */
+async function loadSessionsPane() {
+  const tbl = $("tbl-session-switch");
+  if (!tbl) return;
+  let list = [];
+  try {
+    list = await api("/api/sessions");
+  } catch (e) {
+    tbl.innerHTML = "<tr><td class='note'>could not load sessions</td></tr>";
+    return;
+  }
+  App._sessionList = list || [];
+  const fi = $("session-filter");
+  if (fi && !fi._wired) { fi.oninput = () => renderSessionSwitchRows(fi.value); fi._wired = true; }
+  renderSessionSwitchRows(fi ? fi.value : "");
+}
+
+function renderSessionSwitchRows(filter) {
+  const tbl = $("tbl-session-switch");
+  if (!tbl) return;
+  const all = App._sessionList || [];
+  const q = (filter || "").trim().toLowerCase();
+  const list = q
+    ? all.filter(s => String(s.id).includes(q)
+        || (s.address || "").toLowerCase().includes(q)
+        || (s.operator || "").toLowerCase().includes(q))
+    : all;
+  const cnt = $("session-count");
+  if (cnt) {
+    cnt.textContent = q ? `${list.length} of ${all.length} sessions`
+                        : `${all.length} sessions`;
+  }
+  tbl.innerHTML = "<tr><th>#</th><th>Kind</th><th>Address</th><th>Created</th>" +
+    "<th>Sweeps</th><th>Operator</th></tr>" +
+    (list.length
+      ? list.map(s => {
+          const open = s.id === App.openSessionId;
+          const lab = (s.kind || "field") === "lab";
+          return `<tr data-session="${s.id}" title="see the sweeps in this session"` +
+            ` style="cursor:pointer${open ? ";color:#7bd88f" : ""}">` +
+            `<td>${s.id}${open ? " ●" : ""}</td>` +
+            `<td><span class="${lab ? "kind-lab" : "kind-field"}">` +
+            `${lab ? "LAB" : "FIELD"}</span></td>` +
+            `<td>${esc(s.address || "—")}</td>` +
+            `<td>${esc(sweepWhen({ started_utc: s.created_utc }))}</td>` +
+            `<td>${s.sweep_count != null ? s.sweep_count : "—"}</td>` +
+            `<td>${esc(s.operator || "—")}</td></tr>`;
+        }).join("")
+      : "<tr><td colspan=6 class='note'>no session matches that filter</td></tr>");
+}
+
+// clicking a session DRILLS IN to review its sweeps; it does NOT change which
+// session new work records into (that is the explicit MAKE ACTIVE button)
+document.addEventListener("click", (ev) => {
+  const row = ev.target && ev.target.closest
+    ? ev.target.closest("#tbl-session-switch tr[data-session]") : null;
+  if (!row) return;
+  const id = parseInt(row.getAttribute("data-session"), 10);
+  if (id) showSweepsPane(id);
+});
+
 async function loadSweepHistory(message) {
   const table = $("tbl-sweep-history");
   if (!table) return;
@@ -1509,6 +1802,114 @@ const Listen = {
 };
 const PCM_PLAY_LEAD_S = 0.25;    // schedule this far ahead of the clock (jitter buffer)
 const PCM_MAGIC = "SHLDPCM1";
+
+/* ---------- LISTEN progress ladder ----------------------------------------
+   On a single-radio rig, LISTEN has to TAKE the radio off the sweep before it
+   can demodulate. That hand-off is several seconds of real work (stop sweep →
+   wait for release → tune → open stream → demod) and it used to be completely
+   invisible: the operator clicked LISTEN and, if anything went wrong, got
+   silence. This renders the sequence live, so the radio being taken is
+   something you WATCH rather than infer.
+
+   Deliberately fixed-position and appended to <body>: the sweep overlay covers
+   the page, and #ft-msg is rewritten once a second by render(), so neither is
+   a safe place to report this. Builds its own DOM — no index.html change, so
+   this cannot drift out of sync with the markup. */
+const ListenSteps = {
+  el: null, steps: [], hideT: null,
+
+  _mount() {
+    if (this.el && this.el.isConnected) return this.el;
+    let el = document.getElementById("listen-steps");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "listen-steps";
+      el.style.cssText =
+        "position:fixed;right:16px;bottom:16px;z-index:99999;min-width:290px;" +
+        "max-width:380px;background:#0b0f14ee;border:1px solid #24405c;" +
+        "border-radius:6px;padding:10px 12px;font:11px/1.7 Consolas,monospace;" +
+        "color:#cdd6e0;box-shadow:0 6px 22px #000a;pointer-events:none";
+      document.body.appendChild(el);
+    }
+    this.el = el;
+    return el;
+  },
+
+  // list: array of step labels. Renders them all as pending.
+  begin(list) {
+    if (this.hideT) { clearTimeout(this.hideT); this.hideT = null; }
+    this.steps = (list || []).map((t) => ({ t: t, s: "pending" }));
+    this._render();
+  },
+
+  active(i, label) { this._set(i, "active", label); },
+  done(i, label) { this._set(i, "done", label); },
+  fail(i, why) { this._set(i, "fail", null, why); },
+
+  _set(i, state, label, why) {
+    const st = this.steps[i];
+    if (!st) return;
+    st.s = state;
+    if (label) st.t = label;
+    if (why) st.why = why;
+    // finishing a step implies every earlier one is done
+    if (state === "done" || state === "active") {
+      for (let k = 0; k < i; k++) {
+        if (this.steps[k].s === "pending" || this.steps[k].s === "active") {
+          this.steps[k].s = "done";
+        }
+      }
+    }
+    this._render();
+  },
+
+  // auto-dismiss once audio is flowing; failures stay up until the next click
+  finish(ok) {
+    this._render();
+    if (!ok) return;
+    if (this.hideT) clearTimeout(this.hideT);
+    this.hideT = setTimeout(() => this.clear(), 4500);
+  },
+
+  clear() {
+    this.steps = [];
+    if (this.el) { this.el.innerHTML = ""; this.el.style.display = "none"; }
+  },
+
+  _render() {
+    let el;
+    try { el = this._mount(); } catch (e) { return; }
+    if (!el) return;
+    if (!this.steps.length) { el.innerHTML = ""; el.style.display = "none"; return; }
+    el.style.display = "";
+    const ico = { pending: "○", active: "◐", done: "●", fail: "✕" };
+    const col = { pending: "#6b7b90", active: "#ffd24a", done: "#7bd88f", fail: "#ff6b6b" };
+    el.innerHTML =
+      "<div style='color:#7fd1ff;margin-bottom:4px'>LISTEN — radio hand-off</div>" +
+      this.steps.map((st, i) =>
+        `<div style="color:${col[st.s] || "#cdd6e0"}">${ico[st.s] || "○"} ` +
+        `${i + 1}. ${esc(st.t)}` +
+        (st.why ? `<div style="padding-left:14px;color:#ff9b6b">${esc(st.why)}</div>` : "") +
+        `</div>`).join("");
+  },
+
+  /* Bridge from listenStart's onState(msg, live, mode) callback to the ladder.
+     `live === true` means the PCM header arrived — stream AND demod are up. */
+  onStream(msg, live, mode) {
+    if (!this.steps.length) return;
+    const demod = this.steps.length - 1, stream = this.steps.length - 2;
+    if (live === true) {
+      if (stream >= 0) this.done(stream);
+      this.done(demod, "demodulating" + (mode ? " — " + mode.toUpperCase() : "") + " · LIVE");
+      this.finish(true);
+    } else if (live === false && msg && !/^tuning/i.test(msg)) {
+      // a real failure/termination, not the initial "tuning & streaming…" note
+      const at = this.steps.findIndex((s) => s.s === "active");
+      this.fail(at >= 0 ? at : demod, msg);
+      this.finish(false);
+    }
+  },
+};
 
 function listenStop() {
   Listen.active = false;
@@ -2249,17 +2650,36 @@ function inRangeClient(center) {
   // works even while the RF Explorer is the active sweeper — the server tunes
   // the SDR and enforces its own range check.
   const roles = App.state && App.state.roles;
-  if (roles && roles.roles && roles.roles.some(r => SDR_SOURCES.has(r.source)))
-    return { ok: true };
+  const hasSdrRole = !!(roles && roles.roles
+    && roles.roles.some(r => SDR_SOURCES.has(r.source)));
   const dev = App.state && App.state.device;
+  const devIsSdr = !!(dev && dev.modules && dev.modules.length
+    && SDR_SOURCES.has(dev.driver));
+  // RANGE IS CHECKED EVEN WHEN AN SDR IS PRESENT. This used to return ok:true
+  // the moment any SDR held a role, skipping the check below entirely — so
+  // clicking a baseline entry the radio physically cannot reach (e.g. 49.86 MHz
+  // on a B220, which starts at 70 MHz) fired a request that came back 416 and
+  // read as "the panel opened but there's no sound and no trace". The radio's
+  // own limits are knowable here; say so BEFORE asking the server.
+  if (devIsSdr) {
+    const lo = Math.min(...dev.modules.map(m => m.min_mhz));
+    const hi = Math.max(...dev.modules.map(m => m.max_mhz));
+    if (center < lo || center > hi) {
+      return { ok: false, msg: `${fmtF(center)} is outside this radio's `
+        + `${fmtF(lo)}–${fmtF(hi)} tuning range — it physically cannot receive `
+        + `it. (Baseline lists licensed transmitters across all bands, including `
+        + `ones below the radio's floor.)` };
+    }
+    return { ok: true };
+  }
+  // an SDR holds a role but is not the reported device (e.g. RFE sweeps while a
+  // Pluto monitors): its range is not knowable client-side, so let the server
+  // enforce — the failure now surfaces on the LISTEN ladder either way
+  if (hasSdrRole) return { ok: true };
   if (!dev || !dev.modules || !dev.modules.length)
     return { ok: false, msg: "connect a device first (Session tab)." };
   if (!SDR_SOURCES.has(dev.driver))
     return { ok: false, msg: "tune / view / listen needs an SDR (Pluto or B220 Mini) — connect one in the DEVICE card (it can stay connected alongside the RF Explorer)." };
-  const lo = Math.min(...dev.modules.map(m => m.min_mhz));
-  const hi = Math.max(...dev.modules.map(m => m.max_mhz));
-  if (center < lo || center > hi)
-    return { ok: false, msg: `${fmtF(center)} is outside the radio's ${fmtF(lo)}–${fmtF(hi)} range.` };
   return { ok: true };
 }
 
@@ -2473,6 +2893,17 @@ function inspectByFreq(center, label, mode, sid, attr) {
   listenStop();
   const au = $("insp-audio"); au.pause(); au.removeAttribute("src");
   clearInspectCanvases();
+  // ANY entry point lands here — the signal lightbox, a baseline row, the wiki,
+  // the hunt list. listenAt() starts the ladder for its own path; start one here
+  // for every other caller so a refusal is visible instead of leaving the
+  // operator with a panel that just sits there doing nothing.
+  try {
+    if (!ListenSteps.steps.length) {
+      ListenSteps.begin([`tune to ${fmtF(center)}`, "open audio stream",
+                         "demodulate — live audio"]);
+      App.listenStepBase = 0;
+    }
+  } catch (e) { /* ladder is presentation only — never block the tune */ }
   const rc = inRangeClient(center);
   if (!rc.ok) {
     $("insp-note").textContent = rc.msg +
@@ -2481,10 +2912,13 @@ function inspectByFreq(center, label, mode, sid, attr) {
     const ac = $("insp-analyzer").getContext("2d");
     ac.fillStyle = "#e0a030"; ac.font = "13px monospace";
     ac.fillText(rc.msg, 12, 26);
+    // the ladder must never be left hanging on a step that will never finish
+    try { ListenSteps.fail(App.listenStepBase || 0, rc.msg); ListenSteps.finish(false); } catch (e) {}
     return;
   }
   $("insp-note").textContent = "";
-  if (mode === "pocsag") { inspectPocsag(center, label, tuneId); return; }
+  // POCSAG is a DATA decode, not live audio — the audio ladder doesn't apply
+  if (mode === "pocsag") { try { ListenSteps.clear(); } catch (e) {} inspectPocsag(center, label, tuneId); return; }
   $("insp-decode").style.display = "none";
   $("insp-msg").textContent = "tuning & streaming…";
   // Prefer smooth Web Audio chunked playback (/api/listen_pcm); fall back to the
@@ -2493,7 +2927,11 @@ function inspectByFreq(center, label, mode, sid, attr) {
   const onState = (msg, live, m) => {
     $("insp-msg").textContent = msg;
     if (m) $("insp-mode").value = m;
+    try { ListenSteps.onStream(msg, live, m); } catch (e) {}
   };
+  // tuned and about to ask the radio for audio — advance the hand-off ladder
+  const _lb = App.listenStepBase || 0;
+  try { ListenSteps.done(_lb, `tuned to ${fmtF(center)}`); ListenSteps.active(_lb + 1); } catch (e) {}
   listenStart(center, mode, onState).then((ok) => {
     if (!ok && App.tuneId === tuneId) {     // guard: don't stomp a newer tune
       const ibw = ($("insp-ibw") || {}).value || "2.4";
@@ -2503,6 +2941,15 @@ function inspectByFreq(center, label, mode, sid, attr) {
                `&ibw_mhz=${encodeURIComponent(ibw)}&block_s=${encodeURIComponent(blockS)}`;
       au.play().catch(() => {});
     }
+  }).catch((e) => {
+    // NEVER fail silently in the field. Without this, any throw inside
+    // listenStart (AudioContext refused, fetch rejected, backend 409) left
+    // "tuning & streaming…" on screen forever and looked like a dead button.
+    if (App.tuneId !== tuneId) return;          // a newer tune owns the panel
+    const why = (e && (e.message || e.error || e.msg)) || String(e || "unknown");
+    if ($("insp-msg")) $("insp-msg").textContent = "LISTEN failed — " + why;
+    try { ListenSteps.fail((App.listenStepBase || 0) + 1, why); ListenSteps.finish(false); } catch (_) {}
+    console.error("listenStart failed:", e);
   });
   startSpectrumPoll();
 }
@@ -2608,33 +3055,77 @@ async function listenAt(center, label, mode, sid, attr) {
   App.inspIdx = null;
   setInspNav(false);
   const sweeping = App.state && App.state.sweep && App.state.sweep.running;
-  if (sweeping && !hasConcurrentMonitor()) {
-    $("ft-msg").textContent = `one radio — pausing the sweep and direction-finding ${fmtF(center)}`;
-    const dfBody = { center_mhz: center, bw_khz: 100, room: (attr && attr.room) || "" };
-    try { await api("/api/sweep/abort", {}); } catch (e) { /* already stopping */ }
-    try {
-      await api("/api/directional/start", dfBody);
-      show("directional");
-      return;
-    } catch (e) {
-      // the B220 USB worker can crash mid-run — respawn it (reconnect) and retry
-      // rather than silently leaving a stopped sweep and nothing running
-      $("ft-msg").textContent = "radio hiccup — reconnecting, then direction-finding…";
-      try { await api("/api/device/connect", {}); } catch (_) { /* best effort */ }
-      await new Promise(r => setTimeout(r, 1400));
-      try {
-        await api("/api/directional/start", dfBody);
-        show("directional");
-        return;
-      } catch (e2) {
-        show("directional");   // land on the DF view so the state is visible
-        $("ft-msg").textContent =
-          "radio not responding — replug the B220's USB and press CONNECT (DEVICE card).";
-        return;
-      }
+  // ONE radio: the sweeper IS the only receiver, so it cannot sweep and
+  // demodulate at the same time — LISTEN has to TAKE the radio first.
+  // This branch used to abort the sweep and start DIRECTION-FINDING instead;
+  // when DF then failed (409) the only message went to #ft-msg — a different
+  // view than the lightbox the click came from — so it read as "I clicked
+  // LISTEN and nothing happened", with the sweep silently dead.
+  const single = sweeping && !hasConcurrentMonitor();
+  const tuneSteps = [`tune to ${fmtF(center)}`, "open audio stream",
+                     "demodulate — live audio"];
+  ListenSteps.begin(single
+    ? ["stop the sweep (frees the radio)", "confirm the radio released"].concat(tuneSteps)
+    : tuneSteps);
+  App.listenStepBase = single ? 2 : 0;   // where the tune/stream/demod steps start
+  if (single) {
+    if ($("ft-msg")) {
+      $("ft-msg").textContent =
+        `one radio — sweep STOPPED so you can listen on ${fmtF(center)}`;
     }
+    ListenSteps.active(0);
+    try {
+      await api("/api/sweep/abort", {});
+    } catch (e) {
+      ListenSteps.fail(0, "could not stop the sweep — stop it from the SWEEP card, "
+                          + "then press LISTEN again");
+      ListenSteps.finish(false);
+      return;
+    }
+    ListenSteps.done(0);
+    // The sweep thread needs a beat to release the radio: abort() only SETS an
+    // event, it never joins the worker. Starting the stream too early races it
+    // and the backend answers 409 "monitor radio is busy" — which is exactly
+    // how the old direction-finding fallback failed, 31 ms after its abort.
+    // A segment is avg_passes (20) PLUS a maxhold_dwell_s (12 s) dwell. abort()
+    // only SETS a flag; collect()/stream() honour it, but the current pass still
+    // has to unwind and the segment finalize. That routinely takes far longer
+    // than a couple of seconds — an earlier 3 s budget here gave up before the
+    // radio was ever free, which looked exactly like "LISTEN does nothing".
+    // Budget for the real dwell and SHOW the countdown instead of bailing.
+    ListenSteps.active(1);
+    const WAIT_MS = 45000, TICK = 400;
+    let released = false;
+    for (let waited = 0; waited < WAIT_MS; waited += TICK) {
+      await new Promise(r => setTimeout(r, TICK));
+      let s = null;
+      try { s = await api("/api/state"); } catch (e) { released = true; break; }
+      if (!(s && s.sweep && s.sweep.running)) { released = true; break; }
+      ListenSteps.active(1, "confirm the radio released — finishing the current "
+        + `segment (up to ${Math.max(0, Math.round((WAIT_MS - waited) / 1000))}s)`);
+    }
+    if (released) {
+      ListenSteps.done(1, "radio released");
+    } else {
+      // Do NOT refuse to try: attempt the stream anyway. If the radio really is
+      // still held the backend says so and step 4 shows that reason — an honest
+      // error beats a button that silently does nothing.
+      ListenSteps.done(1, "radio slow to release — trying the stream anyway");
+    }
+    // We deliberately do NOT auto-restart the sweep afterwards: abort+start
+    // opens a NEW sweep record rather than resuming the old one.
+    App.sweepPausedForListen = true;
   }
   inspectByFreq(center, label, mode, sid, attr);
+  // inspectByFreq clears #insp-note, so stamp the notice AFTER it. #insp-note is
+  // never touched by the 1 Hz render(), unlike #ft-msg — so this stays on screen
+  // instead of being wiped a second later. The operator must not be able to walk
+  // away believing a sweep is still collecting when it is stopped.
+  if (App.sweepPausedForListen && $("insp-note")) {
+    $("insp-note").textContent =
+      "SWEEP STOPPED to free the single radio for this listen — restart the sweep " +
+      "from the SWEEP card when you are done listening.";
+  }
 }
 
 /* ---------- signal hunt: step the not-in-baseline (unknown) emitters ---------- */
@@ -4007,6 +4498,141 @@ function moduleRange(side) {
 
 /* a finished sweep should never just sit there — point the operator at the next
    step in the workflow (ambient → interior → review → directional → report). */
+async function startPostSweep(sweepId, force = false) {
+  if (!sweepId || (App._postStartedSweep === sweepId && !force)) return;
+  App._postStartedSweep = sweepId;
+  try {
+    const ps = await api("/api/post_sweep/start", { sweep_id: sweepId, force });
+    App.postSweep = ps; renderPostSweep(ps);
+  } catch (e) {
+    App._postStartedSweep = null;
+    if ($("post-review-msg")) $("post-review-msg").textContent =
+      "Could not start automatic review: " + e.message;
+  }
+}
+
+function postSweepAction(ps) {
+  if (!ps || !ps.prompt) return;
+  if (ps.prompt.kind === "connect_second_radio") startPostSweep(ps.sweep_id, true);
+  else if (ps.prompt.kind === "directional") show("directional");
+  else show("results");
+}
+
+function renderPostSweep(ps) {
+  const bar = $("post-review-bar"); if (!bar) return;
+  if (!ps || ps.stage === "idle") { bar.className = "post-review-bar"; return; }
+  const cls = ps.running ? "running" : ps.stage === "complete" ? "complete" :
+    ps.stage === "needs_radio" ? "needs-radio" : ps.stage === "error" ? "error" : "";
+  bar.className = "post-review-bar show " + cls;
+  $("post-review-label").textContent = ps.running ? "AUTOMATIC SIGNAL REVIEW" :
+    ps.stage === "needs_radio" ? "SECOND-RADIO CHECK NEEDED" :
+      ps.stage === "error" ? "AUTOMATIC REVIEW FAILED" : "AUTOMATIC REVIEW COMPLETE";
+  $("post-review-msg").textContent = ps.error || ps.message || "";
+  const stagePct = { queued: 5, consolidating: 22, inventory: 38,
+    characterizing: 55, needs_radio: 45, complete: 100, error: 100 };
+  const pct = ps.total > 0 && ps.stage === "characterizing" ?
+    45 + 50 * (ps.progress || 0) / ps.total : (stagePct[ps.stage] || 0);
+  $("post-review-fill").style.width = Math.max(0, Math.min(100, pct)) + "%";
+  $("post-review-count").textContent = ps.total ?
+    `${ps.progress || 0}/${ps.total} live checks` : "content-free RF analysis";
+  const action = $("post-review-action");
+  if (ps.prompt) {
+    action.style.display = ""; action.textContent = ps.prompt.action || "OPEN";
+    action.onclick = () => postSweepAction(ps);
+  } else action.style.display = "none";
+  if (ps.overview) renderAmbientOverview(ps.overview, ps.prompt);
+
+  const key = `${ps.session_id}:${ps.sweep_id}:${ps.prompt ? ps.prompt.kind : ps.stage}`;
+  if (key !== App._postPromptedKey && ps.stage === "needs_radio") {
+    App._postPromptedKey = key;
+    showNextBanner(
+      `<b>Stored sweep review is complete.</b> Plug in the second SDR so the app can ` +
+      `confirm unexplained signals without opening audio or message content.`,
+      "SECOND RADIO CONNECTED - CHECK", () => postSweepAction(ps));
+  } else if (key !== App._postPromptedKey && ps.stage === "complete" &&
+             ps.overview && ps.overview.priority_count > 0) {
+    App._postPromptedKey = key; const n = ps.overview.priority_count;
+    showNextBanner(
+      `<b>${n} substantive transmission${n === 1 ? "" : "s"} need localization.</b> ` +
+      `Attach the directional antenna; the app will tell you when to switch to near field.`,
+      "OPEN DIRECTIONAL GUIDE", () => show("directional"));
+  } else if (key !== App._postPromptedKey && ps.stage === "characterizing" &&
+             ps.prompt && ps.prompt.kind === "directional") {
+    App._postPromptedKey = key;
+    showNextBanner(
+      `<b>A substantive live transmission is confirmed.</b> Direction finding can start now; ` +
+      `the other radio will keep reducing the remaining watch-list noise in the background.`,
+      "OPEN DIRECTIONAL GUIDE", () => show("directional"));
+  }
+}
+
+function drawAmbientPie(categories) {
+  const cv = $("ambient-pie"); if (!cv) return;
+  const ctx = cv.getContext("2d"), W = cv.width, H = cv.height;
+  ctx.clearRect(0, 0, W, H);
+  const total = categories.reduce((n, c) => n + (c.count || 0), 0);
+  const cx = W / 2, cy = H / 2, r = Math.min(W, H) * .43;
+  if (!total) {
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.strokeStyle = "#344150"; ctx.lineWidth = 28; ctx.stroke();
+  } else {
+    let start = -Math.PI / 2;
+    categories.forEach(c => {
+      if (!c.count) return;
+      const end = start + Math.PI * 2 * c.count / total;
+      ctx.beginPath(); ctx.moveTo(cx, cy); ctx.arc(cx, cy, r, start, end);
+      ctx.closePath(); ctx.fillStyle = c.color; ctx.fill();
+      ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue("--panel") || "#121922";
+      ctx.lineWidth = 2; ctx.stroke(); start = end;
+    });
+  }
+  ctx.beginPath(); ctx.arc(cx, cy, r * .52, 0, Math.PI * 2);
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--panel") || "#121922";
+  ctx.fill(); ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--bright") || "#fff";
+  ctx.textAlign = "center"; ctx.font = "bold 25px Consolas, monospace";
+  ctx.fillText(String(total), cx, cy + 1);
+  ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--dim") || "#7b8794";
+  ctx.font = "11px Consolas, monospace"; ctx.fillText("LIKELY EMITTERS", cx, cy + 19);
+}
+
+function renderAmbientOverview(o, prompt) {
+  if (!o || !$("ambient-overview")) return;
+  $("ambient-overview-wait").style.display = "none";
+  $("ambient-overview").style.display = "";
+  const kpi = (value, label, color) =>
+    `<span><b${color ? ` style="color:${color}"` : ""}>${value}</b> ` +
+    `<span class="note">${label}</span></span>`;
+  $("ambient-kpis").innerHTML =
+    kpi(o.raw_detection_count || 0, "raw detections") +
+    kpi(o.unique_emitter_count || 0, "likely emitters") +
+    kpi(o.duplicate_reduction_count || 0, "repeat hits consolidated", "var(--cyan)") +
+    kpi(o.client_accounted_count || 0, "client-accounted", "var(--green)") +
+    kpi(o.priority_count || 0, "substantive", o.priority_count ? "var(--red)" : "var(--green)");
+  const cats = o.categories || []; drawAmbientPie(cats);
+  $("ambient-legend").innerHTML = cats.map(c =>
+    `<div class="ambient-legend-row"><span class="ambient-swatch" style="background:${esc(c.color)}"></span>` +
+    `<span>${esc(c.label)}</span><b>${c.count || 0}</b></div>`).join("");
+  const p = $("ambient-priority");
+  if (o.priority_count) {
+    p.style.display = "";
+    p.innerHTML = `<b>${o.priority_count} substantive transmission${o.priority_count === 1 ? "" : "s"}</b>` +
+      (o.priority_emitters || []).slice(0, 5).map(g => {
+        const b = g.best || {};
+        return `<div style="margin-top:5px"><a href="#" class="freqlink" data-center="${b.center_mhz}" ` +
+          `data-sid="${b.id || ""}">${fmtF(b.center_mhz)}</a> - ${esc(g.substantive_reason)}</div>`;
+      }).join("");
+  } else { p.style.display = "none"; p.innerHTML = ""; }
+  $("ambient-method").textContent = o.method_note || "";
+  const pr = $("ambient-prompt-row");
+  if (prompt) {
+    pr.style.display = "flex";
+    $("ambient-prompt-title").textContent = prompt.title || "Next step";
+    $("ambient-prompt-detail").textContent = prompt.detail || "";
+    $("ambient-prompt-action").textContent = prompt.action || "CONTINUE";
+    $("ambient-prompt-action").onclick = () => postSweepAction(App.postSweep);
+  } else pr.style.display = "none";
+}
+
 function showNextBanner(msgHtml, label, go) {
   const b = $("next-step-banner");
   if (!b) return;
@@ -4021,8 +4647,8 @@ function suggestNextStep(phase) {
     showNextBanner("<b>✓ Ambient reference done.</b> Next: sweep inside the premises.",
       "START INTERIOR SWEEP", () => show(isSingleRx() ? "sweep" : "sweepL"));
   else if (phase === "interior")
-    showNextBanner("<b>✓ Interior sweep done.</b> Next: review the anomalies, then direction-find the live ones.",
-      "REVIEW ANOMALIES", () => show("triage"));
+    showNextBanner("<b>Interior sweep done.</b> Automatic RF-shape and repeat-hit review is running in the background.",
+      "VIEW AUTOMATIC REVIEW", () => show("results"));
   else if (phase === "directional")
     showNextBanner("<b>✓ Directional pass done.</b> Next: generate the report.",
       "GENERATE REPORT", () => show("results"));
@@ -4163,6 +4789,38 @@ $("abort-erase").onclick = async () => {
   $("abort-dialog").classList.remove("show");
   await api("/api/sweep/abort", { erase: true });
 };
+/* SAVE & CLOSE — "I'm done with this sweep". Same mechanic as ABORT PHASE (keep
+   data): abort(erase=false) stops the radio and KEEPS everything recorded. The
+   difference is intent and destination — this is the normal way to finish, and
+   it backs out to the sweep list instead of leaving the operator parked on a
+   finished sweep's screen. No confirm dialog: nothing is discarded. */
+$("btn-save-close").onclick = async () => {
+  const b = $("btn-save-close");
+  b.disabled = true;
+  const was = b.textContent;
+  b.textContent = "saving…";
+  try {
+    if (App.state && App.state.sweep && App.state.sweep.running) {
+      await api("/api/sweep/abort", {});
+      // let the segment unwind so the list shows a settled status, not "running"
+      for (let i = 0; i < 25; i++) {
+        await new Promise(r => setTimeout(r, 400));
+        let s = null;
+        try { s = await api("/api/state"); } catch (e) { break; }
+        if (!(s && s.sweep && s.sweep.running)) break;
+      }
+    }
+  } catch (e) { /* already stopping — still back out and show what was saved */ }
+  App.overlayHidden = true;
+  $("sweep-overlay").classList.remove("show");
+  MonitorDock.overlayClosed();
+  listenStop();                    // don't leave audio running behind the list
+  b.disabled = false;
+  b.textContent = was;
+  show("recent");
+  showSweepsPane(App.openSessionId, "sweep saved — everything recorded was kept");
+};
+
 $("btn-hide-overlay").onclick = () => {
   App.overlayHidden = true; $("sweep-overlay").classList.remove("show");
   MonitorDock.overlayClosed();   // monitor re-docks on the page and keeps playing
@@ -4202,14 +4860,20 @@ App.dirShowAll = false;
 const DIR_TRIAGE = 5;   // directional time is expensive — hunt only what scores highest
 async function loadDirectional() {
   try { App.anomalies = await api("/api/anomalies"); } catch (e) { App.anomalies = []; }
-  App.dirQueue = App.dirShowAll ? App.anomalies : App.anomalies.slice(0, DIR_TRIAGE);
+  const overview = App.postSweep && App.postSweep.overview;
+  const priority = ((overview && overview.priority_emitters) || []).map(g => ({
+    ...(g.best || {}), substantive_reason: g.substantive_reason,
+    detection_count: g.detection_count, sweep_count: g.sweep_count,
+  }));
+  App.dirQueue = App.dirShowAll ? App.anomalies :
+    priority.length ? priority : (overview ? [] : App.anomalies.slice(0, DIR_TRIAGE));
   if (App.dirQueue.length) {
     const top = App.dirQueue[0];
-    const hidden = App.anomalies.length - App.dirQueue.length;
+    const hidden = Math.max(0, App.anomalies.length - App.dirQueue.length);
     $("dir-instruction").innerHTML =
       `<b style="color:var(--bright)">ATTACH THE DIRECTIONAL ANTENNA</b> and return to ` +
       `<b style="color:var(--amber)">${esc(top.strongest_room || top.room || "the premises")}</b>. ` +
-      `Triage: hunting the top ${App.dirQueue.length} by anomaly score` +
+      `Hunting ${priority.length ? "the substantive" : "the top-scored"} ${App.dirQueue.length} signal${App.dirQueue.length === 1 ? "" : "s"}` +
       (hidden > 0 ? ` (${hidden} lower-scored hidden — clear them via baseline ` +
         `sources or the community instead) ` +
         `<button class="btn" onclick="App.dirShowAll=true;loadDirectional()">SHOW ALL ${App.anomalies.length}</button>`
@@ -4237,10 +4901,67 @@ async function loadDirectional() {
   loadDFLog();
 }
 
+function armDirectionalAudio() {
+  if (!App.dirAudioOn) return;
+  try {
+    if (!App._dirAudio) App._dirAudio = new (window.AudioContext || window.webkitAudioContext)();
+    if (App._dirAudio.state === "suspended") App._dirAudio.resume();
+  } catch (e) { App.dirAudioOn = false; }
+}
+
+function directionalBeep(frac) {
+  if (!App.dirAudioOn || !App._dirAudio) return;
+  const now = performance.now(), interval = 1050 - Math.max(0, Math.min(1, frac)) * 900;
+  if (now - App._dirLastBeep < interval) return;
+  App._dirLastBeep = now;
+  try {
+    const ctx = App._dirAudio, osc = ctx.createOscillator(), gain = ctx.createGain();
+    osc.frequency.value = 430 + frac * 1050;
+    gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.11, ctx.currentTime + .008);
+    gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + .065);
+    osc.connect(gain); gain.connect(ctx.destination); osc.start(); osc.stop(ctx.currentTime + .07);
+  } catch (e) {}
+}
+
+function updateDirectionalGuidance(d, frac) {
+  const now = performance.now();
+  App._dirReadings.push({ t: now, v: Number(d.current_dbm) });
+  App._dirReadings = App._dirReadings.filter(x => now - x.t < 5000).slice(-6);
+  const oldest = App._dirReadings[0], delta = oldest ? Number(d.current_dbm) - oldest.v : 0;
+  const trend = $("dir-trend"), stage = $("dir-stage"), guide = $("dir-guidance");
+  if ($("dir-strength-fill")) $("dir-strength-fill").style.width = (frac * 100).toFixed(0) + "%";
+  if (Number(d.current_dbm) >= -35) {
+    if (stage) stage.textContent = "SWITCH TO NEAR-FIELD PROBE";
+    if (guide) guide.textContent = "Signal is hot. Reduce gain if it pins, then inspect objects and seams at close range.";
+    if (trend) { trend.textContent = "HOT"; trend.style.color = "var(--red)"; }
+  } else if (delta >= 1.5) {
+    if (stage) stage.textContent = "DIRECTIONAL ANTENNA - getting warmer";
+    if (guide) guide.textContent = `Continue this direction (${delta.toFixed(1)} dB stronger).`;
+    if (trend) { trend.textContent = "↑"; trend.style.color = "var(--green)"; }
+  } else if (delta <= -1.5) {
+    if (stage) stage.textContent = "DIRECTIONAL ANTENNA - getting colder";
+    if (guide) guide.textContent = `Reverse or rotate; the signal fell ${Math.abs(delta).toFixed(1)} dB.`;
+    if (trend) { trend.textContent = "↓"; trend.style.color = "var(--amber)"; }
+  } else {
+    if (stage) stage.textContent = "DIRECTIONAL ANTENNA - pause and compare";
+    if (guide) guide.textContent = "Reading is steady. Rotate slowly, then move a few feet and pause again.";
+    if (trend) { trend.textContent = "→"; trend.style.color = "var(--dim)"; }
+  }
+  directionalBeep(frac);
+}
+
+if ($("btn-dir-audio")) $("btn-dir-audio").onclick = () => {
+  App.dirAudioOn = !App.dirAudioOn;
+  if (App.dirAudioOn) armDirectionalAudio();
+  $("btn-dir-audio").textContent = App.dirAudioOn ? "GUIDANCE BEEP ON" : "GUIDANCE BEEP OFF";
+};
+
 window.dirLock = async (i) => {
   App.dirIndex = i;
   const a = App.dirQueue[i];
   if (!a) return;
+  App._dirReadings = []; App._dirLastBeep = 0; armDirectionalAudio();
   try {
     await api("/api/directional/start", {
       center_mhz: a.center_mhz, bw_khz: a.bw_khz || 100,
@@ -4397,6 +5118,14 @@ window.identifyRow = async (sid, center, bw) => {
 
 /* ---------- results ---------- */
 async function loadResults() {
+  if (App.postSweep && App.postSweep.overview) {
+    renderAmbientOverview(App.postSweep.overview, App.postSweep.prompt);
+  } else if (App.postSweep && App.postSweep.running && $("ambient-overview-wait")) {
+    $("ambient-overview-wait").textContent = App.postSweep.message || "Automatic review is running...";
+  } else if (App.state && App.state.sweeps) {
+    const doneInterior = App.state.sweeps.filter(s => s.phase === "interior" && s.status === "done");
+    if (doneInterior.length) startPostSweep(doneInterior[doneInterior.length - 1].id);
+  }
   try {
     const anomalies = await api("/api/anomalies");
     $("tbl-anomalies").innerHTML =
@@ -5008,6 +5737,128 @@ window.netUnblock = async (id) => {
   try { await api(`/api/netscan/devices/${id}/unblock`, {}); await loadNetwork(); }
   catch (e) { $("net-msg").textContent = e.message; }
 };
+
+/* ---------- droid check (Android handset over adb, read-only) ----------
+   Shows INDICATORS, never a clean/infected verdict. Severity orders the
+   operator's attention; the evidence is always shown next to it. */
+const _DROID_SEV = {
+  high:  { dot: "var(--red, #ff6b6b)",  label: "LOOK NOW" },
+  watch: { dot: "var(--amber, #ffb454)", label: "VERIFY" },
+  clear: { dot: "var(--green, #7bd88f)", label: "nothing seen" },
+};
+
+function droidPre(stat) {
+  const el = $("droid-pre");
+  if (!el) return;
+  if (!stat || stat.ready) { el.style.display = "none"; return; }
+  el.style.display = "";
+  el.innerHTML = `<b style="color:var(--amber,#ffb454)">NOT READY —</b> ${esc(stat.hint || "")}`;
+}
+
+function renderDroidFindings(findings) {
+  const box = $("droid-findings");
+  if (!box) return;
+  const order = { high: 0, watch: 1, clear: 2 };
+  const rows = (findings || []).slice().sort(
+    (a, b) => (order[a.severity] ?? 3) - (order[b.severity] ?? 3));
+  box.innerHTML = rows.map(f => {
+    const s = _DROID_SEV[f.severity] || _DROID_SEV.clear;
+    const items = (f.items || []).length
+      ? `<div class="scroll" style="max-height:150px;margin-top:5px">` +
+        (f.items || []).map(i => `<div class="note" style="font-family:monospace">${esc(i)}</div>`).join("") +
+        `</div>` : "";
+    return `<div style="border-left:3px solid ${s.dot};padding:6px 0 6px 9px;margin:8px 0">
+      <div><b>${esc(f.title)}</b>
+        <span class="tag" style="color:${s.dot}">${s.label}</span></div>
+      <div class="note">${esc(f.detail || "")}</div>
+      ${items}
+      <div class="note" style="opacity:.85;margin-top:4px"><i>${esc(f.why || "")}</i></div>
+    </div>`;
+  }).join("");
+}
+
+function renderDroidApps(apps) {
+  const t = $("tbl-droid-apps");
+  if (!t) return;
+  const rows = (apps || []).filter(a => a.score > 0);
+  if (!rows.length) {
+    t.innerHTML = `<tr><td class="note">No third-party app holds any of the
+      mechanisms checked. That is not proof of a clean phone — a dormant app
+      shows nothing until it runs.</td></tr>`;
+    return;
+  }
+  t.innerHTML = `<tr><th>app</th><th>why it's here</th><th>permissions</th><th>rank</th></tr>` +
+    rows.map(a => {
+      const sev = a.score >= 6 ? "high" : (a.score >= 3 ? "watch" : "clear");
+      const c = _DROID_SEV[sev].dot;
+      return `<tr>
+        <td style="font-family:monospace">${esc(a.pkg)}
+          ${a.sideloaded ? `<span class="tag" style="color:${_DROID_SEV.watch.dot}">SIDELOADED</span>` : ""}</td>
+        <td class="note">${(a.stack || []).map(esc).join("<br>") || "—"}</td>
+        <td class="note">${(a.perms || []).map(esc).join(", ") || "—"}</td>
+        <td style="color:${c};font-weight:700">${a.score}</td>
+      </tr>`;
+    }).join("");
+}
+
+function renderDroidConns(conns) {
+  const t = $("tbl-droid-conns");
+  if (!t) return;
+  if (!(conns || []).length) {
+    t.innerHTML = `<tr><td class="note">No live endpoints readable — Android
+      restricts this to root on recent versions. Expected, and NOT a finding.</td></tr>`;
+    return;
+  }
+  t.innerHTML = `<tr><th>remote endpoint</th></tr>` +
+    conns.map(c => `<tr><td style="font-family:monospace">${esc(c)}</td></tr>`).join("");
+}
+
+async function loadDroid() {
+  try {
+    const stat = await api("/api/droid/status");
+    droidPre(stat);
+    $("droid-msg").textContent = stat.ready
+      ? `phone ready (${stat.serial || "attached"})`
+      : "";
+  } catch (e) { $("droid-msg").textContent = e.message; }
+}
+
+if ($("btn-droid-recheck")) $("btn-droid-recheck").onclick = loadDroid;
+
+if ($("btn-droid-scan")) $("btn-droid-scan").onclick = async () => {
+  const b = $("btn-droid-scan");
+  b.disabled = true;
+  $("droid-msg").textContent = "reading the phone (read-only)…";
+  try {
+    const r = await api("/api/droid/scan", {});
+    if (!r.ready) {
+      droidPre(r.status);
+      $("droid-msg").textContent = "not ready — see above";
+      $("droid-results").style.display = "none";
+    } else {
+      droidPre(r.status);
+      const p = r.phone || {};
+      $("droid-phone").textContent =
+        [p.brand, p.model].filter(Boolean).join(" ") || "phone";
+      const c = r.counts || {};
+      $("droid-counts").textContent =
+        `Android ${p.android || "?"} · patch ${p.patch || "?"} · ` +
+        `${c.third_party || 0} third-party apps, ${c.sideloaded || 0} sideloaded`;
+      renderDroidFindings(r.findings);
+      renderDroidApps(r.apps);
+      renderDroidConns(r.connections);
+      $("droid-limits").innerHTML = (r.limits || []).length
+        ? "<b>Limits of this read:</b> " + (r.limits || []).map(esc).join(" ")
+        : "";
+      $("droid-results").style.display = "";
+      const leads = (r.leads || []).length;
+      $("droid-msg").textContent = leads
+        ? `${leads} app(s) stack multiple mechanisms — start there`
+        : "no app stacked multiple mechanisms";
+    }
+  } catch (e) { $("droid-msg").textContent = "scan failed: " + e.message; }
+  b.disabled = false;
+};
 // LOCATE — direction-find the RF emission this network device also produces
 // (receive-only). Tunes the monitor to the correlated WiFi/BLE frequency so the
 // operator can walk signal strength to the physical device.
@@ -5144,8 +5995,8 @@ function dlNfSvg(kind) {
   return `<svg ${common}><rect x="20" y="16" width="32" height="24" rx="4" fill="none" stroke="#7b8794" stroke-width="2" stroke-dasharray="4 3"/><text x="36" y="52" text-anchor="middle" fill="#7b8794" font-size="9">other</text></svg>`;
 }
 
-function dlDrawSpectrum(spec) {
-  const c = $("dl-spec");
+function dlDrawSpectrum(spec, cid) {
+  const c = $(cid || "dl-spec");
   if (!c) return;
   const ctx = c.getContext("2d");
   const W = c.width, H = c.height;
@@ -5217,6 +6068,7 @@ async function loadDeviceLab() {
     fillSel($("dl-rxa-ant"), DevLab.meta.omni_antennas);
     fillSel($("dl-rxb-ant"), DevLab.meta.dir_antennas);
     fillSel($("dl-cap-nf"), DevLab.meta.near_field_antennas);
+    fillSel($("dl-tri-nf"), DevLab.meta.near_field_antennas);
     // NF gallery with diagrams
     const gal = $("dl-nf-gallery");
     if (gal && DevLab.meta.near_field_antennas) {
@@ -5272,46 +6124,69 @@ function devLabShowGuide(g) {
 
 function devLabShowStep(step) {
   document.querySelectorAll(".dl-step").forEach(el => { el.style.display = "none"; });
-  const map = {
+  step = step || "photo";
+  let id;
+  if (step === "capture_near_field") id = "dl-step-triage";
+  else if (step === "capture_ten_ft" || step === "capture_next_room" ||
+           step.startsWith("capture_stop:")) id = "dl-step-capture";
+  else id = ({
     photo: "dl-step-photo",
     identify: "dl-step-identify",
     antenna: "dl-step-antenna",
     freq_confirm: "dl-step-freq",
-    capture_ten_ft: "dl-step-capture",
-    capture_next_room: "dl-step-capture",
-    capture_near_field: "dl-step-capture",
+    states: "dl-step-states",
     stimulate: "dl-step-stim",
     demod: "dl-step-demod",
     ready_to_commit: "dl-step-commit",
     committed: "dl-step-commit",
-  };
-  const id = map[step] || "dl-step-photo";
+  })[step] || "dl-step-photo";
   if ($(id)) $(id).style.display = "";
-  if (step && step.startsWith("capture_")) {
-    const did = step.replace("capture_", "");
+  if (id === "dl-step-capture") {
+    const did = step.startsWith("capture_stop:")
+      ? step.slice("capture_stop:".length) : step.replace("capture_", "");
     const dist = (DevLab.meta && DevLab.meta.distances || []).find(d => d.id === did);
+    const stop = (DevLab.pkg && DevLab.pkg.stops || []).find(s => s.id === did);
     if ($("dl-cap-title"))
       $("dl-cap-title").textContent =
-        (did === "ten_ft" ? "5" : did === "next_room" ? "6" : "7") +
-        " · Capture @ " + (dist ? dist.label : did);
+        "Capture @ " + (dist ? dist.label : (stop ? stop.label : did));
     if ($("dl-cap-instr"))
       $("dl-cap-instr").textContent = dist ? dist.instruction :
-        "Position the DUT, then capture.";
+        (stop ? `Move the DUT to: ${stop.label}. Hold position until captured.`
+              : "Position the DUT, then capture.");
     if ($("dl-cap-go")) $("dl-cap-go").dataset.distance = did;
-    // default port: RXA omni for room, RXB or NF for near-field
-    const defPort = (dist && dist.default_port) || (did === "near_field" ? "RXB" : "RXA");
+    const defPort = (dist && dist.default_port) || "RXA";
     if ($("dl-cap-port")) $("dl-cap-port").value = defPort;
     if ($("dl-cap-nf-wrap"))
       $("dl-cap-nf-wrap").style.display = did === "near_field" ? "" : "none";
     // show last spectrum for this distance if any
     const prev = DevLab.pkg && DevLab.pkg.captures && DevLab.pkg.captures[did];
     if (prev) dlShowCaptureVisual(prev);
-    else {
+    else if (!DLLive.timer) {
       dlDrawSpectrum(null);
       if ($("dl-cap-status")) $("dl-cap-status").textContent = "Waiting for capture…";
       if ($("dl-snr-bar")) $("dl-snr-bar").style.width = "0%";
     }
+    if (DLLive.timer) DLLive.mode = "ladder";
   }
+  if (id === "dl-step-triage") {
+    if ($("dl-tri-nf") && DevLab.meta && DevLab.meta.near_field_antennas &&
+        !$("dl-tri-nf").options.length)
+      $("dl-tri-nf").innerHTML = DevLab.meta.near_field_antennas.map(a =>
+        `<option value="${esc(a.id)}">${esc(a.name)}</option>`).join("");
+    if ($("dl-tri-nf") && DevLab.pkg && DevLab.pkg.nf_antenna)
+      $("dl-tri-nf").value = DevLab.pkg.nf_antenna;
+    if ($("dl-tri-center") && DevLab.pkg && DevLab.pkg.center_mhz != null)
+      $("dl-tri-center").value = DevLab.pkg.center_mhz;
+    if (DevLab.stream && $("dl-tri-cam")) $("dl-tri-cam").srcObject = DevLab.stream;
+    if (DLLive.timer) DLLive.mode = "triage";
+  }
+  if (id === "dl-step-states") {
+    if (DevLab.pkg) dlRenderStates(DevLab.pkg);
+    if (DLLive.timer) DLLive.mode = "states";
+  }
+  // TX probe / demod / commit need the radio — stop the live loop
+  if ((id === "dl-step-stim" || id === "dl-step-demod" || id === "dl-step-commit")
+      && DLLive.timer) dlLiveStop();
 }
 
 function devLabRenderPkg(pkg, guide) {
@@ -5366,6 +6241,17 @@ function devLabRenderPkg(pkg, guide) {
     $("dl-log").innerHTML = (pkg.tech_log || []).slice().reverse().map(e =>
       `<div>${new Date((e.utc || 0) * 1000).toLocaleTimeString()} — ${esc(e.msg)}</div>`
     ).join("");
+  }
+  dlRenderLadder(pkg);
+  dlRenderIdent(pkg);
+  if ((pkg.step || "") === "states") dlRenderStates(pkg);
+  if (pkg.walk_test && $("dl-walk-verdict") && !$("dl-walk-verdict").innerHTML) {
+    const w = pkg.walk_test;
+    const good = w.verdict === "tracks_motion";
+    $("dl-walk-verdict").innerHTML =
+      `<b style="color:${good ? "var(--green)" : "var(--amber)"}">` +
+      `${esc((w.verdict || "").replace(/_/g, " ").toUpperCase())}</b> ` +
+      `r=${w.r ?? "—"} · swing ${w.swing_db ?? "—"} dB — ${esc(w.plain || "")}`;
   }
   if (pkg.status === "committed" && $("dl-commit-msg"))
     $("dl-commit-msg").textContent = "Ready to commit — package committed.";
@@ -5596,6 +6482,610 @@ if ($("dl-commit")) $("dl-commit").onclick = async () => {
   } catch (e) { if ($("dl-msg")) $("dl-msg").textContent = e.message; }
 };
 
+/* ---------- device lab LIVE loop (walk test, range ladder, states) ---------- */
+const DLLive = {
+  timer: null, mode: null, lastPhase: null, walkActive: false,
+  rec: null, recChunks: [], recT0: null, autoBusy: false, ac: null,
+};
+
+function dlMsg(t) { if ($("dl-msg")) $("dl-msg").textContent = t; }
+
+function dlVoiceOn() { return localStorage.getItem("dl_voice") !== "0"; }
+document.querySelectorAll(".dl-voice").forEach(cb => {
+  cb.checked = dlVoiceOn();
+  cb.onchange = () => {
+    localStorage.setItem("dl_voice", cb.checked ? "1" : "0");
+    document.querySelectorAll(".dl-voice").forEach(o => { o.checked = cb.checked; });
+  };
+});
+function dlSpeak(txt) {
+  if (!dlVoiceOn() || !window.speechSynthesis) return;
+  try {
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(txt);
+    u.rate = 1.05;
+    speechSynthesis.speak(u);
+  } catch (e) { /* voice is best-effort */ }
+}
+function dlChime(ok = true) {
+  try {
+    const ac = DLLive.ac || (DLLive.ac =
+      new (window.AudioContext || window.webkitAudioContext)());
+    const o = ac.createOscillator(), g = ac.createGain();
+    o.connect(g); g.connect(ac.destination);
+    o.frequency.value = ok ? 880 : 220;
+    g.gain.value = 0.08;
+    o.start(); o.stop(ac.currentTime + 0.18);
+  } catch (e) { /* no audio ctx */ }
+}
+
+function dlDrawTrace(cid, trace) {
+  const c = $(cid);
+  if (!c) return;
+  const ctx = c.getContext("2d");
+  const W = c.width, H = c.height;
+  ctx.fillStyle = "#0a0e14";
+  ctx.fillRect(0, 0, W, H);
+  const pts = (trace || []).filter(p => p && p[1] != null);
+  if (pts.length < 2) {
+    ctx.fillStyle = "#7b8794"; ctx.font = "11px monospace";
+    ctx.fillText("live power appears here", 12, H / 2);
+    return;
+  }
+  const ys = pts.map(p => p[1]);
+  const pmin = Math.min(...ys), pmax = Math.max(...ys);
+  const span = Math.max(4, pmax - pmin);
+  const t0 = pts[0][0], t1 = pts[pts.length - 1][0];
+  const tspan = Math.max(1, t1 - t0);
+  ctx.strokeStyle = "#2ecc71"; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  pts.forEach((p, i) => {
+    const x = ((p[0] - t0) / tspan) * (W - 8) + 4;
+    const y = H - 6 - ((p[1] - pmin) / span) * (H - 12);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+  ctx.fillStyle = "#cfd8e3"; ctx.font = "11px monospace";
+  const last = pts[pts.length - 1];
+  ctx.fillText(`peak ${last[1].toFixed(1)} dB` +
+    (last[2] != null ? `  SNR ${last[2].toFixed(1)} dB` : ""), 8, 12);
+}
+
+function dlRenderLadder(pkg) {
+  const el = $("dl-ladder");
+  if (!el || !pkg) return;
+  const base = [["near_field", "Near-field"], ["ten_ft", "10 ft"],
+                ["next_room", "Next room"]];
+  const all = base.concat((pkg.stops || []).map(s => [s.id, s.label]));
+  const cur = (pkg.step || "").startsWith("capture_stop:")
+    ? pkg.step.slice("capture_stop:".length)
+    : (pkg.step || "").replace("capture_", "");
+  el.innerHTML = all.map(([id, label]) => {
+    const cap = pkg.captures && pkg.captures[id];
+    const active = cur === id;
+    const snr = cap && cap.spectrum && cap.spectrum.snr_db;
+    return `<span class="pill ${cap ? "ok" : ""}"` +
+      `${active ? ' style="border:1px solid var(--cyan);color:var(--cyan)"' : ""}>` +
+      `${cap ? "✓ " : ""}${esc(label)}${snr != null ? ` · ${snr} dB` : ""}</span>`;
+  }).join(`<span class="note">→</span>`) +
+    `<span class="note">→</span><span class="pill">states</span>`;
+}
+
+function dlRenderIdent(pkg) {
+  const el = $("dl-ident");
+  if (!el || !pkg) return;
+  const idn = pkg.ident || {};
+  const color = { identified: "var(--green)", rf_confirmed: "var(--cyan)",
+                  visual_only: "var(--amber)" }[idn.status] || "var(--dim)";
+  let html = `<b style="color:${color}">` +
+    `${esc(idn.summary || "No evidence yet — go live and capture.")}</b>`;
+  if ((idn.visual || []).length)
+    html += `<div class="note" style="margin-top:4px">Visual: ` +
+      idn.visual.map(v => esc(v.name)).join(" · ") + `</div>`;
+  if ((idn.rf || []).length)
+    html += `<div class="note">RF: ` + idn.rf.slice(0, 3).map(v =>
+      `${esc(v.name)} (${v.seen}×)`).join(" · ") + `</div>`;
+  el.innerHTML = html;
+}
+
+function dlStatesFor(pkg) {
+  const cat = ((DevLab.meta && DevLab.meta.catalog) || [])
+    .find(c => c.id === pkg.device_type_id);
+  return (cat && cat.states) || [
+    { id: "idle", label: "Idle / at rest", instruction: "Power on, untouched." },
+    { id: "active", label: "In use", instruction: "Use the device normally." },
+    { id: "off", label: "Powered off", instruction: "Cut power — must go silent." },
+  ];
+}
+
+function dlRenderStates(pkg) {
+  const el = $("dl-states");
+  if (!el || !pkg) return;
+  const states = dlStatesFor(pkg);
+  const done = pkg.states || {};
+  const nextId = (states.find(s => !done[s.id]) || {}).id;
+  el.innerHTML = states.map(s => {
+    const d = done[s.id];
+    const active = s.id === nextId;
+    return `<div class="card" style="min-width:190px;flex:1` +
+      `${active ? ";border-color:var(--cyan)" : ""}">` +
+      `<b style="color:${d ? "var(--green)" : (active ? "var(--cyan)" : "var(--dim)")}">` +
+      `${d ? "✓ " : ""}${esc(s.label)}${active ? " — DO THIS NOW" : ""}</b>` +
+      `<p class="note">${esc(s.instruction)}</p>` +
+      (d ? `<p class="note">SNR ${(d.spectrum || {}).snr_db ?? "—"} dB · ` +
+           `${d.grabs || 0} grabs</p>`
+         : (active ? `<button class="btn primary" ` +
+                     `onclick="dlStateCapture('${esc(s.id)}')">⦿ CAPTURE STATE</button>` : "")) +
+      `</div>`;
+  }).join("");
+}
+
+window.dlStateCapture = async (id) => {
+  if (!DevLab.pkg) return;
+  try {
+    const r = await api(`/api/device_lab/${DevLab.pkg.id}/state_capture`,
+                        { state_id: id });
+    dlChime(true);
+    devLabRenderPkg(r.package, r.guide);
+    const states = dlStatesFor(r.package);
+    const nxt = states.find(s => !(r.package.states || {})[s.id]);
+    if (nxt) dlSpeak(`Captured. Next state: ${nxt.label}. ${nxt.instruction}`);
+    else dlSpeak("All states captured. Press states done.");
+  } catch (e) { dlMsg("State capture failed: " + e.message); }
+};
+
+function dlSetLiveButtons(on) {
+  [["dl-tri-live", "▶ GO LIVE"], ["dl-cap-live", "▶ GO LIVE (hands-free)"],
+   ["dl-st-live", "▶ GO LIVE"]].forEach(([id, label]) => {
+    if ($(id)) $(id).textContent = on ? "■ STOP LIVE" : label;
+  });
+}
+
+async function dlLiveStart(mode) {
+  if (!DevLab.pkg) return;
+  const body = {};
+  if (mode === "triage") {
+    body.rx_port = ($("dl-tri-port") && $("dl-tri-port").value) || "RXB";
+    const c = parseFloat($("dl-tri-center") && $("dl-tri-center").value);
+    if (c) body.center_mhz = c;
+  } else {
+    body.rx_port = ($("dl-cap-port") && $("dl-cap-port").value) || "RXA";
+    if (DevLab.pkg.center_mhz) body.center_mhz = DevLab.pkg.center_mhz;
+  }
+  try {
+    await api(`/api/device_lab/${DevLab.pkg.id}/live/start`, body);
+  } catch (e) {
+    dlMsg("Live start failed: " + e.message);
+    return;
+  }
+  DLLive.mode = mode;
+  clearInterval(DLLive.timer);
+  DLLive.timer = setInterval(dlLiveTick, 350);
+  dlSetLiveButtons(true);
+  if (mode === "triage")
+    dlSpeak("Live. Hold the probe within one foot of the device.");
+}
+
+async function dlLiveStop() {
+  clearInterval(DLLive.timer);
+  DLLive.timer = null;
+  dlSetLiveButtons(false);
+  if (DevLab.pkg) {
+    try { await api(`/api/device_lab/${DevLab.pkg.id}/live/stop`, {}); }
+    catch (e) { /* already stopped */ }
+  }
+}
+
+async function dlLiveTick() {
+  if (!DevLab.pkg) return dlLiveStop();
+  let s;
+  try { s = await api(`/api/device_lab/${DevLab.pkg.id}/live/state`); }
+  catch (e) { return; }
+  if (!s.running) {
+    if (s.error) { dlMsg("LIVE stopped: " + s.error); dlChime(false); }
+    clearInterval(DLLive.timer); DLLive.timer = null;
+    dlSetLiveButtons(false);
+    return;
+  }
+  const snrTxt = s.snr_now != null ? `SNR ${s.snr_now.toFixed(1)} dB` : "SNR —";
+  const barPct = Math.max(0, Math.min(100, ((s.snr_now || 0) / 40) * 100));
+  const barColor = (s.snr_now || 0) >= 6 ? "var(--green)"
+    : ((s.snr_now || 0) > 3 ? "var(--amber)" : "var(--red)");
+  if (DLLive.mode === "triage") {
+    if ($("dl-tri-status"))
+      $("dl-tri-status").textContent = s.scanning
+        ? `SCANNING… now ${fmtF(s.center_mhz)} — power the DUT / press its button`
+        : `LOCKED @ ${fmtF(s.center_mhz)} — energy ${((s.snr_now || 0) >= 6) ? "PRESENT" : "weak"}`;
+    if ($("dl-tri-snr")) $("dl-tri-snr").textContent = snrTxt;
+    if ($("dl-tri-gain")) $("dl-tri-gain").textContent = dlGainTxt(s);
+    dlHotBanner("dl-tri-hot", s);
+    if ($("dl-tri-bar")) {
+      $("dl-tri-bar").style.width = barPct + "%";
+      $("dl-tri-bar").style.background = barColor;
+    }
+    if ($("dl-tri-center") && !s.scanning && s.center_mhz &&
+        document.activeElement !== $("dl-tri-center"))
+      $("dl-tri-center").value = s.center_mhz;
+    dlDrawTrace("dl-tri-trace", s.trace);
+    if (s.peakhold) dlDrawSpectrum(s.peakhold, "dl-tri-spec");
+    const w = s.walk;
+    if (w && w.active) {
+      if ($("dl-walk-phase")) {
+        $("dl-walk-phase").style.display = "";
+        $("dl-walk-phase").textContent =
+          w.phase === "in" ? "⬅ MOVE IN (toward probe)" : "➡ MOVE OUT (away)";
+        $("dl-walk-phase").style.color =
+          w.phase === "in" ? "var(--cyan)" : "var(--amber)";
+      }
+      if (w.phase !== DLLive.lastPhase) {
+        DLLive.lastPhase = w.phase;
+        dlSpeak(w.phase === "in" ? "Move in." : "Move out.");
+      }
+      if (w.elapsed_s >= w.period_s * 3) dlWalkFinish();
+    }
+  } else if (DLLive.mode === "ladder") {
+    if ($("dl-cap-status")) {
+      $("dl-cap-status").textContent =
+        `LIVE @ ${fmtF(s.center_mhz)} — peak-hold accumulating (${s.grabs} grabs)`;
+      $("dl-cap-status").style.color = barColor;
+    }
+    if ($("dl-cap-snr")) $("dl-cap-snr").textContent = snrTxt;
+    if ($("dl-cap-gain")) $("dl-cap-gain").textContent = dlGainTxt(s);
+    dlHotBanner("dl-cap-hot", s);
+    if ($("dl-snr-bar")) {
+      $("dl-snr-bar").style.width = barPct + "%";
+      $("dl-snr-bar").style.background = barColor;
+    }
+    dlDrawTrace("dl-cap-trace", s.trace);
+    if (s.peakhold) dlDrawSpectrum(s.peakhold);
+    if ($("dl-cap-stable"))
+      $("dl-cap-stable").textContent =
+        s.stable_s >= 1 ? `steady ${s.stable_s.toFixed(0)} s` : "";
+    const auto = $("dl-cap-auto") && $("dl-cap-auto").checked;
+    if (auto && s.stable_s >= 3 && !DLLive.autoBusy) {
+      DLLive.autoBusy = true;
+      dlAutoCapture().finally(() => { DLLive.autoBusy = false; });
+    }
+  } else if (DLLive.mode === "states") {
+    if ($("dl-st-snr")) $("dl-st-snr").textContent =
+      `${snrTxt} · ${s.grabs} grabs accumulated`;
+    dlDrawTrace("dl-st-trace", s.trace);
+  }
+}
+
+async function dlAutoCapture() {
+  if (!DevLab.pkg) return;
+  const distance_id = ($("dl-cap-go") && $("dl-cap-go").dataset.distance) || "";
+  if (!distance_id || (DevLab.pkg.captures || {})[distance_id]) return;
+  try {
+    const r = await api(`/api/device_lab/${DevLab.pkg.id}/capture`, {
+      distance_id,
+      rx_port: ($("dl-cap-port") && $("dl-cap-port").value) || "RXA",
+      notes: ($("dl-cap-notes") && $("dl-cap-notes").value) || "",
+      center_mhz: DevLab.pkg.center_mhz,
+    });
+    dlChime(true);
+    devLabRenderPkg(r.package, r.guide);
+    dlShowCaptureVisual(r.capture);
+    dlAnnounce(r.guide);
+  } catch (e) { dlMsg("Auto-capture failed: " + e.message); }
+}
+
+function dlAnnounce(guide) {
+  if (!guide) return;
+  const first = (guide.do || [])[0] || "";
+  dlSpeak(`Captured. ${guide.title}. ${first}`);
+  dlMsg(`${guide.title} — ${first}`);
+}
+
+async function dlWalkStart() {
+  if (!DLLive.timer || DLLive.mode !== "triage") {
+    dlMsg("GO LIVE first — the walk test reads the live power trace.");
+    return;
+  }
+  if (!DevLab.stream) {
+    try {
+      DevLab.stream = await navigator.mediaDevices.getUserMedia(
+        { video: { facingMode: "environment" }, audio: false });
+    } catch (e) { /* camera optional — RF correlation still works */ }
+  }
+  if (DevLab.stream && $("dl-tri-cam")) $("dl-tri-cam").srcObject = DevLab.stream;
+  DLLive.recChunks = [];
+  DLLive.rec = null;
+  if (DevLab.stream && window.MediaRecorder) {
+    try { DLLive.rec = new MediaRecorder(DevLab.stream, { mimeType: "video/webm" }); }
+    catch (e) {
+      try { DLLive.rec = new MediaRecorder(DevLab.stream); } catch (e2) { /* none */ }
+    }
+    if (DLLive.rec) {
+      DLLive.rec.ondataavailable = ev => {
+        if (ev.data && ev.data.size) DLLive.recChunks.push(ev.data);
+      };
+      DLLive.rec.start(1000);
+      DLLive.recT0 = Date.now() / 1000;
+    }
+  }
+  try {
+    await api(`/api/device_lab/${DevLab.pkg.id}/live/walk`, { period_s: 8 });
+  } catch (e) { dlMsg("Walk start failed: " + e.message); return; }
+  DLLive.walkActive = true;
+  DLLive.lastPhase = null;
+  if ($("dl-walk-verdict")) $("dl-walk-verdict").innerHTML = "";
+  if ($("dl-walk-go")) $("dl-walk-go").textContent = "■ FINISH WALK";
+  dlSpeak("Walk test. Three laps. Move the device toward the probe.");
+}
+
+async function dlWalkFinish() {
+  if (!DLLive.walkActive) return;
+  DLLive.walkActive = false;
+  if ($("dl-walk-phase")) $("dl-walk-phase").style.display = "none";
+  if ($("dl-walk-go")) $("dl-walk-go").textContent = "🚶 START WALK TEST";
+  let r = null;
+  try {
+    r = await api(`/api/device_lab/${DevLab.pkg.id}/live/walk`, { stop: true });
+  } catch (e) { dlMsg("Walk scoring failed: " + e.message); }
+  if (DLLive.rec && DLLive.rec.state !== "inactive") {
+    await new Promise(res => { DLLive.rec.onstop = res; DLLive.rec.stop(); });
+    const blob = new Blob(DLLive.recChunks, { type: "video/webm" });
+    if (blob.size > 1000 && blob.size < 60e6) {
+      const dataUrl = await new Promise(res => {
+        const rd = new FileReader();
+        rd.onload = () => res(rd.result);
+        rd.readAsDataURL(blob);
+      });
+      try {
+        await api(`/api/device_lab/${DevLab.pkg.id}/video`, {
+          video: dataUrl, t0_utc: DLLive.recT0,
+          duration_s: Date.now() / 1000 - DLLive.recT0, label: "walk_test",
+        });
+      } catch (e) { dlMsg("Video upload failed (RF verdict still saved): " + e.message); }
+    }
+  }
+  if (r) {
+    devLabRenderPkg(r.package, r.guide);
+    const w = r.walk || {};
+    const good = w.verdict === "tracks_motion";
+    if ($("dl-walk-verdict"))
+      $("dl-walk-verdict").innerHTML =
+        `<b style="color:${good ? "var(--green)" : "var(--amber)"}">` +
+        `${esc((w.verdict || "").replace(/_/g, " ").toUpperCase())}</b> ` +
+        `r=${w.r ?? "—"} · swing ${w.swing_db ?? "—"} dB — ${esc(w.plain || "")}`;
+    dlChime(good);
+    dlSpeak(good
+      ? "Confirmed. The emission is coming from this device. Record near field, then back away to ten feet."
+      : "Walk test inconclusive. Repeat it slower and closer to the probe.");
+  }
+}
+
+if ($("dl-tri-live")) $("dl-tri-live").onclick = () =>
+  DLLive.timer ? dlLiveStop() : dlLiveStart("triage");
+if ($("dl-cap-live")) $("dl-cap-live").onclick = () =>
+  DLLive.timer ? dlLiveStop() : dlLiveStart("ladder");
+if ($("dl-st-live")) $("dl-st-live").onclick = () =>
+  DLLive.timer ? dlLiveStop() : dlLiveStart("states");
+if ($("dl-walk-go")) $("dl-walk-go").onclick = () =>
+  DLLive.walkActive ? dlWalkFinish() : dlWalkStart();
+
+if ($("dl-tri-retune")) $("dl-tri-retune").onclick = async () => {
+  if (!DevLab.pkg) return;
+  const c = parseFloat($("dl-tri-center") && $("dl-tri-center").value);
+  if (!c) { dlMsg("Enter a center frequency first."); return; }
+  try {
+    await api(`/api/device_lab/${DevLab.pkg.id}/freq`,
+              { center_mhz: c, stay: true });
+    if (DLLive.timer)
+      await api(`/api/device_lab/${DevLab.pkg.id}/live/retune`, { center_mhz: c });
+    DevLab.pkg.center_mhz = c;
+    dlMsg(`Tuned to ${fmtF(c)}.`);
+  } catch (e) { dlMsg("Retune failed: " + e.message); }
+};
+
+if ($("dl-tri-next")) $("dl-tri-next").onclick = async () => {
+  if (!DevLab.pkg) return;
+  try {
+    const r = await api(`/api/device_lab/${DevLab.pkg.id}/capture`, {
+      distance_id: "near_field",
+      rx_port: ($("dl-tri-port") && $("dl-tri-port").value) || "RXB",
+      antenna_id: ($("dl-tri-nf") && $("dl-tri-nf").value) || "hfield_loop",
+      notes: ($("dl-tri-notes") && $("dl-tri-notes").value) || "",
+      center_mhz: DevLab.pkg.center_mhz,
+    });
+    dlChime(true);
+    devLabRenderPkg(r.package, r.guide);
+    dlShowCaptureVisual(r.capture);
+    dlAnnounce(r.guide);
+    // omni is on RXA for the range ladder — restart the loop on the new port
+    if (DLLive.timer) await dlLiveStart("ladder");
+  } catch (e) { dlMsg("Near-field record failed: " + e.message); }
+};
+
+if ($("dl-stop-add")) $("dl-stop-add").onclick = async () => {
+  if (!DevLab.pkg) return;
+  const label = ($("dl-stop-label") && $("dl-stop-label").value) || "";
+  if (!label.trim()) { dlMsg("Name the stop first (e.g. down the hall)."); return; }
+  try {
+    const r = await api(`/api/device_lab/${DevLab.pkg.id}/stops`, { label });
+    $("dl-stop-label").value = "";
+    devLabRenderPkg(r.package, r.guide);
+  } catch (e) { dlMsg(e.message); }
+};
+
+if ($("dl-st-done")) $("dl-st-done").onclick = async () => {
+  if (!DevLab.pkg) return;
+  try {
+    await dlLiveStop();
+    const r = await api(`/api/device_lab/${DevLab.pkg.id}/state_capture`,
+                        { done: true });
+    devLabRenderPkg(r.package, r.guide);
+  } catch (e) { dlMsg(e.message); }
+};
+
+/* ---- overload protection UI (attenuator pad) ---- */
+function dlGainTxt(s) {
+  if (s.gain_db == null) return "";
+  const pad = DevLab.pkg && DevLab.pkg.pad_db;
+  return `gain ${s.gain_db} dB` + (pad ? ` · pad ${pad} dB` : "") +
+    (s.clipping && !s.needs_pad ? " · backing off…" : "");
+}
+function dlHotBanner(id, s) {
+  const el = $(id);
+  if (!el) return;
+  const hot = !!s.needs_pad;
+  el.style.display = hot ? "" : "none";
+  if (hot && !DLLive.warnedHot) {
+    DLLive.warnedHot = true;
+    dlChime(false);
+    dlSpeak("Too hot. Front end is clipping at minimum gain. " +
+            "Fit the attenuator pad on the probe line.");
+  }
+  if (!hot) DLLive.warnedHot = false;
+}
+if ($("dl-pad-set")) $("dl-pad-set").onclick = async () => {
+  if (!DevLab.pkg) return;
+  const db = parseFloat($("dl-pad-db") && $("dl-pad-db").value) || 0;
+  try {
+    const r = await api(`/api/device_lab/${DevLab.pkg.id}/pad`, { db });
+    DevLab.pkg = r.package;
+    if ($("dl-pad-cur")) $("dl-pad-cur").textContent = `pad logged: ${db} dB`;
+    dlMsg(`Pad logged: ${db} dB inline — levels recorded with it.`);
+  } catch (e) { dlMsg(e.message); }
+};
+
+/* ---- WIDE FIND: off/on differential hunt (no guess list) ---- */
+const DLWf = { timer: null, lastPhase: null };
+
+async function dlWfStart() {
+  if (!DevLab.pkg) return;
+  if (DLLive.timer) await dlLiveStop();  // wide find owns the radio
+  const span = ($("dl-wf-span") && $("dl-wf-span").value) || "subghz";
+  try {
+    await api(`/api/device_lab/${DevLab.pkg.id}/wide_find/start`,
+              { span, rx_port: ($("dl-tri-port") && $("dl-tri-port").value) || "RXB" });
+  } catch (e) { dlMsg("Wide find failed: " + e.message); return; }
+  if ($("dl-wf-panel")) $("dl-wf-panel").style.display = "";
+  if ($("dl-wf-stop")) $("dl-wf-stop").style.display = "";
+  if ($("dl-wf-results")) $("dl-wf-results").innerHTML = "";
+  DLWf.lastPhase = null;
+  clearInterval(DLWf.timer);
+  DLWf.timer = setInterval(dlWfTick, 700);
+  dlSpeak("Wide find. Keep the device powered off for pass one.");
+}
+
+function dlWfEnd(hidePanel) {
+  clearInterval(DLWf.timer);
+  DLWf.timer = null;
+  if ($("dl-wf-stop")) $("dl-wf-stop").style.display = "none";
+  if ($("dl-wf-await")) $("dl-wf-await").style.display = "none";
+  if (hidePanel !== false && $("dl-wf-panel"))
+    $("dl-wf-panel").style.display = "none";
+}
+
+async function dlWfTick() {
+  if (!DevLab.pkg) return dlWfEnd();
+  let s;
+  try { s = await api(`/api/device_lab/${DevLab.pkg.id}/wide_find/state`); }
+  catch (e) { return; }
+  // WRITTEN instructions come from the server so the words the operator reads
+  // are the same words the state machine is acting on — a spoken prompt alone
+  // is useless if you missed it, and the old phase labels never said what to DO.
+  if ($("dl-wf-phase"))
+    $("dl-wf-phase").textContent = s.title || (s.error ? "ERROR" : "—");
+  if ($("dl-wf-instruction"))
+    $("dl-wf-instruction").textContent = s.instruction || "";
+  if ($("dl-wf-cur"))
+    $("dl-wf-cur").textContent = s.current_mhz
+      ? `${fmtF(s.current_mhz)} · ${Math.round((s.progress || 0) * 100)}%` +
+        (s.clip_steps ? ` · ⚠ clipped at ${s.clip_steps} steps` : "")
+      : "";
+  if ($("dl-wf-bar"))
+    $("dl-wf-bar").style.width = Math.round((s.progress || 0) * 100) + "%";
+  // the advance button is shown at EVERY gate, labelled with what it will do
+  if ($("dl-wf-await"))
+    $("dl-wf-await").style.display = s.awaiting_operator ? "" : "none";
+  if ($("dl-wf-continue") && s.action_label)
+    $("dl-wf-continue").textContent = s.action_label;
+  const pb = $("dl-wf-pause");
+  if (pb) {
+    pb.style.display = (s.phase === "pass_off" || s.phase === "pass_on") ? "" : "none";
+    pb.textContent = s.paused ? "▶ RESUME" : "⏸ PAUSE";
+  }
+  if (s.phase !== DLWf.lastPhase) {
+    DLWf.lastPhase = s.phase;
+    if (s.phase === "await_off") {
+      dlChime(true);
+      dlSpeak("Power the device fully off. Take your time, then press the button.");
+    }
+    if (s.phase === "await_on") {
+      dlChime(true);
+      dlSpeak("Baseline done. Power the device on and let it finish starting up, "
+              + "then press the button.");
+    }
+    if (s.phase === "pass_on") dlSpeak("Pass two running. Leave the device on.");
+  }
+  if (s.error) { dlMsg("Wide find: " + s.error); dlChime(false); dlWfEnd(false); return; }
+  if (s.phase === "done") { dlWfRender(s.candidates || []); dlWfEnd(false); }
+}
+
+function dlWfRender(cands) {
+  const el = $("dl-wf-results");
+  if (!el) return;
+  if (!cands.length) {
+    el.innerHTML = "<p class='note'>No new energy in the ON pass — DUT silent " +
+      "in this span (try another span, or it may be receive-only/wired).</p>";
+    dlSpeak("No new emissions found in this span.");
+    return;
+  }
+  el.innerHTML = "<p class='note'><b>New energy with the DUT on:</b></p>" +
+    cands.map(c =>
+      `<div class="row" style="gap:8px;align-items:center;margin:2px 0">` +
+      `<span class="pill ${c.fundamental ? "ok" : ""}">${fmtF(c.freq_mhz)}</span>` +
+      `<span class="note">Δ${c.delta_db} dB · bw ~${c.bw_khz} kHz` +
+      (c.harmonic_of_mhz
+        ? ` · ${c.n}× harmonic of ${fmtF(c.harmonic_of_mhz)}`
+        : ` · FUNDAMENTAL`) + `</span>` +
+      `<button class="btn" onclick="dlWfUse(${c.freq_mhz})">USE</button></div>`
+    ).join("");
+  const f = cands.find(c => c.fundamental) || cands[0];
+  dlSpeak(`Found ${cands.length} emissions. Strongest fundamental at ` +
+          `${f.freq_mhz.toFixed(2)} megahertz.`);
+}
+
+window.dlWfUse = async (freq) => {
+  if (!DevLab.pkg) return;
+  try {
+    const r = await api(`/api/device_lab/${DevLab.pkg.id}/wide_find/adopt`,
+                        { freq_mhz: freq });
+    DevLab.pkg = r.package;
+    if ($("dl-tri-center")) $("dl-tri-center").value = freq;
+    dlMsg(`Locked ${fmtF(freq)} from wide find — going live to verify.`);
+    await dlLiveStart("triage");
+  } catch (e) { dlMsg(e.message); }
+};
+
+if ($("dl-wf-go")) $("dl-wf-go").onclick = dlWfStart;
+// PAUSE holds the sweep and keeps everything measured so far. STOP is the
+// destructive one — it was previously the only control, so a tech who needed a
+// moment had to throw the run away and start over from the baseline.
+if ($("dl-wf-pause")) $("dl-wf-pause").onclick = async () => {
+  if (!DevLab.pkg) return;
+  const resume = $("dl-wf-pause").textContent.indexOf("RESUME") >= 0;
+  try {
+    await api(`/api/device_lab/${DevLab.pkg.id}/wide_find/pause`, { resume });
+  } catch (e) { /* poll will re-sync the button */ }
+};
+if ($("dl-wf-stop")) $("dl-wf-stop").onclick = async () => {
+  if (DevLab.pkg) {
+    try { await api(`/api/device_lab/${DevLab.pkg.id}/wide_find/stop`, {}); }
+    catch (e) { /* already gone */ }
+  }
+  dlWfEnd();
+};
+if ($("dl-wf-continue")) $("dl-wf-continue").onclick = async () => {
+  if (!DevLab.pkg) return;
+  try { await api(`/api/device_lab/${DevLab.pkg.id}/wide_find/continue`, {}); }
+  catch (e) { dlMsg(e.message); }
+};
+
 initWakeLock();
 poll();
 // deep-link support: localhost:8765/#wiki opens the library directly —
@@ -5603,8 +7093,71 @@ poll();
 // always go through show() — the session view's loaders (engagement form,
 // case files, tasks) must run on a plain boot too, or the pre-sweep button
 // saves a blank form over the real engagement
-const bootView = location.hash.replace("#", "") || "session";
-show(bootView);
+// COLD BOOT ALWAYS LANDS ON RECENT SWEEPS (operator ask 2026-07-26).
+// This used to restore the last view from the URL hash, so reopening the app
+// dropped the operator straight back into a finished sweep with its hits still
+// on screen — indistinguishable from the job in progress. In-session
+// navigation (clicks, hashchange below) is unaffected.
+show("recent");
+const rr = $("btn-recent-refresh");
+if (rr) rr.onclick = () => loadRecentSweeps(App.viewingSessionId, "refreshed");
+const bbs = $("btn-back-sessions");
+if (bbs) bbs.onclick = () => showSessionsPane();
+
+// Retag FIELD <-> LAB. Every pre-existing session was backfilled to FIELD, so
+// bench work recorded before this existed stays client-report eligible until
+// it is marked here.
+const tkb = $("btn-toggle-kind");
+if (tkb) tkb.onclick = async () => {
+  const id = App.viewingSessionId;
+  if (!id) return;
+  const next = App.viewingSessionKind === "lab" ? "field" : "lab";
+  try {
+    await api("/api/session/kind", { id, kind: next });
+  } catch (e) {
+    if ($("recent-msg")) $("recent-msg").textContent = "could not retag: " + e.message;
+    return;
+  }
+  loadRecentSweeps(id, next === "lab"
+    ? "marked LAB / BENCH — no client report, never pushed to the portal"
+    : "marked FIELD — client work, report eligible");
+};
+
+// Reviewing a session must never silently redirect new work into it: becoming
+// the active session is explicit.
+const asb = $("btn-activate-session");
+if (asb) asb.onclick = async () => {
+  const id = App.viewingSessionId;
+  if (!id) return;
+  try {
+    await api("/api/session/open", { id });
+  } catch (e) {
+    if ($("recent-msg")) $("recent-msg").textContent = "could not activate: " + e.message;
+    return;
+  }
+  // the previous engagement's detections must not follow us into this one
+  App.openSessionId = id;
+  App.liveSweepSignals = [];
+  App._lastFinishedSweepId = null;
+  App._sweepSeenThisSession = false;
+  App._ledgerKey = null;
+  renderLiveLedger();
+  loadRecentSweeps(id, `session #${id} is now active — new sweeps record here`);
+};
+// + NEW SESSION lives on the landing view because that is where the operator
+// realises they are still in the PREVIOUS client's session. Creating one needs
+// an address (it geocodes), so this jumps to that form with it focused.
+const nsb = $("btn-new-session");
+if (nsb) nsb.onclick = () => {
+  show("session");
+  const grp = $("sess-site");
+  if (grp && grp.tagName === "DETAILS" && !grp.open) grp.open = true;
+  const addr = $("in-address");
+  if (addr) {
+    addr.scrollIntoView({ block: "center", behavior: "smooth" });
+    addr.focus();
+  }
+};
 window.addEventListener("hashchange", () => {
   const v = location.hash.replace("#", "") || "session";
   if (!document.getElementById("view-" + v).classList.contains("active")) show(v);

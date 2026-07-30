@@ -16,3 +16,9 @@ marketing/netlify_build/
 # Claude Code session/editor state — local only
 .claude/
 config.yaml.*
+# Local pre-change snapshots of the whole app (e.g. _post_sweep_backup_*,
+# _history_editor_backup_*). They are point-in-time copies of source that git
+# already versions, they carry their own copies of client data/, and one is
+# 540 MB. Never publish them.
+_*_backup_*/
+*_backup_20*/

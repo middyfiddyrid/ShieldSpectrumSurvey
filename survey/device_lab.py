@@ -133,6 +133,25 @@ DEVICE_CATALOG: list[dict[str, Any]] = [
         "notes": "Scan Wi-Fi inventory for BSSID/SSID/OUI.",
     },
     {
+        # A phone was previously falling through to unknown_box, whose first
+        # guess is 433.92 — a band no phone transmits on. Cellular is roughly
+        # 600 MHz-2.6 GHz, Wi-Fi 2.4/5/6 GHz, Bluetooth 2.4 GHz, UWB ~6.5-8 GHz,
+        # NFC 13.56 MHz. 433 is keyfob / TPMS / sensor territory.
+        "id": "smartphone",
+        "labels": ["iphone", "phone", "smartphone", "android", "cell phone",
+                   "cellphone", "mobile", "handset", "ipad", "tablet"],
+        "name": "Smartphone / tablet (cellular + Wi-Fi + BT)",
+        "freq_guess_mhz": [1900.0, 700.0, 850.0, 2100.0, 2437.0, 2412.0, 5180.0],
+        "bw_khz_typical": 20000,
+        "bands": "LTE/5G 600–2600 · Wi-Fi 2.4/5/6 · BT 2.4 · UWB 6.5–8 GHz",
+        "modulation": "ofdm / qpsk (cellular), ofdm (Wi-Fi), gfsk (BT)",
+        "notes": "A phone transmits in BURSTS, not continuously — exercise it "
+                 "(place a call, start a video upload) to make it talk. It does "
+                 "NOT transmit on 433 MHz; energy there is something else in "
+                 "the room (TPMS, keyfob, weather station) or a near-field "
+                 "overload artefact.",
+    },
+    {
         "id": "unknown_box",
         "labels": ["unknown", "box", "device", "gadget", "bug", "transmitter"],
         "name": "Unknown / generic transmitter",
@@ -230,22 +249,90 @@ ANTENNA_TYPES = (
 )
 
 DISTANCES = (
-    {"id": "ten_ft", "label": "10 feet",
-     "default_port": "RXA", "default_mode": "omni",
-     "instruction":
-     "Place the DUT about 10 feet (3 m) from the OMNI on Libre RXA. Same room, "
-     "line-of-sight if possible. Keep antenna upright; do not re-aim between presses."},
-    {"id": "next_room", "label": "Next room over",
-     "default_port": "RXA", "default_mode": "omni",
-     "instruction":
-     "Move so at least one wall is between the DUT and the OMNI on Libre RXA. "
-     "Optional: also take a bearing with Libre RXB (directional) and note peak heading."},
     {"id": "near_field", "label": "Near-field (≤ 1 foot)",
      "default_port": "RXB", "default_mode": "near_field",
      "instruction":
-     "Assign a near-field probe (loop / stub / clamp / …) on the chosen port. "
-     "Bring the probe within ~1 foot (30 cm) of the DUT. For remotes, press/activate now."},
+     "Assign a near-field probe (loop / stub / clamp / …). Hold it within ~1 foot "
+     "(30 cm) of the DUT and power the DUT on; for remotes, press during the sweep. "
+     "The live view scans the guess frequencies until energy appears."},
+    {"id": "ten_ft", "label": "10 feet",
+     "default_port": "RXA", "default_mode": "omni",
+     "instruction":
+     "Back away: place the DUT about 10 feet (3 m) from the OMNI on Libre RXA. "
+     "Same room, line-of-sight if possible. Keep the antenna upright and hold "
+     "position until the app confirms the capture."},
+    {"id": "next_room", "label": "Next room over",
+     "default_port": "RXA", "default_mode": "omni",
+     "instruction":
+     "Move the DUT so at least one wall separates it from the OMNI on Libre RXA. "
+     "Optional: also take a bearing with Libre RXB (directional) and note peak heading."},
 )
+
+# ---------------------------------------------------------------------------
+# DUT exercise states — capture the signature in each operating mode so a
+# later sweep can match "camera in record mode", and the powered-off capture
+# proves silence (attribution). Keyed by catalog id; DEFAULT for the rest.
+# ---------------------------------------------------------------------------
+
+EXERCISE_STATES: dict[str, list[dict]] = {
+    "wifi_camera": [
+        {"id": "standby", "label": "Standby / idle",
+         "instruction": "Power on, nobody watching. Expect light keepalive bursts."},
+        {"id": "record", "label": "Record mode",
+         "instruction": "Start recording (or trip its motion trigger). Cloud cams "
+                        "upload — expect heavier, steadier bursts."},
+        {"id": "stream", "label": "Live view / stream",
+         "instruction": "Open the live view in its app. Expect continuous wideband uplink."},
+        {"id": "off", "label": "Powered off",
+         "instruction": "Cut power / pull battery. Expect silence — proves the RF was this DUT."},
+    ],
+    "analog_av": [
+        {"id": "on", "label": "Powered on",
+         "instruction": "Power on. Analog senders carry a near-continuous wide carrier."},
+        {"id": "off", "label": "Powered off",
+         "instruction": "Cut power. Carrier must vanish — proves attribution."},
+    ],
+    "keyfob_315": [
+        {"id": "idle", "label": "Idle",
+         "instruction": "Leave it untouched. Most fobs are silent at rest."},
+        {"id": "press", "label": "Button press",
+         "instruction": "Press each button a few times near the probe. Peak-hold keeps the bursts."},
+        {"id": "hold", "label": "Press and hold",
+         "instruction": "Hold a button ~3 s. Some fobs repeat; some send once."},
+    ],
+    "ble_tracker": [
+        {"id": "idle", "label": "Advertising",
+         "instruction": "Leave it still. Expect periodic BLE advertising bursts."},
+        {"id": "ring", "label": "Ring / locate",
+         "instruction": "Trigger 'play sound' from its app if paired. Activity rises."},
+        {"id": "off", "label": "Battery out",
+         "instruction": "Pull the battery. Bursts must stop."},
+    ],
+    "cellular_modem": [
+        {"id": "idle", "label": "Idle / registered",
+         "instruction": "Screen off, registered. Expect sparse registration bursts."},
+        {"id": "active", "label": "Active call / data",
+         "instruction": "Start a call or speed test. Uplink activity jumps."},
+        {"id": "airplane", "label": "Airplane mode",
+         "instruction": "Airplane mode ON. Uplink must go silent — proves attribution."},
+    ],
+}
+
+DEFAULT_STATES: list[dict] = [
+    {"id": "idle", "label": "Idle / at rest",
+     "instruction": "Power on, leave it untouched. Baseline behavior."},
+    {"id": "active", "label": "In use / activated",
+     "instruction": "Use the device the way it is meant to be used (press, talk, "
+                    "trigger, stream). Watch for the change."},
+    {"id": "off", "label": "Powered off",
+     "instruction": "Cut power. Silence here proves the RF was this DUT."},
+]
+
+
+def exercise_states_for(catalog_id: str) -> list[dict]:
+    if catalog_id == "keyfob_433":
+        return EXERCISE_STATES["keyfob_315"]
+    return EXERCISE_STATES.get(catalog_id or "", DEFAULT_STATES)
 
 
 def port_to_side(port_id: str) -> str:
@@ -359,6 +446,11 @@ def new_package(radio: dict, session_id: int | None = None) -> dict:
         "freq_guesses_mhz": [],
         "freq_confirmed": False,
         "captures": {},  # distance_id -> {peak_dbm, features, spectrum_note, utc}
+        "stops": [],     # extra range-ladder stops beyond the built-in three
+        "states": {},    # state_id -> capture-like record (DUT exercise matrix)
+        "walk_test": None,   # near-field motion-correlation result
+        "videos": [],    # walk-test recordings synced to the RF clock
+        "ident": {},     # fused visual+RF identification (fuse_ident)
         "stimulate": None,
         "demod": None,
         "commit_notes": "",
@@ -476,24 +568,40 @@ def next_instruction(pkg: dict) -> dict:
             ],
             "why": "Captures tune here; spectrum display proves energy.",
         },
-        "capture_ten_ft": {
-            "title": "5 · Capture @ 10 feet (Libre RXA / omni)",
+        "capture_near_field": {
+            "title": "4 · Near-field — find it, then prove it",
             "do": [DISTANCES[0]["instruction"],
-                   "Watch the spectrum graph — a real peak means capture is working."],
-            "why": "Same-room omni reference.",
+                   "GO LIVE — the app scans the guess frequencies and locks when "
+                   "energy appears. Correct the center if you know better.",
+                   "Then run the WALK TEST: camera records while you sweep the DUT "
+                   "toward and away from the probe on the spoken cadence. Power "
+                   "tracking your motion = the emission IS this device."],
+            "why": "Loudest view for freq lock + signature; motion correlation "
+                   "proves attribution before you spend time on range stops.",
+        },
+        "capture_ten_ft": {
+            "title": "5 · Back away to 10 feet (Libre RXA / omni)",
+            "do": [DISTANCES[1]["instruction"],
+                   "Auto-capture fires when the reading holds steady — listen for "
+                   "the voice prompt, then move on."],
+            "why": "Same-room omni reference for the range profile.",
         },
         "capture_next_room": {
-            "title": "6 · Capture @ next room (Libre RXA / omni)",
-            "do": [DISTANCES[1]["instruction"],
-                   "Compare SNR bars to the 10 ft capture."],
-            "why": "Through-wall attenuation.",
-        },
-        "capture_near_field": {
-            "title": "7 · Near-field — assign NF probe",
+            "title": "6 · Go to the next room (Libre RXA / omni)",
             "do": [DISTANCES[2]["instruction"],
-                   "Select the near-field antenna type (pics below), then capture.",
-                   "Spectrum should jump if the probe is live."],
-            "why": "Strongest signature for ID/demod.",
+                   "Compare SNR to the 10 ft stop; add more stops (hallway, "
+                   "outside) if the client site calls for it."],
+            "why": "Through-wall attenuation completes the range profile.",
+        },
+        "states": {
+            "title": "7 · Exercise the device — capture each state",
+            "do": [
+                "Follow the state cards: idle, in use, powered off (per device class).",
+                "Change the DUT state when told, hold it there until captured.",
+                "The powered-off capture must go silent — that closes attribution.",
+            ],
+            "why": "A real sweep can then match 'camera in record mode', not just "
+                   "'2.4 GHz wideband'.",
         },
         "stimulate": {
             "title": "8 · Optional TX interaction (ISM only)",
@@ -527,17 +635,182 @@ def next_instruction(pkg: dict) -> dict:
             "why": "",
         },
     }
-    g = guides.get(step, guides["photo"])
+    if step.startswith("capture_stop:"):
+        sid = step.split(":", 1)[1]
+        stop = next((s for s in pkg.get("stops") or [] if s.get("id") == sid), None)
+        label = (stop or {}).get("label") or sid
+        g = {
+            "title": f"6+ · Extra stop — {label}",
+            "do": [f"Move the DUT to: {label}. Omni on Libre RXA unless noted.",
+                   "Hold position until the app confirms the capture."],
+            "why": "Extends the range profile beyond the standard three stops.",
+        }
+    else:
+        g = guides.get(step, guides["photo"])
     return {"step": step, "title": g["title"], "do": g["do"], "why": g["why"],
             "status": pkg.get("status"), "package_id": pkg.get("id")}
 
 
+def stop_order(pkg: dict | None) -> list[str]:
+    """Range-ladder order: near-field first (find + prove), then out."""
+    base = [d["id"] for d in DISTANCES]
+    extra = [s.get("id") for s in (pkg or {}).get("stops") or [] if s.get("id")]
+    return base + extra
+
+
+def step_for_distance(distance_id: str) -> str:
+    if distance_id in {d["id"] for d in DISTANCES}:
+        return "capture_" + distance_id
+    return "capture_stop:" + distance_id
+
+
 def advance_after_distance(pkg: dict, distance_id: str) -> str:
-    order = ["ten_ft", "next_room", "near_field"]
+    order = stop_order(pkg if isinstance(pkg, dict) else {})
     try:
         i = order.index(distance_id)
     except ValueError:
-        return pkg.get("step") or "capture_ten_ft"
+        return pkg.get("step") or "capture_near_field"
     if i + 1 < len(order):
-        return "capture_" + order[i + 1]
-    return "stimulate"
+        return step_for_distance(order[i + 1])
+    return "states"
+
+
+def add_stop(pkg: dict, label: str) -> dict:
+    """Register an extra range-ladder stop (e.g. 'down the hall', 'outside')."""
+    label = (label or "").strip()[:60]
+    if not label:
+        raise ValueError("stop needs a label")
+    sid = "stop_" + re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_")[:24]
+    stops = pkg.setdefault("stops", [])
+    if any(s.get("id") == sid for s in stops):
+        raise ValueError("that stop already exists")
+    stop = {"id": sid, "label": label, "utc": time.time()}
+    stops.append(stop)
+    return stop
+
+
+def walk_score(trace: list, t0: float, period_s: float) -> dict:
+    """Score the near-field walk test: does received power track the commanded
+    move-in / move-out cadence?
+
+    trace = [(t_utc, peak_db), ...]. The reference is -cos(2π(t-t0)/period):
+    -1 at the 'start moving in' mark (DUT far), +1 half a period later (DUT at
+    the probe). A strong positive Pearson r + a real dB swing means the
+    emission is coming from the device in the tech's hand.
+    """
+    import math
+    pts = [(t, p) for (t, p) in trace if t >= t0 and p is not None]
+    if len(pts) < 8:
+        return {"r": None, "n_periods": 0, "swing_db": 0, "verdict": "insufficient"}
+    dur = pts[-1][0] - t0
+    n_per = dur / max(0.5, period_s)
+    ys = [p for _, p in pts]
+    swing = max(ys) - min(ys)
+    xs = [-math.cos(2 * math.pi * (t - t0) / period_s) for t, _ in pts]
+    mx = sum(xs) / len(xs)
+    my = sum(ys) / len(ys)
+    cov = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    vx = sum((x - mx) ** 2 for x in xs)
+    vy = sum((y - my) ** 2 for y in ys)
+    if vx <= 0 or vy <= 0 or swing < 3.0:
+        return {"r": None, "n_periods": round(n_per, 1),
+                "swing_db": round(swing, 1), "verdict": "flat"}
+    r = cov / math.sqrt(vx * vy)
+    if n_per < 1.5:
+        verdict = "keep_going"
+    elif r >= 0.6 and swing >= 6.0:
+        verdict = "tracks_motion"
+    elif r >= 0.35:
+        verdict = "weak_track"
+    else:
+        verdict = "no_track"
+    return {"r": round(r, 2), "n_periods": round(n_per, 1),
+            "swing_db": round(swing, 1), "verdict": verdict}
+
+
+WALK_VERDICT_PLAIN = {
+    "clipped": "Front end clipped during the walk — the power readings saturated "
+               "and can't track motion. Fit the attenuator pad and rerun.",
+    "tracks_motion": "RF power tracked the walk cadence — the emission is coming "
+                     "from this device.",
+    "weak_track": "Some correlation with motion, but not conclusive — repeat the "
+                  "walk slower, closer to the probe.",
+    "no_track": "Power did NOT follow the motion — the energy on this frequency "
+                "is probably NOT from this device. Re-check the freq lock.",
+    "keep_going": "Not enough cadence periods yet — keep walking.",
+    "flat": "No usable power swing — probe dead, DUT silent, or wrong frequency.",
+    "insufficient": "Not enough readings — go live first, then start the walk.",
+}
+
+
+def fuse_ident(pkg: dict) -> dict:
+    """Merge the identification evidence: visual/text catalog match, RF
+    signature candidates from every capture and state, and the walk-test
+    attribution. Status ladder: unknown → visual_only → rf_confirmed →
+    identified (visual + RF + motion-attributed)."""
+    text = " ".join([pkg.get("device_name") or "",
+                     pkg.get("device_description") or "",
+                     pkg.get("device_type_name") or ""])
+    visual = [{"id": v["id"], "name": v["name"], "score": v["score"]}
+              for v in match_catalog(text)[:3]]
+    rf: dict[str, dict] = {}
+    sources = list((pkg.get("captures") or {}).values()) + \
+        list((pkg.get("states") or {}).values())
+    for src in sources:
+        for c in (src or {}).get("candidates") or []:
+            k = c.get("name") or c.get("id") or "?"
+            e = rf.setdefault(k, {"name": k, "score": 0.0, "seen": 0})
+            try:
+                e["score"] += float(c.get("score") or 0)
+            except (TypeError, ValueError):
+                pass
+            e["seen"] += 1
+    rf_list = sorted(rf.values(), key=lambda x: -x["score"])[:5]
+    for e in rf_list:
+        e["score"] = round(e["score"], 1)
+    walk = pkg.get("walk_test") or {}
+    attributed = walk.get("verdict") == "tracks_motion"
+    n_caps = len(pkg.get("captures") or {})
+    if visual and rf_list and attributed:
+        status = "identified"
+    elif attributed or (rf_list and n_caps >= 2):
+        status = "rf_confirmed"
+    elif visual:
+        status = "visual_only"
+    else:
+        status = "unknown"
+    bits = []
+    if visual:
+        bits.append(f"visual: {visual[0]['name']}")
+    if rf_list:
+        bits.append(f"RF: {rf_list[0]['name']} (seen {rf_list[0]['seen']}×)")
+    if attributed:
+        bits.append("motion-attributed at near field")
+    summary = {"identified": "IDENTIFIED — " + " · ".join(bits),
+               "rf_confirmed": "RF-confirmed — " + " · ".join(bits),
+               "visual_only": "Visual guess only — " + " · ".join(bits) +
+                              " — needs RF evidence",
+               "unknown": "Unidentified — capture RF evidence"}[status]
+    return {"visual": visual, "rf": rf_list, "attributed": attributed,
+            "status": status, "summary": summary}
+
+
+def save_video_b64(base_dir: str, pkg_id: str, data_url: str) -> str:
+    """Save a data:video/...;base64 walk-test recording. Returns rel path."""
+    m = re.match(r"^data:video/(webm|mp4);(?:codecs=[^;]+;)?base64,(.+)$",
+                 data_url, re.I | re.S)
+    if not m:
+        raise ValueError("need a data:video/webm or mp4 base64 recording")
+    ext = m.group(1).lower()
+    import base64
+    raw = base64.b64decode(m.group(2))
+    if len(raw) < 1000:
+        raise ValueError("recording too small")
+    if len(raw) > 80_000_000:
+        raise ValueError("recording too large (max 80 MB)")
+    vids = os.path.join(lab_dir(base_dir), "videos")
+    os.makedirs(vids, exist_ok=True)
+    fname = f"{pkg_id}_{int(time.time())}.{ext}"
+    with open(os.path.join(vids, fname), "wb") as fh:
+        fh.write(raw)
+    return os.path.join("data", "device_lab", "videos", fname).replace("\\", "/")

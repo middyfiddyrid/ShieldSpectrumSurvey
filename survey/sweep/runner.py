@@ -34,6 +34,14 @@ log = logging.getLogger("survey.runner")
 MAX_SEGMENT_RETRIES = 3
 
 
+def directional_target_peak(freqs_mhz, amps_dbm, center_mhz, bw_khz):
+    """Peak inside the target carrier window plus the displayed window width."""
+    target_half_mhz = max(0.025, (float(bw_khz) / 1000.0) * 0.75)
+    target_amps = [a for f, a in zip(freqs_mhz, amps_dbm)
+                   if abs(f - float(center_mhz)) <= target_half_mhz]
+    return max(target_amps or amps_dbm), target_half_mhz * 2
+
+
 class SweepController:
     """One per app. Owns the device handle and the single active sweep thread."""
 
@@ -787,14 +795,14 @@ class SweepController:
                 "INSERT INTO signals (sweep_id,session_id,segment_id,room,module,phase,"
                 "center_mhz,bw_khz,peak_dbm,avg_dbm,floor_dbm,persistence,classification,"
                 "matched_label,match_reason,caution,identity_tier,display_label,"
-                "group_key,group_label,bin_start,bin_end) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "group_key,group_label,bin_start,bin_end,detected_utc) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (sweep_id, session_id, segment_id, room, module, phase,
                  s.center_mhz, s.bw_khz, s.peak_dbm, s.avg_dbm, s.floor_dbm,
                  s.persistence, cls.classification, cls.matched_label,
                  cls.match_reason, int(cls.caution), cls.identity_tier,
                  cls.display_label, cls.group_key, cls.group_label,
-                 s.bin_start, s.bin_end))
+                 s.bin_start, s.bin_end, time.time()))
 
         # F2: flip expected records found, accumulate anomalies for the side panel.
         # Same _matches rule the report uses, so live panel and PDF agree.
@@ -993,11 +1001,15 @@ class SweepController:
                     frame = dev.read_sweep(timeout_s=3.0)
                     if frame is None:
                         continue
-                    cur = max(frame.amps_dbm)
+                    # Track the requested carrier, not a stronger neighbor in
+                    # the display span, so warmer/colder guidance points right.
+                    cur, target_window_mhz = directional_target_peak(
+                        frame.freqs_mhz, frame.amps_dbm, center_mhz, bw_khz)
                     peak_hold = max(peak_hold, cur)
                     self._set(directional={
                         "center_mhz": center_mhz, "room": room,
                         "current_dbm": round(cur, 1), "peak_dbm": round(peak_hold, 1),
+                        "target_window_mhz": round(target_window_mhz, 4),
                         "trace": {"freqs": [round(f, 4) for f in frame.freqs_mhz],
                                   "amps": [round(a, 1) for a in frame.amps_dbm]}})
                 dev.set_calculator("normal")

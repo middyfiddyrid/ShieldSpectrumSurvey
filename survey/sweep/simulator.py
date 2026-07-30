@@ -29,6 +29,13 @@ class SimulatedDevice(BaseDevice):
         self._points = 112
         # set by the runner so the scenario can vary by phase/room
         self.environment = {"phase": "interior", "room": ""}
+        self._gain_db = 64.0  # mirrors the SDR sources' manual-gain model
+
+    def set_gain(self, mode: str = None, db: float = None):
+        """Match the SDR sources' live-gain surface so the device lab's
+        auto-gain / overload path is drivable in demo mode."""
+        if db is not None:
+            self._gain_db = float(db)
 
     def connect(self) -> DeviceInfo:
         return self.info
@@ -69,6 +76,40 @@ class SimulatedDevice(BaseDevice):
         if not ambient:
             carriers.append((611.0, -58.0 if "office" in room.lower() else -70.0, 0.05))
         return carriers
+
+    def capture_iq(self, center_hz: float, sample_rate: float, n_samples: int):
+        """Synthetic IQ so the Device Lab / identify / demod paths are fully
+        drivable in demo mode: noise floor + any planted carrier that falls
+        inside the span. Carrier power 'breathes' on an 8 s period so the lab's
+        proximity walk test has something to track; the 2437 Wi-Fi plant stays
+        bursty so peak-hold demos catch it."""
+        import math
+
+        import numpy as np
+        n = int(n_samples)
+        fs = float(sample_rate)
+        rng = np.random.default_rng(self._rng.getrandbits(32))
+        floor = 1e-4
+        iq = (rng.normal(0, floor, n) + 1j * rng.normal(0, floor, n)) \
+            .astype(np.complex64)
+        t = np.arange(n, dtype=np.float32) / fs
+        now = time.time()
+        for f, p, _half_bw in self._carriers():
+            off = f * 1e6 - center_hz
+            if abs(off) > fs / 2 * 0.9:
+                continue
+            if f == 2437.0 and self._rng.random() < 0.55:
+                continue
+            breath = 10.0 * math.sin(2 * math.pi * now / 8.0)
+            amp = floor * (10 ** ((p + breath + 105.0) / 20.0))
+            iq += (amp * np.exp(2j * np.pi * off * t)).astype(np.complex64)
+        # manual-gain model + hard ADC clip at full scale (±1) so the lab's
+        # overload detector / auto-gain path behaves like a real front end
+        iq *= 10 ** ((self._gain_db - 64.0) / 20.0)
+        iq = (np.clip(iq.real, -1.0, 1.0) +
+              1j * np.clip(iq.imag, -1.0, 1.0)).astype(np.complex64)
+        time.sleep(0.02)
+        return iq
 
     def read_sweep(self, timeout_s: float = 5.0):
         time.sleep(0.12)  # simulated sweep time (faster than real hardware)

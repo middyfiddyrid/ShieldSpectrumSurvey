@@ -32,7 +32,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     operator TEXT,
     status TEXT DEFAULT 'open',
     device_info TEXT,            -- JSON: model, firmware, module ranges as reported
-    notes TEXT
+    notes TEXT,
+    kind TEXT DEFAULT 'field'    -- field = real client engagement (report/portal
+                                 -- eligible) | lab = bench/test work, NEVER
+                                 -- delivered to a client
 );
 CREATE TABLE IF NOT EXISTS source_status (
     session_id INTEGER, source TEXT, status TEXT, count INTEGER,
@@ -86,7 +89,8 @@ CREATE TABLE IF NOT EXISTS signals (
     caution INTEGER DEFAULT 0,
     anomaly_score REAL DEFAULT 0,
     interior_delta_db REAL,      -- interior minus ambient amplitude (NULL until ambient exists)
-    localization_score REAL, strongest_room TEXT
+    localization_score REAL, strongest_room TEXT,
+    detected_utc REAL            -- when this detection was recorded (report date)
 );
 CREATE TABLE IF NOT EXISTS directional (
     id INTEGER PRIMARY KEY,
@@ -267,6 +271,14 @@ class Database:
     def _migrate(self):
         """Additive column migrations for databases created by older versions."""
         with self._conn() as c:
+            # FIELD vs LAB. A bench/test session must never be mistaken for
+            # client work or leave the building in a report. Existing rows all
+            # carry real client addresses, so 'field' is the correct backfill —
+            # the operator can retag any bench session afterwards.
+            cols = {r["name"] for r in c.execute("PRAGMA table_info(sessions)")}
+            if "kind" not in cols:
+                c.execute("ALTER TABLE sessions ADD COLUMN kind TEXT DEFAULT 'field'")
+                c.execute("UPDATE sessions SET kind='field' WHERE kind IS NULL")
             cols = {r["name"] for r in c.execute("PRAGMA table_info(captures)")}
             if "kind" not in cols:
                 c.execute("ALTER TABLE captures ADD COLUMN kind TEXT DEFAULT 'zoom'")
@@ -320,6 +332,15 @@ class Database:
             # Plain-language explanation of how anomaly_score was reached.
             if "score_reason" not in cols:
                 c.execute("ALTER TABLE signals ADD COLUMN score_reason TEXT DEFAULT ''")
+            # WHEN this detection was recorded. Every hit on a client report has
+            # to carry a date/time; previously a signal's only time reference was
+            # its parent sweep. Historic rows are backfilled from that parent
+            # sweep's start, so old sweeps still date correctly on a report.
+            if "detected_utc" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN detected_utc REAL")
+                c.execute("UPDATE signals SET detected_utc = "
+                          "(SELECT started_utc FROM sweeps WHERE sweeps.id = "
+                          "signals.sweep_id) WHERE detected_utc IS NULL")
             # Persisted Signal ID (sigidwiki/catalog matcher) results. Candidates
             # only — never merged into matched_label/classification, which the
             # baseline correlation path owns. id_mode records match quality:
@@ -400,11 +421,14 @@ class Database:
 
     # --- convenience helpers ---
 
-    def create_session(self, address, lat, lon, geocoder, r_bcast, r_lmr, operator):
+    def create_session(self, address, lat, lon, geocoder, r_bcast, r_lmr, operator,
+                       kind="field"):
         return self.execute(
             "INSERT INTO sessions (created_utc,address,lat,lon,geocoder,"
-            "radius_broadcast_mi,radius_lmr_mi,operator) VALUES (?,?,?,?,?,?,?,?)",
-            (time.time(), address, lat, lon, geocoder, r_bcast, r_lmr, operator))
+            "radius_broadcast_mi,radius_lmr_mi,operator,kind) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (time.time(), address, lat, lon, geocoder, r_bcast, r_lmr, operator,
+             "lab" if kind == "lab" else "field"))
 
     def set_device_info(self, session_id, info: dict):
         self.execute("UPDATE sessions SET device_info=? WHERE id=?",
