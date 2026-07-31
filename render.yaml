@@ -1,0 +1,13 @@
+# Render Blueprint for the public DCS demo.
+# After this repo is on GitHub: Render -> New -> Blueprint -> pick this repo,
+# and it builds the Dockerfile and goes live on the free plan.
+services:
+  - type: web
+    name: dcs-demo
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    autoDeploy: true
+    envVars:
+      - key: DCS_DEMO
+        value: "1"

@@ -1,0 +1,11 @@
+# never let sensitive runtime data into the image (defense in depth — these
+# are gitignored too, so they shouldn't be in the build context anyway)
+data/
+reports/
+cache/
+capture_images/
+case_files/
+.git/
+__pycache__/
+*.pyc
+tests/

@@ -1,0 +1,6 @@
+﻿Published: 2026-06-28 01:27:43
+Machine: DESKTOP-FOAOO1T / Union Terminal
+Branch: pocsag-decoder
+Commit: 115733d
+app.js bytes: 144951
+Markers: MANUAL_TRIAGE, FOCUS_ANOMALIES, BULK_TRIAGE, MANUAL_SEGMENT_ADVANCE, S_METER, SESS_GROUPS

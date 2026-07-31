@@ -1,0 +1,1182 @@
+"""Client-facing PDF report — on demand, mirroring the screen.
+
+The report renders from the SAME database tables every UI endpoint reads, at
+the moment the GENERATE REPORT button is clicked: same baseline table, same
+per-module detected-signal tables, same room comparison grid, same anomaly
+scores. No separately-composed narrative. If any sweep phase is still missing
+or running, the report is watermarked INTERIM and covers completed phases only.
+Every generation is timestamped and archived in the session.
+"""
+
+import json
+import os
+import time
+
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import (Flowable, Image, PageBreak, Paragraph,
+                                SimpleDocTemplate, Spacer, Table, TableStyle)
+from xml.sax.saxutils import escape as _xml_escape
+
+
+def _para_safe(text: str) -> str:
+    """Escape a string that came from OUTSIDE the operator (a WiFi SSID, a LAN
+    reverse-DNS hostname, a scanned device name) before it goes into a ReportLab
+    Paragraph — its mini-markup parser treats & and < as tags, so an unescaped
+    '&' or a truncated '<img…' aborts PDF generation. A rogue device on the
+    client LAN must never be able to break the report."""
+    return _xml_escape(str(text or ""))
+
+
+PAGE_W, PAGE_H = letter
+
+C_BG = colors.HexColor("#11161c")
+C_ACCENT = colors.HexColor("#27ae60")
+C_WARN = colors.HexColor("#e67e22")
+C_BAD = colors.HexColor("#c0392b")
+
+CLASS_COLOR = {"VERIFIED": colors.HexColor("#1e8449"),
+               "PLAUSIBLE": colors.HexColor("#b9770e"),
+               "UNVERIFIED": colors.HexColor("#922b21"),
+               "IDENTIFIED": colors.HexColor("#1e8449"),
+               "KNOWN_BAND": colors.HexColor("#b9770e"),
+               "ANOMALY": colors.HexColor("#922b21")}
+
+# Plain, client-facing names for the internal classification codes. The stored
+# values stay VERIFIED/PLAUSIBLE/UNVERIFIED; only the printed text changes.
+CLASS_DISPLAY = {"VERIFIED": "Identified", "PLAUSIBLE": "Likely normal",
+                 "UNVERIFIED": "Anomaly", "IDENTIFIED": "Identified",
+                 "KNOWN_BAND": "Likely normal", "ANOMALY": "Anomaly"}
+
+
+def _class_label(v):
+    return CLASS_DISPLAY.get(v or "", v or "")
+
+BAND_COLORS = {"broadcast": "#2e86c1", "land_mobile": "#7d3c98", "ism": "#e67e22",
+               "cellular": "#16a085", "aviation": "#5d6d7e", "gps": "#c0392b",
+               "ham": "#7f8c8d", "other": "#566573"}
+
+
+def _styles():
+    ss = getSampleStyleSheet()
+    ss.add(ParagraphStyle("Cover", fontName="Helvetica-Bold", fontSize=22, leading=26))
+    ss.add(ParagraphStyle("H1x", fontName="Helvetica-Bold", fontSize=14, leading=18,
+                          spaceBefore=14, spaceAfter=6))
+    ss.add(ParagraphStyle("Mono", fontName="Courier", fontSize=8, leading=10))
+    ss.add(ParagraphStyle("Cell", fontName="Helvetica", fontSize=7.5, leading=9))
+    ss.add(ParagraphStyle("Body", fontName="Helvetica", fontSize=9.5, leading=13,
+                          spaceAfter=6))
+    return ss
+
+
+class SpectrumStrip(Flowable):
+    """Frequency strip: baseline allocations as colored bands, detected peaks overlaid."""
+
+    def __init__(self, baseline_rows, signals, lo_mhz=0.0, hi_mhz=6100.0,
+                 width=7.0 * inch, height=0.9 * inch):
+        super().__init__()
+        self.baseline = baseline_rows
+        self.signals = signals
+        self.lo, self.hi = lo_mhz, max(hi_mhz, lo_mhz + 1)
+        self.width, self.height = width, height
+
+    def _x(self, f):
+        return max(0.0, min(1.0, (f - self.lo) / (self.hi - self.lo))) * self.width
+
+    def draw(self):
+        c = self.canv
+        band_h = self.height * 0.45
+        c.setFillColor(colors.HexColor("#1b2129"))
+        c.rect(0, 0, self.width, band_h, stroke=0, fill=1)
+        for r in self.baseline:
+            color = BAND_COLORS.get(r.get("category") or "other", "#566573")
+            x0, x1 = self._x(r["freq_low_mhz"]), self._x(r["freq_high_mhz"])
+            c.setFillColor(colors.HexColor(color))
+            c.rect(x0, 0, max(x1 - x0, 0.6), band_h, stroke=0, fill=1)
+        for s in self.signals:
+            x = self._x(s["center_mhz"])
+            color = CLASS_COLOR.get(s.get("classification") or "UNVERIFIED", C_BAD)
+            c.setStrokeColor(color)
+            c.setLineWidth(1.1)
+            c.line(x, band_h + 2, x, self.height - 8)
+            c.setFillColor(color)
+            c.circle(x, self.height - 6, 1.6, stroke=0, fill=1)
+        c.setFillColor(colors.HexColor("#444c56"))
+        c.setFont("Helvetica", 6)
+        for ghz in range(0, int(self.hi / 1000) + 1):
+            x = self._x(ghz * 1000)
+            c.drawCentredString(x, band_h + 1, f"{ghz}G")
+
+
+def _watermark_and_footer(interim: bool, company: str):
+    def fn(canvas, doc):
+        canvas.saveState()
+        canvas.setFont("Helvetica", 8)
+        canvas.setFillColor(colors.HexColor("#666666"))
+        canvas.drawString(0.75 * inch, 0.5 * inch, company)
+        canvas.drawRightString(PAGE_W - 0.75 * inch, 0.5 * inch, f"Page {doc.page}")
+        if interim:
+            canvas.setFont("Helvetica-Bold", 60)
+            canvas.setFillColorRGB(0.85, 0.3, 0.2, alpha=0.13)
+            canvas.translate(PAGE_W / 2, PAGE_H / 2)
+            canvas.rotate(45)
+            canvas.drawCentredString(0, 0, "INTERIM")
+        canvas.restoreState()
+    return fn
+
+
+def _confidential_footer(company: str, watermark="CONFIDENTIAL"):
+    def fn(canvas, doc):
+        canvas.saveState()
+        canvas.setFont("Helvetica-Bold", 7.5)
+        canvas.setFillColor(colors.HexColor("#922b21"))
+        canvas.drawString(0.75 * inch, 0.5 * inch,
+                          f"{company} — CONFIDENTIAL · INTERNAL · NOT FOR CLIENT DISTRIBUTION")
+        canvas.setFillColor(colors.HexColor("#666666"))
+        canvas.drawRightString(PAGE_W - 0.75 * inch, 0.5 * inch, f"Page {doc.page}")
+        canvas.setFont("Helvetica-Bold", 58)
+        canvas.setFillColorRGB(0.57, 0.17, 0.13, alpha=0.10)
+        canvas.translate(PAGE_W / 2, PAGE_H / 2)
+        canvas.rotate(45)
+        canvas.drawCentredString(0, 0, watermark)
+        canvas.restoreState()
+    return fn
+
+
+def _fmt_freq(mhz):
+    if mhz is None:
+        return ""
+    if mhz < 1:
+        return f"{mhz * 1000:.1f} kHz"
+    if mhz >= 1000:
+        return f"{mhz / 1000:.4f} GHz"
+    return f"{mhz:.4f} MHz"
+
+
+def _why_cell(s):
+    """The 'why it didn't verify' cell: the classification reason plus, on its own
+    line, the plain-language explanation of how the anomaly score was reached.
+    Appends behavior class (honest 'consistent with' language) when present —
+    never upgrades shape guesses to product identity in the client PDF."""
+    why = (s["match_reason"] or "")
+    reason = s.get("score_reason") or ""
+    if reason:
+        why = (why + "<br/>" + reason).lstrip("<br/>")
+    # behavior may be attached by enrich before report build, or absent
+    beh = s.get("behavior") if isinstance(s.get("behavior"), dict) else None
+    if beh and beh.get("label"):
+        line = f"Behavior: {beh['label']}"
+        if beh.get("phrase"):
+            line += f" — {beh['phrase'][:160]}"
+        why = (why + "<br/>" + line).lstrip("<br/>")
+    inv = s.get("inventory_summary") or ""
+    if inv:
+        why = (why + "<br/>Inventory: " + inv[:140]).lstrip("<br/>")
+    return why[:500]
+
+
+def _table(data, col_widths, header_bg=C_BG, font_size=7.5):
+    t = Table(data, colWidths=col_widths, repeatRows=1)
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), header_bg),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+        ("FONTSIZE", (0, 0), (-1, -1), font_size),
+        ("GRID", (0, 0), (-1, -1), 0.25, colors.HexColor("#aab2bd")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f2f4f7")]),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+    ]))
+    return t
+
+
+DEFAULT_REPORT_OPTIONS = {
+    "rf_environment": False,    # density assessment + shielding recommendation
+    "rf_exposure": False,       # balanced non-ionizing exposure context + COI
+    "glossary": False,          # client-friendly glossary of terms
+    "case_studies": False,      # anonymized composite device-find examples
+}
+
+
+def rf_density(baseline: list[dict]) -> dict:
+    """Classify the RF environment from the licensed-record baseline:
+    broadcast transmitters AND cellular tower proximity."""
+    strong = [r for r in baseline
+              if r.get("confidence") == "record"
+              and (r.get("service") or "").upper() in ("FM", "TV")
+              and r.get("distance_mi") is not None and r["distance_mi"] <= 30]
+    n = len(strong)
+    tier = "high" if n >= 20 else "moderate" if n >= 8 else "low"
+    nearest = min((r["distance_mi"] for r in strong), default=None)
+
+    # cellular: each carrier repeats its tower_count on every band-block row,
+    # and OpenCellID + CellMapper may count the same physical towers — so take
+    # the per-carrier max across sources, then sum carriers
+    per_carrier: dict = {}
+    cell_nearest = None
+    for r in baseline:
+        if (r.get("category") or "") != "cellular":
+            continue
+        raw = r.get("raw_json") if "raw_json" in r else r.get("raw")
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (TypeError, ValueError):
+                raw = {}
+        tc = (raw or {}).get("tower_count")
+        carrier = r.get("licensee") or "?"
+        if tc:
+            per_carrier[carrier] = max(per_carrier.get(carrier, 0), int(tc))
+        if r.get("distance_mi") is not None:
+            cell_nearest = r["distance_mi"] if cell_nearest is None \
+                else min(cell_nearest, r["distance_mi"])
+    cell_count = sum(per_carrier.values())
+    has_cell_data = bool(per_carrier) or cell_nearest is not None
+    if not has_cell_data:
+        cell_tier = "unknown"
+    elif (cell_nearest is not None and cell_nearest <= 0.5) or cell_count >= 50:
+        cell_tier = "high"
+    elif (cell_nearest is not None and cell_nearest <= 1.5) or cell_count >= 15:
+        cell_tier = "moderate"
+    else:
+        cell_tier = "low"
+    return {"count": n, "tier": tier, "nearest_mi": nearest,
+            "cell_count": cell_count, "cell_nearest_mi": cell_nearest,
+            "cell_tier": cell_tier,
+            "recommend": tier == "high" or cell_tier == "high"}
+
+
+def _property_photo(el, ss, cfg, session_id, address):
+    """Overhead/property image on the cover if one exists for the session
+    (data/property_photos/session<id>.png|.jpg)."""
+    for ext in (".png", ".jpg", ".jpeg"):
+        path = cfg.abs_path(os.path.join("data", "property_photos",
+                                         f"session{session_id}{ext}"))
+        if os.path.exists(path):
+            try:
+                el.append(Image(path, width=7.0 * inch, height=3.2 * inch,
+                                kind="proportional"))
+                el.append(Paragraph(
+                    f"{address} — overhead view. "
+                    "Imagery: Esri World Imagery (Maxar).", ss["Cell"]))
+                el.append(Spacer(1, 12))
+            except Exception:  # noqa: BLE001 - bad image renders text-only
+                pass
+            return
+
+
+def _dedup_nearest(rows):
+    """One row per station (callsign/label), keeping the nearest record."""
+    best = {}
+    for r in rows:
+        key = r.get("callsign") or r.get("label") or str(r.get("freq_low_mhz"))
+        d = r.get("distance_mi")
+        cur = best.get(key)
+        if cur is None or (d is not None and (cur.get("distance_mi") is None
+                                              or d < cur["distance_mi"])):
+            best[key] = r
+    return sorted(best.values(),
+                  key=lambda r: r["distance_mi"] if r.get("distance_mi") is not None else 1e9)
+
+
+def _active_sources(sources):
+    """Sources that actually contributed — a client document never shows
+    internal configuration state."""
+    return [s for s in sources
+            if s["status"] in ("ok", "cached", "stale") and (s["count"] or 0)]
+
+
+def _section_expected_environment(el, ss, baseline, sources):
+    """Client-facing expected-environment summary: grouped by signal category
+    with the closest stations per group, instead of a raw record dump."""
+    el.append(Paragraph("Expected RF Environment at Your Location", ss["H1x"]))
+    active = _active_sources(sources)
+    if active:
+        el.append(Paragraph(
+            "Data sources consulted: " + " · ".join(s["source"] for s in active) + ".",
+            ss["Cell"]))
+        el.append(Spacer(1, 6))
+    if not baseline:
+        el.append(Paragraph("Baseline not yet built for this address — build it before "
+                            "issuing the briefing.", ss["Body"]))
+        return
+
+    hi = max((r["freq_high_mhz"] for r in baseline), default=6100.0)
+    el.append(SpectrumStrip(baseline, [], 0.0, hi))
+    el.append(Spacer(1, 8))
+
+    def stations(svc):
+        return _dedup_nearest([r for r in baseline
+                               if (r.get("service") or "").upper() == svc
+                               and r.get("confidence") == "record"])
+
+    broadcast = [("Broadcast television", stations("TV")),
+                 ("FM radio", stations("FM")),
+                 ("AM radio", stations("AM"))]
+    alloc_n = len([r for r in baseline if r.get("confidence") != "record"])
+
+    sum_rows = [["Signal group", "Expected at this address", "Nearest"]]
+    for name, rows in broadcast:
+        nearest = rows[0]["distance_mi"] if rows and rows[0].get("distance_mi") is not None \
+            else None
+        sum_rows.append([name, f"{len(rows)} licensed station{'s' if len(rows) != 1 else ''}",
+                         f"{nearest:.1f} mi" if nearest is not None else "—"])
+    sum_rows.append(["Cellular", "all national carriers — detailed below", ""])
+    sum_rows.append([Paragraph("Other allocations (aviation, amateur, ISM/Wi-Fi, "
+                               "land-mobile, GPS…)", ss["Cell"]),
+                     f"{alloc_n} national frequency allocations", ""])
+    el.append(_table(sum_rows, [2.5 * inch, 2.7 * inch, 0.9 * inch], font_size=8.5))
+    el.append(Spacer(1, 10))
+
+    for name, rows in broadcast:
+        if not rows:
+            continue
+        label = (f"{name} — {len(rows)} station" if len(rows) == 1
+                 else f"{name} — closest of {len(rows)} stations")
+        el.append(Paragraph(f"<b>{label}</b>", ss["Body"]))
+        t_rows = [["Callsign", "Frequency", "Distance (mi)"]]
+        for r in rows[:5]:
+            t_rows.append([r.get("callsign") or r.get("label") or "",
+                           _fmt_freq(r["freq_low_mhz"]),
+                           f"{r['distance_mi']:.1f}" if r.get("distance_mi") is not None
+                           else "—"])
+        el.append(_table(t_rows, [1.8 * inch, 1.5 * inch, 1.2 * inch], font_size=8))
+        el.append(Spacer(1, 8))
+
+    el.append(Paragraph("<b>Cellular carriers</b>", ss["Body"]))
+    observed, nearest_by_carrier = {}, {}
+    for r in baseline:
+        if (r.get("category") or "") != "cellular" or not r.get("licensee"):
+            continue
+        c = r["licensee"]
+        raw = r.get("raw_json") if "raw_json" in r else r.get("raw")
+        if isinstance(raw, str):
+            try:
+                raw = json.loads(raw)
+            except (TypeError, ValueError):
+                raw = {}
+        tc = (raw or {}).get("tower_count")
+        if tc:
+            observed[c] = max(observed.get(c, 0), int(tc))
+        if r.get("distance_mi") is not None:
+            nearest_by_carrier[c] = min(nearest_by_carrier.get(c, 1e9), r["distance_mi"])
+    if observed:
+        t_rows = [["Carrier", "Towers observed nearby", "Nearest (mi)"]]
+        for c, n in sorted(observed.items(), key=lambda kv: -kv[1]):
+            near = nearest_by_carrier.get(c)
+            t_rows.append([c, str(n), f"{near:.1f}" if near is not None else "—"])
+        el.append(_table(t_rows, [1.8 * inch, 1.6 * inch, 1.2 * inch], font_size=8))
+    else:
+        el.append(Paragraph(
+            "All national carriers — Verizon, AT&amp;T (including FirstNet), T-Mobile, "
+            "US Cellular, and DISH/Boost — hold licensed spectrum covering this area, and "
+            "every band they operate is in the sweep baseline, with particular attention to "
+            "the uplink blocks where a cellular-based device would transmit. Tower-by-tower "
+            "mapping for this address is added to the engagement file as area survey data is "
+            "loaded.", ss["Body"]))
+    el.append(Paragraph(
+        f"The complete {len(baseline)}-entry baseline (every licensed record and national "
+        "allocation considered) is retained in Shield's survey records for this engagement.",
+        ss["Cell"]))
+
+
+def _section_rf_environment(el, ss, baseline, company):
+    d = rf_density(baseline)
+    el.append(Paragraph("RF Environment & Shielding Assessment", ss["H1x"]))
+    nearest = (f" The nearest is about {d['nearest_mi']:.0f} mi away."
+               if d["nearest_mi"] is not None else "")
+    el.append(Paragraph(
+        f"This location sits in a <b>{d['tier']}-density</b> broadcast RF environment: roughly "
+        f"{d['count']} full-power broadcast transmitters operate within ~30 miles.{nearest} "
+        "A dense ambient RF environment is normal for an urban or suburban area and is not "
+        "itself a sign of surveillance — but it does affect both the sweep and any decision "
+        "about shielding.", ss["Body"]))
+    if d["cell_tier"] == "unknown":
+        el.append(Paragraph(
+            "This assessment is based on the broadcast environment; tower-by-tower cellular "
+            "mapping for this address is incorporated as area survey data is loaded.",
+            ss["Body"]))
+    else:
+        cell_near = (f" the nearest observed tower is about {d['cell_nearest_mi']:.1f} mi away"
+                     if d["cell_nearest_mi"] is not None else
+                     " tower distances were not reported by the data source")
+        el.append(Paragraph(
+            f"Cellular infrastructure: approximately <b>{d['cell_count']}</b> cell towers were "
+            f"observed near this location across all carriers;{cell_near}. Proximity to cellular "
+            f"towers raises the ambient RF floor at the premises (<b>{d['cell_tier']}</b> cellular "
+            "proximity) — a close tower means more ambient energy across the cellular bands, "
+            "which both masks weak signals during a sweep and is the dominant contributor to "
+            "everyday RF levels indoors.", ss["Body"]))
+    if d["recommend"]:
+        el.append(Paragraph(
+            "Because the ambient environment here is dense, we recommend considering an "
+            "<b>RF shielding assessment</b>. In a security context, shielding a sensitive room "
+            "(attenuating signals in and out) both reduces the chance that a device inside can "
+            "reach a receiver outside, and lowers the ambient floor so a future sweep can resolve "
+            "weaker anomalies. This is a security recommendation, not a health one.", ss["Body"]))
+    else:
+        el.append(Paragraph(
+            "Shielding is not indicated by the ambient environment alone at this location. If "
+            "shielding is desired for a specific sensitive space, it can still be assessed on "
+            "request.", ss["Body"]))
+    el.append(Paragraph(
+        f"<i>Disclosure: {company} provides shielding assessment and installation services and "
+        "therefore has a commercial interest in this recommendation. It is offered as security "
+        "guidance, and any decision to proceed is entirely the client's.</i>", ss["Cell"]))
+
+
+def _section_case_studies(el, ss, studies, company):
+    """Anonymized composite device-find examples. Only studies the operator has
+    attested as de-identified are passed in — never render anything else."""
+    if not studies:
+        return
+    el.append(Paragraph("Examples From Our Case Files (Anonymized)", ss["H1x"]))
+    el.append(Paragraph(
+        "The examples below are drawn from prior engagements but are <b>composites</b>: "
+        "details have been altered and combined across cases so that no client, subject, "
+        "or location is identifiable. They are included to show what real-world "
+        "unauthorized devices look like and how they are found.", ss["Body"]))
+    for s in studies:
+        el.append(Paragraph(f"<b>{s['title']}</b>", ss["Body"]))
+        if (s.get("photo_path") or "") and os.path.exists(s["photo_path"]):
+            try:
+                el.append(Image(s["photo_path"], width=2.2 * inch, height=1.6 * inch,
+                                kind="proportional"))
+            except Exception:  # noqa: BLE001 - bad image renders text-only
+                pass
+        for label, key in (("Device class", "device_class"),
+                           ("RF signature", "rf_signature"),
+                           ("How it was found", "discovery"),
+                           ("Case history (composite)", "case_history"),
+                           ("What it teaches", "lessons")):
+            if (s.get(key) or "").strip():
+                el.append(Paragraph(f"<b>{label}:</b> {s[key]}", ss["Body"]))
+
+
+def _attested_case_studies(db, limit=6):
+    return db.query("SELECT * FROM case_studies WHERE deidentified=1 "
+                    "ORDER BY id LIMIT ?", (limit,))
+
+
+def _section_rf_exposure(el, ss, baseline, company):
+    el.append(Paragraph("RF Exposure Context (balanced)", ss["H1x"]))
+    for para in (
+        "Clients in dense RF areas often ask whether ambient radio energy is a health concern. "
+        "The radio energy from broadcast, cellular, and Wi-Fi sources is <b>non-ionizing</b> — it "
+        "does not have the energy to break chemical bonds the way X-rays or UV do. In the United "
+        "States, public exposure is regulated by the FCC using limits derived from international "
+        "(ICNIRP/IEEE) guidelines, which are set well below the levels at which any established "
+        "effect occurs. At normal ambient distances — i.e., not standing at a transmitter — "
+        "measured power density is typically a small fraction of those limits.",
+        "We present both sides fairly. The mainstream position of health agencies (WHO, FCC, and "
+        "most national bodies) is that there is no established health effect from RF exposure "
+        "below the regulatory limits. In 2011 the WHO's IARC classified RF fields as 'possibly "
+        "carcinogenic' (Group 2B) — a category that reflects <i>limited</i> evidence and also "
+        "contains items like pickled vegetables and aloe; it denotes 'cannot be ruled out,' not "
+        "'shown to cause harm.' A minority of researchers argue for non-thermal effects or "
+        "electromagnetic sensitivity; these claims are not established and have been difficult to "
+        "replicate under controlled conditions.",
+        "Conflicts of interest exist on all sides and should be weighed: industry-funded research "
+        "can bias toward finding no effect, while advocacy groups and businesses that sell "
+        f"shielding products (which would include {company}) have an interest in emphasizing risk. "
+        "We disclose our own interest here for that reason.",
+        f"{company}'s recommendation: we base shielding recommendations on <b>security</b> "
+        "grounds, not health. Ambient RF at this location is consistent with any comparable "
+        "populated area. If a client wishes to reduce personal exposure for peace of mind, "
+        "shielding is low-risk but we make no medical claims; anyone with a specific health "
+        "concern should consult a physician.",
+    ):
+        el.append(Paragraph(para, ss["Body"]))
+
+
+GLOSSARY = [
+    ("Baseline / expected spectrum", "The database-built list of every signal that should be "
+     "present at your address (licensed stations, cellular, allocations) — what 'normal' looks "
+     "like here."),
+    ("Noise floor", "The background level of radio energy with no specific signal present; "
+     "signals are detected when they rise a set amount above it."),
+    ("IDENTIFIED / KNOWN BAND / ANOMALY", "How each detected signal was classified: matched to a "
+     "specific licensed source; inside a known band but unmatched; or matching nothing known — "
+     "the last being the candidates for investigation."),
+    ("Persistence", "How consistently a signal was present across repeated passes — steady "
+     "carriers vs. brief bursts."),
+    ("Interior-vs-exterior delta", "How much stronger a signal is inside the premises than "
+     "outside; a large positive value indicates a locally-sourced signal."),
+    ("Directional pass", "Hunting a specific unexplained frequency with a directional antenna to "
+     "locate its source by signal strength."),
+    ("Receive-only", "The analyzer only listens; it never transmits. The survey cannot interfere "
+     "with any device or network."),
+]
+
+
+def _section_glossary(el, ss):
+    el.append(Paragraph("Glossary", ss["H1x"]))
+    for term, defn in GLOSSARY:
+        el.append(Paragraph(f"<b>{term}.</b> {defn}", ss["Body"]))
+
+
+def generate_report(db, cfg, session_id: int, reports_dir: str) -> dict:
+    ss = _styles()
+    session = db.query_one("SELECT * FROM sessions WHERE id=?", (session_id,))
+    if not session:
+        raise ValueError("no such session")
+    baseline = db.query("SELECT * FROM baseline WHERE session_id=? ORDER BY freq_low_mhz",
+                        (session_id,))
+    sources = db.query("SELECT * FROM source_status WHERE session_id=?", (session_id,))
+    sweeps = db.query("SELECT * FROM sweeps WHERE session_id=? ORDER BY id", (session_id,))
+    signals = db.query("SELECT * FROM signals WHERE session_id=? ORDER BY center_mhz",
+                       (session_id,))
+    # Attach behavior + inventory (content-free) so anomaly wording stays honest
+    try:
+        from .nextstep import enrich_signal_rows
+        inv = db.query(
+            "SELECT kind,identifier,name,rssi_dbm,channel,freq_mhz,extra,owned,vendor "
+            "FROM inventory WHERE session_id=? AND kind IN ('wifi','ble')",
+            (session_id,))
+        base = getattr(cfg, "base_dir", None) or ""
+        signals = enrich_signal_rows(
+            [dict(s) for s in signals], inventory=inv, base_dir=base)
+    except Exception:  # noqa: BLE001 — report must still render without enrich
+        signals = [dict(s) for s in signals]
+    directional = db.query("SELECT * FROM directional WHERE session_id=? ORDER BY ts_utc",
+                           (session_id,))
+    device = json.loads(session["device_info"]) if session["device_info"] else None
+
+    running = any(s["status"] == "running" for s in sweeps)
+    has_interior = any(s["phase"] == "interior" and s["status"] in ("done", "aborted")
+                       for s in sweeps)
+    interim = running or not has_interior
+    simulated = any(s["simulated"] for s in sweeps)
+    kind = "INTERIM" if interim else "FINAL"
+
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    os.makedirs(reports_dir, exist_ok=True)
+    path = os.path.join(reports_dir, f"session{session_id}_{kind.lower()}_{ts}.pdf")
+
+    company = cfg.get("branding", "company", default="")
+    doc = SimpleDocTemplate(path, pagesize=letter, topMargin=0.7 * inch,
+                            bottomMargin=0.8 * inch, leftMargin=0.75 * inch,
+                            rightMargin=0.75 * inch,
+                            title=f"RF Spectrum Survey — {session['address']}")
+    el = []
+
+    opt_row = db.query_one("SELECT options_json FROM report_options WHERE session_id=?",
+                           (session_id,))
+    options = dict(DEFAULT_REPORT_OPTIONS)
+    if opt_row and opt_row["options_json"]:
+        try:
+            options.update(json.loads(opt_row["options_json"]))
+        except (TypeError, ValueError):
+            pass
+
+    # ---- Cover block ----
+    logo = cfg.get("branding", "logo_path", default="")
+    if logo and os.path.exists(logo):
+        try:
+            el.append(Image(logo, width=2.2 * inch, height=0.9 * inch, kind="proportional"))
+            el.append(Spacer(1, 10))
+        except Exception:  # noqa: BLE001 - bad logo file renders text-only
+            pass
+    el.append(Paragraph(company or "RF Spectrum Survey", ss["Cover"]))
+    el.append(Paragraph("Technical Surveillance Counter-Measures — RF Spectrum Survey",
+                        ss["Body"]))
+    el.append(Spacer(1, 16))
+    swept = swept_range_label(sweeps, device)
+    cover_rows = [
+        ["Location", session["address"]],
+        ["Date / time", time.strftime("%B %d, %Y  %H:%M", time.localtime(session["created_utc"]))],
+        ["Operator", session["operator"] or cfg.get("branding", "operator", default="") or "—"],
+        ["Swept range (as reported by hardware)", swept],
+        ["Analyzer", (device or {}).get("model", "—") + "  fw " +
+         (device or {}).get("firmware", "—") if device else "—"],
+        ["Report status", kind + ("  •  covers completed phases only" if interim else "")],
+    ]
+    if simulated:
+        cover_rows.append(["DATA SOURCE", "SIMULATED DEVICE — NOT A REAL SWEEP. "
+                                          "Demo/diagnostic output only."])
+    t = Table(cover_rows, colWidths=[2.3 * inch, 4.7 * inch])
+    t.setStyle(TableStyle([
+        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9.5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ("LINEBELOW", (0, 0), (-1, -1), 0.4, colors.HexColor("#cccccc")),
+    ]))
+    el.append(t)
+    el.append(Spacer(1, 14))
+    _property_photo(el, ss, cfg, session_id, session["address"])
+    el.append(PageBreak())
+
+    # ---- Methodology summary ----
+    el.append(Paragraph("Methodology", ss["H1x"]))
+    for para in (
+        "A database-verified baseline of all RF emissions expected at this location was "
+        "assembled before sweeping, from FCC broadcast and license records, observed cellular "
+        "infrastructure, and the national frequency allocation table. The baseline was reviewed "
+        "on-screen prior to the survey.",
+        "The premises were swept with a calibrated spectrum analyzer across the full range "
+        "reported by the hardware (see cover). Each frequency segment received a layered "
+        "capture: an averaging pass to recover weak continuous carriers from the noise floor, "
+        "and a max-hold dwell pass to capture burst and frequency-hopping transmitters. Dwell "
+        "time was weighted toward bands in which surveillance devices commonly operate "
+        "(433/915 MHz ISM, 2.4/5.8 GHz, DECT, cellular uplink blocks).",
+        "An exterior ambient reference sweep allows interior signals to be compared against "
+        "the outside RF environment: a signal meaningfully stronger inside the premises than "
+        "outside is locally sourced. Where multiple rooms were swept, per-room amplitude "
+        "comparison localizes a source to the room in which it is strongest.",
+        "Every detected signal was correlated against the baseline and classified IDENTIFIED "
+        "(matches a specific licensed record or carrier), KNOWN BAND (falls within a known "
+        "allocation; flagged with caution in bands where covert devices commonly hide), or ANOMALY "
+        "(no database or allocation match — candidate anomalies for physical investigation). "
+        "This survey is receive-only; no transmissions were made.",
+    ):
+        el.append(Paragraph(para, ss["Body"]))
+
+    # ---- Baseline ----
+    el.append(Paragraph("Expected-Spectrum Baseline", ss["H1x"]))
+    src_data = [["Source", "Entries", "Notes"]]
+    for s in _active_sources(sources):
+        src_data.append([s["source"], str(s["count"] or 0),
+                         Paragraph(s["message"] or "", ss["Cell"])])
+    if len(src_data) > 1:
+        el.append(_table(src_data, [1.7 * inch, 0.8 * inch, 4.5 * inch]))
+        el.append(Spacer(1, 8))
+
+    base_data = [["Frequency", "Service", "Callsign / Label", "Licensee",
+                  "Dist (mi)", "Brg", "Source", "Confidence"]]
+    for r in baseline:
+        if r["freq_low_mhz"] == r["freq_high_mhz"]:
+            f = _fmt_freq(r["freq_low_mhz"])
+        else:
+            f = f"{_fmt_freq(r['freq_low_mhz'])} – {_fmt_freq(r['freq_high_mhz'])}"
+        base_data.append([
+            Paragraph(f, ss["Cell"]), r["service"] or "",
+            Paragraph((r["callsign"] or r["label"] or "")[:60], ss["Cell"]),
+            Paragraph((r["licensee"] or "")[:40], ss["Cell"]),
+            f"{r['distance_mi']:.1f}" if r["distance_mi"] is not None else "",
+            f"{r['bearing_deg']:.0f}°" if r["bearing_deg"] is not None else "",
+            r["source"], r["confidence"]])
+    el.append(_table(base_data, [1.25 * inch, 0.55 * inch, 1.55 * inch, 1.25 * inch,
+                                 0.5 * inch, 0.4 * inch, 0.85 * inch, 0.65 * inch]))
+
+    # ---- Spectrum strip ----
+    el.append(Paragraph("Spectrum Overview", ss["H1x"]))
+    hi = 6100.0
+    if device and device.get("modules"):
+        hi = max(m["max_mhz"] for m in device["modules"])
+    el.append(SpectrumStrip(baseline, [s for s in signals if s["phase"] != "ambient"],
+                            0.0, hi))
+    el.append(Paragraph(
+        "Colored bands: expected allocations by category. Vertical markers: detected "
+        "signals (green = identified, amber = likely normal, red = anomaly).", ss["Cell"]))
+
+    # ---- Detected signals per module ----
+    for module in ("left", "right", "single"):
+        mod_signals = [s for s in signals if s["module"] == module and s["phase"] != "ambient"]
+        if not mod_signals:
+            continue
+        el.append(Paragraph(f"Detected Signals — {module.upper()} module/port", ss["H1x"]))
+        rows = [["Frequency", "Peak dBm", "BW kHz", "Persist", "Class", "Match / reason",
+                 "Room"]]
+        for s in sorted(mod_signals, key=lambda x: x["center_mhz"]):
+            rows.append([
+                _fmt_freq(s["center_mhz"]), f"{s['peak_dbm']:.0f}",
+                f"{s['bw_khz']:.0f}" if s["bw_khz"] else "",
+                f"{(s['persistence'] or 0) * 100:.0f}%",
+                _class_label(s["classification"]),
+                Paragraph(((s["matched_label"] or "") + " — " +
+                           (s["match_reason"] or ""))[:220], ss["Cell"]),
+                s["room"] or ""])
+        el.append(_table(rows, [1.0 * inch, 0.6 * inch, 0.55 * inch, 0.5 * inch,
+                                0.8 * inch, 2.6 * inch, 0.95 * inch]))
+
+    # ---- Room comparison ----
+    rooms = sorted({s["room"] for s in signals if s["phase"] == "interior" and s["room"]})
+    if len(rooms) > 1:
+        el.append(Paragraph("Room Comparison (peak dBm by room)", ss["H1x"]))
+        anomalous = [s for s in signals if s["phase"] == "interior"
+                     and (s["classification"] != "VERIFIED" or s["caution"])]
+        freq_keys = sorted({round(s["center_mhz"], 3) for s in anomalous})
+        rows = [["Frequency"] + rooms]
+        for fk in freq_keys[:60]:
+            row = [_fmt_freq(fk)]
+            for room in rooms:
+                vals = [s["peak_dbm"] for s in anomalous
+                        if s["room"] == room and abs(s["center_mhz"] - fk) <= 0.2]
+                row.append(f"{max(vals):.0f}" if vals else "—")
+            rows.append(row)
+        w = min(1.0, 5.5 / max(len(rooms), 1)) * inch
+        el.append(_table(rows, [1.3 * inch] + [w] * len(rooms)))
+
+    # ---- Expected vs found (receive-chain verification) ----
+    from .expected import expected_vs_found
+    exp = expected_vs_found(db, session_id)
+    if exp["counts"]["total_records"]:
+        c = exp["counts"]
+        el.append(Paragraph("Expected-Signal Verification", ss["H1x"]))
+        el.append(Paragraph(
+            f"Of {c['total_records']} licensed transmitters predicted at this location by "
+            f"the database baseline, {c['found']} were received during the survey. "
+            "Signals expected but not received are listed below with the assessed reason — "
+            "this validates the receive chain and documents why any predicted signal is "
+            "absent, rather than leaving the gap unexplained.", ss["Body"]))
+        missing = [r for r in exp["rows"] if not r["found"]]
+        if missing:
+            rows = [["Frequency", "Record", "Dist mi", "Expectation", "Assessed reason"]]
+            for r in missing[:40]:
+                f = _fmt_freq(r["freq_low_mhz"]) if r["freq_low_mhz"] == r["freq_high_mhz"] \
+                    else f"{_fmt_freq(r['freq_low_mhz'])} – {_fmt_freq(r['freq_high_mhz'])}"
+                rows.append([Paragraph(f, ss["Cell"]),
+                             Paragraph((r["callsign"] or r["label"] or "")[:40], ss["Cell"]),
+                             f"{r['distance_mi']:.0f}" if r["distance_mi"] is not None else "",
+                             r["expectation"],
+                             Paragraph(r["reason"][:220], ss["Cell"])])
+            el.append(_table(rows, [1.1 * inch, 1.2 * inch, 0.55 * inch,
+                                    0.8 * inch, 3.35 * inch]))
+            if len(missing) > 40:
+                el.append(Paragraph(f"…and {len(missing) - 40} more lower-expectation "
+                                    "records (full list in the CSV export).", ss["Cell"]))
+        else:
+            el.append(Paragraph("Every predicted signal was received.", ss["Body"]))
+
+    # ---- Anomaly list ----
+    el.append(Paragraph("Anomalies — Unverified / Flagged Signals (ranked)", ss["H1x"]))
+    anomalies = [s for s in signals if s["phase"] == "interior"
+                 and (s["classification"] == "UNVERIFIED" or s["caution"])]
+    anomalies.sort(key=lambda s: -(s["anomaly_score"] or 0))
+    if anomalies:
+        rows = [["Score", "Frequency", "Peak", "Persist", "In/Out Δ", "Strongest room",
+                 "Class", "Why it didn't verify"]]
+        for s in anomalies:
+            rows.append([
+                f"{s['anomaly_score']:.0f}" if s["anomaly_score"] is not None else "",
+                _fmt_freq(s["center_mhz"]), f"{s['peak_dbm']:.0f}",
+                f"{(s['persistence'] or 0) * 100:.0f}%",
+                f"+{s['interior_delta_db']:.0f} dB" if s["interior_delta_db"] else "—",
+                (s["strongest_room"] or "—") +
+                (f" (+{s['localization_score']:.0f} dB)" if s["localization_score"] else ""),
+                _class_label(s["classification"]),
+                Paragraph(_why_cell(s), ss["Cell"])])
+        el.append(_table(rows, [0.45 * inch, 0.95 * inch, 0.45 * inch, 0.5 * inch,
+                                0.6 * inch, 1.15 * inch, 0.75 * inch, 2.15 * inch]))
+    else:
+        el.append(Paragraph(
+            "No unverified or caution-flagged signals were detected in the completed phases.",
+            ss["Body"]))
+
+    # ---- Directional findings ----
+    if directional:
+        el.append(Paragraph("Directional Follow-up Readings", ss["H1x"]))
+        rows = [["Frequency", "Room", "Peak dBm", "Operator notes", "Time"]]
+        for d in directional:
+            rows.append([_fmt_freq(d["center_mhz"]), d["room"] or "",
+                         f"{d['peak_dbm']:.0f}" if d["peak_dbm"] is not None else "",
+                         Paragraph((d["notes"] or "")[:200], ss["Cell"]),
+                         time.strftime("%H:%M", time.localtime(d["ts_utc"]))])
+        el.append(_table(rows, [1.0 * inch, 1.1 * inch, 0.7 * inch, 3.2 * inch, 0.7 * inch]))
+
+    # ---- Wireless device inventory ----
+    inv = db.query("SELECT * FROM inventory WHERE session_id=? "
+                   "ORDER BY owned ASC, rssi_dbm DESC", (session_id,))
+    if inv:
+        el.append(Paragraph("Wireless Device Inventory (WiFi / Bluetooth LE)", ss["H1x"]))
+        el.append(Paragraph(
+            "Devices observed by local adapters during the survey. Devices the client "
+            "accounts for are marked CLIENT-OWNED; strong unaccounted transmitters "
+            "warrant follow-up.", ss["Body"]))
+        rows = [["Type", "Name", "Identifier", "RSSI dBm", "Ch/Freq", "Accounting"]]
+        for d in inv:
+            status = "CLIENT-OWNED" if d["owned"] else "UNACCOUNTED"
+            if not d["owned"] and d["rssi_dbm"] is not None and d["rssi_dbm"] >= -55.0:
+                status = "UNACCOUNTED — STRONG SIGNAL"
+            rows.append([d["kind"].upper(),
+                         Paragraph(_para_safe((d["name"] or "(no name)")[:40]), ss["Cell"]),
+                         d["identifier"],
+                         f"{d['rssi_dbm']:.0f}" if d["rssi_dbm"] is not None else "—",
+                         (d["channel"] or "") +
+                         (f" / {_fmt_freq(d['freq_mhz'])}" if d["freq_mhz"] else ""),
+                         status])
+        el.append(_table(rows, [0.5 * inch, 1.4 * inch, 1.45 * inch, 0.65 * inch,
+                                1.25 * inch, 1.45 * inch]))
+
+    # ---- Optional sections (operator-selected) ----
+    if options.get("rf_environment"):
+        _section_rf_environment(el, ss, baseline, company)
+    if options.get("rf_exposure"):
+        _section_rf_exposure(el, ss, baseline, company)
+    if options.get("case_studies"):
+        _section_case_studies(el, ss, _attested_case_studies(db), company)
+
+    # ---- Recommendations ----
+    el.append(Paragraph("Recommendations / Next Steps", ss["H1x"]))
+    recs = []
+    if anomalies:
+        top = anomalies[0]
+        recs.append(f"Physically investigate the ranked anomalies above, beginning with "
+                    f"{_fmt_freq(top['center_mhz'])}"
+                    + (f" in {top['strongest_room']}" if top["strongest_room"] else "") + ".")
+        recs.append("Correlate each anomaly's location with accessible concealment points "
+                    "(power sources, furniture, fixtures) and inspect physically (visual, "
+                    "NLJD, thermal as applicable).")
+    else:
+        recs.append("No anomalies require physical follow-up from the completed sweep phases.")
+    if interim:
+        recs.append("This is an INTERIM report; complete the remaining sweep phases for "
+                    "full coverage before drawing final conclusions.")
+    recs.append("RF conditions change; periodic re-surveys are recommended after personnel "
+                "changes, construction, or any suspected intrusion.")
+    for r in recs:
+        el.append(Paragraph("•  " + r, ss["Body"]))
+
+    if options.get("glossary"):
+        _section_glossary(el, ss)
+
+    cb = _watermark_and_footer(interim, company)
+    doc.build(el, onFirstPage=cb, onLaterPages=cb)
+
+    db.execute("INSERT INTO reports (session_id,path,kind,generated_utc) VALUES (?,?,?,?)",
+               (session_id, path, kind, time.time()))
+    return {"path": path, "kind": kind, "interim": interim, "simulated": simulated}
+
+
+def swept_range_label(sweeps: list[dict], device: dict | None) -> str:
+    """The cover-block range claim reflects what was ACTUALLY swept this session,
+    not the device's capability. Only when the completed sweeps cover every
+    hardware-reported module end-to-end does the report make the continuous-
+    coverage claim, using the ranges verbatim from hardware."""
+    done = [s for s in sweeps if s["status"] == "done" and s["phase"] in ("ambient", "interior")
+            and s["range_low_mhz"] is not None]
+    if not done:
+        return "(no completed sweeps yet)"
+    # merge swept intervals
+    spans = sorted((s["range_low_mhz"], s["range_high_mhz"]) for s in done)
+    merged = [list(spans[0])]
+    for lo, hi in spans[1:]:
+        if lo <= merged[-1][1] + 0.001:
+            merged[-1][1] = max(merged[-1][1], hi)
+        else:
+            merged.append([lo, hi])
+
+    def f(mhz):
+        return f"{mhz * 1000:.0f} kHz" if mhz < 1 else \
+            (f"{mhz / 1000:.4f} GHz" if mhz >= 1000 else f"{mhz:.3f} MHz")
+
+    mods = (device or {}).get("modules") or []
+    full = bool(mods) and all(
+        any(lo <= m["min_mhz"] + 0.01 and hi >= m["max_mhz"] - 0.01 for lo, hi in merged)
+        for m in mods)
+    if full:
+        return DeviceRange(device)
+    label = "swept " + ", ".join(f"{f(lo)} – {f(hi)}" for lo, hi in merged)
+    unswept = [m for m in mods if not any(
+        lo <= m["min_mhz"] + 0.01 and hi >= m["max_mhz"] - 0.01 for lo, hi in merged)]
+    if unswept:
+        label += ("; NOT fully swept: "
+                  + ", ".join(f"{m['side'].upper()} module ({f(m['min_mhz'])} – "
+                              f"{f(m['max_mhz'])})" for m in unswept))
+    return label
+
+
+ENGAGEMENT_TERMS = {
+    "onsite": [
+        "On-site engagement: a Shield technician performs the full sweep at the premises on "
+        "the scheduled date.",
+    ],
+    "remote": [
+        "Remote engagement: upon receipt of the agreed deposit, Shield ships a pre-configured "
+        "technical package (spectrum analyzer + antennas) with step-by-step setup instructions "
+        "so you can run the guided sweep yourself.",
+        "After your sweep is complete and you are satisfied with the results, return the device "
+        "to Shield using the enclosed prepaid materials. The deposit is applied per the "
+        "engagement agreement.",
+    ],
+    "monitoring": [
+        "Continuous-monitoring engagement: upon receipt of the agreed deposit, Shield ships a "
+        "pre-configured monitoring package with setup instructions.",
+        "Keep the device in place for ongoing monitoring; Shield bills monthly for the duration. "
+        "Return the device when you choose to end monitoring.",
+    ],
+}
+
+
+def generate_presweep_report(db, cfg, session_id: int, reports_dir: str) -> dict:
+    """Client-facing PRE-sweep report: expected RF environment + methodology +
+    engagement terms + the client's own stated concerns. Deliberately excludes
+    all internal assessment material (Persons of Interest, background, capability
+    notes) — those never go to the client."""
+    ss = _styles()
+    session = db.query_one("SELECT * FROM sessions WHERE id=?", (session_id,))
+    if not session:
+        raise ValueError("no such session")
+    eng = db.query_one("SELECT * FROM engagement WHERE session_id=?", (session_id,)) or {}
+    baseline = db.query("SELECT * FROM baseline WHERE session_id=? ORDER BY freq_low_mhz",
+                        (session_id,))
+    sources = db.query("SELECT * FROM source_status WHERE session_id=?", (session_id,))
+    etype = eng.get("engagement_type", "onsite")
+    company = cfg.get("branding", "company", default="")
+    opt_row = db.query_one("SELECT options_json FROM report_options WHERE session_id=?",
+                           (session_id,))
+    options = dict(DEFAULT_REPORT_OPTIONS)
+    if opt_row and opt_row["options_json"]:
+        try:
+            options.update(json.loads(opt_row["options_json"]))
+        except (TypeError, ValueError):
+            pass
+
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    os.makedirs(reports_dir, exist_ok=True)
+    path = os.path.join(reports_dir, f"session{session_id}_presweep_{ts}.pdf")
+    doc = SimpleDocTemplate(path, pagesize=letter, topMargin=0.7 * inch,
+                            bottomMargin=0.8 * inch, leftMargin=0.75 * inch,
+                            rightMargin=0.75 * inch,
+                            title=f"Pre-Sweep Briefing — {session['address']}")
+    el = []
+    logo = cfg.get("branding", "logo_path", default="")
+    if logo and os.path.exists(logo):
+        try:
+            el.append(Image(logo, width=2.2 * inch, height=0.9 * inch, kind="proportional"))
+            el.append(Spacer(1, 10))
+        except Exception:  # noqa: BLE001
+            pass
+    el.append(Paragraph(company or "Shield TSCM", ss["Cover"]))
+    el.append(Paragraph("Pre-Sweep Briefing — Technical Surveillance Counter-Measures",
+                        ss["Body"]))
+    el.append(Spacer(1, 14))
+    cover = [["Prepared for", eng.get("client_name") or "—"],
+             ["Location", session["address"]],
+             ["Date", time.strftime("%B %d, %Y")],
+             ["Engagement", etype.capitalize()]]
+    t = Table(cover, colWidths=[2.0 * inch, 5.0 * inch])
+    t.setStyle(TableStyle([("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+                           ("FONTSIZE", (0, 0), (-1, -1), 10),
+                           ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+                           ("LINEBELOW", (0, 0), (-1, -1), 0.4, colors.HexColor("#cccccc"))]))
+    el.append(t)
+    el.append(Spacer(1, 14))
+    _property_photo(el, ss, cfg, session_id, session["address"])
+
+    el.append(Paragraph("What this briefing is", ss["H1x"]))
+    el.append(Paragraph(
+        "Before any sweep, Shield assembles a database-verified picture of every radio signal "
+        "that is <i>expected</i> at your location — licensed broadcast stations, public-safety "
+        "and land-mobile systems, cellular infrastructure, and the national frequency "
+        "allocations. This briefing shows you that expected environment up front. During the "
+        "sweep, anything we detect that cannot be matched to this known picture becomes a "
+        "candidate for physical investigation. Knowing the baseline in advance is what lets us "
+        "separate the ordinary radio noise of your neighborhood from a device that does not "
+        "belong.", ss["Body"]))
+
+    el.append(Paragraph("Engagement terms", ss["H1x"]))
+    for line in ENGAGEMENT_TERMS.get(etype, ENGAGEMENT_TERMS["onsite"]):
+        el.append(Paragraph("•  " + line, ss["Body"]))
+
+    if eng.get("client_concerns"):
+        el.append(Paragraph("Your stated concerns", ss["H1x"]))
+        el.append(Paragraph(eng["client_concerns"], ss["Body"]))
+    named = db.query("SELECT name FROM persons_of_interest WHERE session_id=? "
+                     "AND named_by_client=1 ORDER BY name", (session_id,))
+    poi_n = db.query_one("SELECT COUNT(*) n FROM persons_of_interest WHERE session_id=?",
+                         (session_id,))["n"]
+    if named:
+        names = ", ".join(p["name"] for p in named)
+        el.append(Paragraph(
+            f"The persons you have identified in connection with these concerns — "
+            f"<b>{names}</b> — are assessed under Shield's separate, confidential "
+            "deconfliction process. The purpose of that assessment is to formally rule "
+            "persons out as threat vectors; its working contents are maintained in "
+            "Shield's internal files and are not part of this document.", ss["Body"]))
+    elif poi_n:
+        el.append(Paragraph(
+            "Persons you have identified in connection with these concerns are assessed "
+            "under Shield's separate, confidential deconfliction process. That assessment "
+            "is maintained in Shield's internal files and is deliberately not part of this "
+            "document.", ss["Body"]))
+
+    _section_expected_environment(el, ss, baseline, sources)
+
+    if options.get("rf_environment") and baseline:
+        _section_rf_environment(el, ss, baseline, company)
+    if options.get("case_studies"):
+        _section_case_studies(el, ss, _attested_case_studies(db), company)
+
+    el.append(Paragraph("Methodology (what the sweep will do)", ss["H1x"]))
+    for para in (
+        "The premises are swept across the full frequency range the analyzer supports, with "
+        "extra dwell time on the bands where surveillance devices commonly operate. An exterior "
+        "reference reading lets us tell a signal that originates inside your premises from the "
+        "ordinary signals present everywhere in the area.",
+        "Every detected signal is matched against the expected environment above and classified. "
+        "Signals that cannot be accounted for are localized room-by-room and, where warranted, "
+        "hunted with a directional antenna. You receive a final report mirroring exactly what is "
+        "found on site. This survey is receive-only; nothing is transmitted.",
+    ):
+        el.append(Paragraph(para, ss["Body"]))
+
+    cb = _watermark_and_footer(False, company)
+    doc.build(el, onFirstPage=cb, onLaterPages=cb)
+    db.execute("INSERT INTO reports (session_id,path,kind,generated_utc) VALUES (?,?,?,?)",
+               (session_id, path, "PRESWEEP", time.time()))
+    return {"path": path, "kind": "PRESWEEP"}
+
+
+def generate_internal_memo(db, cfg, session_id: int, reports_dir: str) -> dict:
+    """CONFIDENTIAL internal investigative memorandum — Shield's own file copy.
+    Includes the Persons of Interest / deconfliction assessment that is excluded
+    from every client-facing document. Marked confidential, internal, not for
+    client distribution; investigative hypotheses, not findings of fact."""
+    ss = _styles()
+    session = db.query_one("SELECT * FROM sessions WHERE id=?", (session_id,))
+    if not session:
+        raise ValueError("no such session")
+    eng = db.query_one("SELECT * FROM engagement WHERE session_id=?", (session_id,)) or {}
+    poi = db.query("SELECT * FROM persons_of_interest WHERE session_id=? ORDER BY "
+                   "CASE status WHEN 'concern' THEN 0 WHEN 'open' THEN 1 "
+                   "WHEN 'cleared' THEN 2 ELSE 3 END, name", (session_id,))
+    case_files = db.query("SELECT filename, kind, uploaded_utc FROM case_files "
+                          "WHERE session_id=? ORDER BY uploaded_utc", (session_id,))
+    company = cfg.get("branding", "company", default="")
+    operator = session["operator"] or cfg.get("branding", "operator", default="")
+
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    os.makedirs(reports_dir, exist_ok=True)
+    path = os.path.join(reports_dir, f"session{session_id}_internal_memo_{ts}.pdf")
+    doc = SimpleDocTemplate(path, pagesize=letter, topMargin=0.7 * inch,
+                            bottomMargin=0.8 * inch, leftMargin=0.75 * inch,
+                            rightMargin=0.75 * inch,
+                            title=f"CONFIDENTIAL Internal Memorandum — session {session_id}")
+    el = []
+    el.append(Paragraph("CONFIDENTIAL — INTERNAL INVESTIGATIVE MEMORANDUM", ss["Cover"]))
+    el.append(Paragraph(f"{company} — Technical Surveillance Counter-Measures", ss["Body"]))
+    el.append(Spacer(1, 12))
+    head = [["Matter / location", session["address"]],
+            ["Client", eng.get("client_name") or "—"],
+            ["Engagement", (eng.get("engagement_type") or "onsite").capitalize()],
+            ["Prepared by", operator or "—"],
+            ["Date", time.strftime("%B %d, %Y  %H:%M")]]
+    t = Table(head, colWidths=[2.0 * inch, 5.0 * inch])
+    t.setStyle(TableStyle([("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+                           ("FONTSIZE", (0, 0), (-1, -1), 10),
+                           ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                           ("LINEBELOW", (0, 0), (-1, -1), 0.4, colors.HexColor("#cccccc"))]))
+    el.append(t)
+    el.append(Spacer(1, 12))
+
+    el.append(Paragraph("Confidentiality & use", ss["H1x"]))
+    el.append(Paragraph(
+        "<b>This is an internal Shield investigative memorandum. It is confidential and is NOT "
+        "to be provided to the client or any third party.</b> The assessments below are "
+        "investigative hypotheses based on the information available at the time of writing — "
+        "not findings of fact. This memorandum is not a consumer report and was not prepared for "
+        "any FCRA-covered purpose; it must not be used as a basis for any employment, tenancy, "
+        "credit, insurance, or other adverse action against any person named. Any background "
+        "information was gathered for, and limited to, legitimate counter-surveillance "
+        "assessment of persons identified by the client. If prepared at the direction of legal "
+        "counsel, it may constitute protected work product.", ss["Body"]))
+
+    if eng.get("client_concerns"):
+        el.append(Paragraph("Client's stated concerns", ss["H1x"]))
+        el.append(Paragraph(eng["client_concerns"], ss["Body"]))
+
+    el.append(Paragraph("Persons of Interest — Deconfliction Assessment", ss["H1x"]))
+    if poi:
+        cleared = sum(1 for p in poi if p["status"] == "cleared")
+        concern = sum(1 for p in poi if p["status"] == "concern")
+        el.append(Paragraph(
+            f"{len(poi)} person(s) assessed — {cleared} cleared, {concern} of concern, "
+            f"{len(poi) - cleared - concern} open. Goal of this assessment is to clear persons "
+            "by ruling out access, means, and motive.", ss["Body"]))
+        rows = [["Person / relationship", "Status", "Access", "Capability (basis)",
+                 "Motive / conduct", "Analyst notes"]]
+        for p in poi:
+            cap = (p["capability_tier"] or "unknown")
+            if p["capability_basis"]:
+                cap += f" — {p['capability_basis']}"
+            mc = "; ".join(x for x in (p["motive"], p["conduct_note"]) if x)
+            rows.append([
+                Paragraph(f"<b>{p['name']}</b><br/>{p['relationship'] or ''}", ss["Cell"]),
+                p["status"].upper(),
+                Paragraph((p["access_tier"] or "") + (": " + p["access_note"]
+                          if p["access_note"] else ""), ss["Cell"]),
+                Paragraph(cap[:160], ss["Cell"]),
+                Paragraph(mc[:160], ss["Cell"]),
+                Paragraph((p["analyst_notes"] or "")[:160], ss["Cell"])])
+        el.append(_table(rows, [1.3 * inch, 0.7 * inch, 0.9 * inch, 1.5 * inch,
+                                1.4 * inch, 1.2 * inch], font_size=7))
+        el.append(Paragraph("Detailed assessments", ss["H1x"]))
+        el.append(Paragraph(
+            "Full working notes per person — investigative hypotheses, not findings of "
+            "fact. Opportunity vectors are hypotheses about <i>where</i> to look or "
+            "de-conflict, not assertions that anything has occurred there.", ss["Body"]))
+        for p in poi:
+            named = " · named by the client" if p.get("named_by_client") else \
+                " · investigator-identified"
+            el.append(Paragraph(f"<b>{p['name']}</b> — {p['status'].upper()}{named}",
+                                ss["Body"]))
+            for label, key in (("Relationship", "relationship"),
+                               ("Source of facts", "source"),
+                               ("Motive", "motive"),
+                               ("Access", "access_note"),
+                               ("Capability basis", "capability_basis"),
+                               ("Resources", "resources_note"),
+                               ("Documented conduct", "conduct_note"),
+                               ("Analyst judgment", "analyst_notes"),
+                               ("Opportunity vectors", "opportunity_vectors")):
+                if (p.get(key) or "").strip():
+                    el.append(Paragraph(f"<b>{label}:</b> {p[key]}", ss["Body"]))
+    else:
+        el.append(Paragraph("No persons of interest recorded for this matter.", ss["Body"]))
+
+    if case_files:
+        el.append(Paragraph("Source documents on file (internal)", ss["H1x"]))
+        rows = [["File", "Kind", "Received"]]
+        for f in case_files:
+            rows.append([Paragraph(f["filename"], ss["Cell"]), f["kind"] or "",
+                         time.strftime("%Y-%m-%d", time.localtime(f["uploaded_utc"]))])
+        el.append(_table(rows, [3.2 * inch, 1.5 * inch, 1.3 * inch]))
+        el.append(Paragraph("Source documents are retained internally; their contents are not "
+                            "reproduced here.", ss["Cell"]))
+
+    el.append(Spacer(1, 10))
+    el.append(Paragraph("This memorandum accompanies, and does not replace, the technical sweep "
+                        "report. Technical findings are documented separately.", ss["Cell"]))
+
+    cb = _confidential_footer(company)
+    doc.build(el, onFirstPage=cb, onLaterPages=cb)
+    db.execute("INSERT INTO reports (session_id,path,kind,generated_utc) VALUES (?,?,?,?)",
+               (session_id, path, "INTERNAL_MEMO", time.time()))
+    return {"path": path, "kind": "INTERNAL_MEMO"}
+
+
+def DeviceRange(device: dict) -> str:
+    mods = device.get("modules") or []
+    if not mods:
+        return "(device reported no modules)"
+    spans = sorted([(m["min_mhz"], m["max_mhz"]) for m in mods])
+    gaps = [(a[1], b[0]) for a, b in zip(spans, spans[1:]) if b[0] > a[1]]
+    lo, hi = spans[0][0], max(s[1] for s in spans)
+    lo_txt = f"{lo * 1000:.0f} kHz" if lo < 1 else f"{lo:.3f} MHz"
+    hi_txt = f"{hi / 1000:.1f} GHz" if hi >= 1000 else f"{hi:.1f} MHz"
+    if gaps:
+        return (f"coverage {lo_txt} – {hi_txt} with gap(s): "
+                + ", ".join(f"{a:.1f}–{b:.1f} MHz" for a, b in gaps))
+    return f"continuous coverage {lo_txt} – {hi_txt}"
+
+
+def export_csv(db, session_id: int, out_dir: str) -> str:
+    import csv as _csv
+    os.makedirs(out_dir, exist_ok=True)
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    path = os.path.join(out_dir, f"session{session_id}_signals_{ts}.csv")
+    signals = db.query("SELECT * FROM signals WHERE session_id=? ORDER BY center_mhz",
+                       (session_id,))
+    cols = ["center_mhz", "bw_khz", "peak_dbm", "avg_dbm", "floor_dbm", "persistence",
+            "phase", "module", "room", "classification", "matched_label", "match_reason",
+            "caution", "anomaly_score", "score_reason", "interior_delta_db",
+            "localization_score", "strongest_room"]
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = _csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
+        w.writeheader()
+        for s in signals:
+            w.writerow(s)
+    return path

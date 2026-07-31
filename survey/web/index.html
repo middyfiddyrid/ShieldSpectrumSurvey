@@ -1,0 +1,1994 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Sentry RF Intelligence — Sweep Console</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script>try{var _t=localStorage.getItem('dcs-theme');if(_t)document.documentElement.className=_t;}catch(e){}</script>
+<style>
+:root {
+  --bg:#0b0f14; --panel:#121922; --panel2:#0e141c; --line:#1f2a37;
+  --txt:#cfd8e3; --dim:#7b8794; --bright:#ffffff;
+  --mono:'Consolas','Cascadia Mono',monospace;
+  --ui-font:var(--mono);
+  --green:#2ecc71; --amber:#f39c12; --red:#e74c3c; --blue:#3498db; --cyan:#1abc9c;
+  --hover:#15202b; --input-bg:#0d1319; --td-line:#16202b; --btn-bg:#1c2733;
+  --ok-bg:#103c2c; --warn-bg:#3b2c10; --err-bg:#3b1515; --info-bg:#0d2433; --neutral-bg:#1c2733;
+}
+/* ---- THEME: Daylight (clean corporate light) ---- */
+html.t-day {
+  --bg:#eef2f6; --panel:#ffffff; --panel2:#e7edf3; --line:#d0d9e2;
+  --txt:#23303d; --dim:#6b7a89; --bright:#101c28;
+  --ui-font:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+  --green:#188a4a; --amber:#b06f0a; --red:#c93a2b; --blue:#1c66c2; --cyan:#0d8474;
+  --hover:#f0f4f8; --input-bg:#fbfdfe; --td-line:#e4eaf0; --btn-bg:#f2f6fa;
+  --ok-bg:#ddf2e6; --warn-bg:#f7ead0; --err-bg:#f9ddd9; --info-bg:#dcebf9; --neutral-bg:#e7edf3;
+}
+/* ---- THEME: Case File (paper dossier) ---- */
+html.t-file {
+  --bg:#f4efe1; --panel:#fbf7eb; --panel2:#efe7d2; --line:#c9bc9d;
+  --txt:#2a2417; --dim:#8a7f66; --bright:#1d180d;
+  --mono:'Courier New','Courier',monospace;
+  --green:#33702f; --amber:#a3690e; --red:#a8271c; --blue:#1f4e79; --cyan:#33635a;
+  --hover:#f1ead6; --input-bg:#fdfaf1; --td-line:#e6ddc4; --btn-bg:#f1ead6;
+  --ok-bg:#e4e9d0; --warn-bg:#efe3c0; --err-bg:#f0d8d0; --info-bg:#dfe6ea; --neutral-bg:#efe7d2;
+}
+/* ---- THEME: Neon (spectrum violet) ---- */
+html.t-neon {
+  --bg:#0a0618; --panel:#160f2e; --panel2:#120b24; --line:#332a58;
+  --txt:#e6e0f5; --dim:#7f74a8; --bright:#ffffff;
+  --green:#37e08d; --amber:#ffb454; --red:#ff5d6c; --blue:#8f77ff; --cyan:#00e0c6;
+  --hover:#1d1440; --input-bg:#100a22; --td-line:#221a44; --btn-bg:#241b47;
+  --ok-bg:#0e3326; --warn-bg:#3a2a10; --err-bg:#3a1420; --info-bg:#1c1450; --neutral-bg:#241b47;
+}
+* { box-sizing:border-box; margin:0; padding:0; }
+body { background:var(--bg); color:var(--txt); font-family:var(--ui-font); font-size:14px;
+       display:flex; flex-direction:column; height:100vh; overflow:hidden; }
+
+header { display:flex; align-items:center; gap:16px; padding:10px 16px;
+         background:var(--panel); border-bottom:1px solid var(--line); }
+header .brand { font-size:16px; font-weight:bold; letter-spacing:2px; color:var(--bright); font-family:var(--mono); }
+header .brand span { color:var(--cyan); }
+header .addr { color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; }
+.btn { background:var(--btn-bg); color:var(--txt); border:1px solid var(--line); padding:8px 14px;
+       font-family:var(--mono); font-size:13px; cursor:pointer; border-radius:3px; }
+.btn:hover { border-color:var(--cyan); color:var(--bright); }
+.btn:disabled { opacity:.35; cursor:not-allowed; }
+.btn.primary { background:var(--ok-bg); border-color:var(--green); color:var(--green); font-weight:bold; }
+.btn.danger { border-color:var(--red); color:var(--red); }
+.btn.big { font-size:16px; padding:14px 26px; }
+#btn-report { background:var(--warn-bg); border-color:var(--amber); color:var(--amber); font-weight:bold; }
+a.report-ready { color:var(--green); background:var(--ok-bg); border:1px solid var(--green);
+  padding:2px 8px; font-weight:bold; text-decoration:none; border-radius:3px; }
+a.report-ready:hover { background:var(--green); color:#0b0f14; }
+#report-msg { white-space:nowrap; }
+a.freqlink { color:var(--cyan); text-decoration:none; font-weight:bold; cursor:pointer; }
+.ctl-sep { width:1px; align-self:stretch; min-height:20px; background:var(--line); margin:0 3px; }
+.ctl-push { margin-left:auto; }
+/* a detection that is FLAGGED or attributed to the client's own space is the
+   real threat — make the operator's eye jump straight to it */
+.threat-row td { background:rgba(231,76,60,.07) !important; }
+.threat-row td:first-child { box-shadow:inset 3px 0 0 var(--red); }
+.threat-tag { color:var(--red); font-weight:bold; font-size:10px; letter-spacing:.05em; }
+a.freqlink:hover { color:#fff; text-decoration:underline; }
+
+main { display:flex; flex:1; min-height:0; }
+nav { width:230px; background:var(--panel2); border-right:1px solid var(--line);
+      padding:14px 0; display:flex; flex-direction:column; gap:2px; }
+nav .step { padding:10px 16px; cursor:pointer; display:flex; align-items:center; gap:10px;
+            border-left:3px solid transparent; color:var(--dim); }
+nav .step:hover { color:var(--txt); background:var(--hover); }
+nav .step.active { border-left-color:var(--cyan); color:var(--bright); background:var(--hover); }
+nav .dot { width:9px; height:9px; border-radius:50%; background:#2c3a49; flex:none; }
+nav .dot.done { background:var(--green); }
+nav .dot.live { background:var(--amber); animation:pulse 1s infinite; }
+nav .dot.fail { background:var(--red); }
+@keyframes pulse { 50% { opacity:.3; } }
+nav .sect { margin-top:14px; padding:4px 16px; font-size:11px; color:#42506033;
+            color:#4a5866; letter-spacing:1px; }
+
+#panel { flex:1; overflow-y:auto; padding:20px 24px; min-width:0; }
+.view { display:none; } .view.active { display:block; }
+h2 { font-size:15px; letter-spacing:2px; color:var(--bright); margin-bottom:14px; }
+h2 .tag { font-size:11px; color:var(--dim); letter-spacing:0; margin-left:10px; }
+h3 { font-size:13px; color:var(--cyan); margin:16px 0 8px; }
+p.note { color:var(--dim); margin:8px 0; line-height:1.5; }
+
+.card { background:var(--panel); border:1px solid var(--line); border-radius:4px;
+        padding:16px; margin-bottom:14px; }
+.row { display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
+label { color:var(--dim); font-size:12px; }
+input, select { background:var(--input-bg); color:var(--txt); border:1px solid var(--line);
+                padding:8px 10px; font-family:var(--mono); font-size:13px; border-radius:3px; }
+input[type=text] { width:380px; }
+input.small { width:90px; }
+
+table { width:100%; border-collapse:collapse; font-size:12.5px; }
+th { text-align:left; color:var(--dim); font-weight:normal; border-bottom:1px solid var(--line);
+     padding:6px 8px; position:sticky; top:0; background:var(--panel); cursor:pointer; }
+td { padding:5px 8px; border-bottom:1px solid var(--td-line); }
+tr:hover td { background:var(--hover); }
+.scroll { max-height:420px; overflow-y:auto; border:1px solid var(--line); }
+
+.pill { display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; }
+.pill.ok, .pill.VERIFIED, .pill.IDENTIFIED, .pill.done { background:var(--ok-bg); color:var(--green); }
+.pill.KNOWN_BAND, .pill.PLAUSIBLE { background:var(--warn-bg); color:var(--amber); }
+.pill.ANOMALY, .pill.UNVERIFIED { background:var(--err-bg); color:var(--red); }
+.pill.SCANNING { background:var(--warn-bg); color:var(--amber); }
+.pill.cached, .pill.stale { background:var(--warn-bg); color:var(--amber); }
+.pill.PLAUSIBLE { background:var(--warn-bg); color:var(--amber); }
+.pill.failed, .pill.UNVERIFIED, .pill.error { background:var(--err-bg); color:var(--red); }
+.pill.not_configured { background:var(--neutral-bg); color:var(--dim); }
+.pill.running { background:var(--info-bg); color:var(--blue); }
+.caution { color:var(--amber); }
+.score-hi { color:var(--red); font-weight:bold; }
+.score-md { color:var(--amber); }
+
+#strip { width:100%; height:64px; background:#0d1319; border:1px solid var(--line); }
+#livechart, #dirchart { width:100%; height:230px; background:#0d1319; border:1px solid var(--line); }
+.chart-wrap { position:relative; width:70%; }
+.sweep-stage { display:flex; gap:12px; width:70%; align-items:stretch; }
+.sweep-stage .chart-wrap { width:auto; flex:1 1 auto; min-width:0; }
+.sweep-side { flex:0 0 250px; display:flex; flex-direction:column; gap:10px; min-width:0; }
+#sweep-label-layer { position:absolute; inset:0; pointer-events:none; overflow:hidden; }
+.sweep-label { position:absolute; pointer-events:auto; font:10px monospace; padding:2px 6px;
+  background:rgba(8,12,18,.92); border:1px solid; border-radius:2px; white-space:nowrap;
+  cursor:pointer; transform:translate(-50%,-100%); max-width:220px; overflow:hidden;
+  text-overflow:ellipsis; }
+.sweep-label.tier-IDENTIFIED { border-color:#2ecc71; color:#9ef0b8; }
+.sweep-label.tier-KNOWN_BAND { border-color:#f39c12; color:#ffd89a; }
+.sweep-label.tier-ANOMALY { border-color:#e74c3c; color:#ffb0a8; }
+.sweep-label.tier-SCANNING { border-color:#ffd24a; color:#ffe9a8; }
+.sweep-label.scanmore { border-color:#6b7280; color:#aab4c2; opacity:.85;
+  background:rgba(8,12,18,.78); }
+.sweep-label.caution { box-shadow:0 0 0 1px #e74c3c inset; }
+.sweep-label .sub { display:block; font-size:9px; color:var(--dim); margin-top:1px; }
+.waterfall-wrap { position:relative; width:100%; }
+.waterfall-wrap > canvas { display:block; }
+.spectrum-probe-layer { position:absolute; inset:0; z-index:5; display:none;
+  pointer-events:none; overflow:hidden; }
+#sp-layer-chart { z-index:7; }
+.spectrum-probe-layer.show { display:block; }
+.sp-band { position:absolute; top:0; bottom:0; min-width:3px;
+  background:rgba(26,188,156,.16); border-left:1px solid rgba(26,188,156,.88);
+  border-right:1px solid rgba(26,188,156,.88); }
+.sp-line { position:absolute; top:0; bottom:0; width:1px; background:#ffe181;
+  box-shadow:0 0 7px rgba(255,225,129,.7); }
+.sp-readout { position:absolute; left:5px; bottom:5px; padding:3px 5px;
+  white-space:nowrap; color:#081018; background:#ffe181; border-radius:2px;
+  font:bold 9px 'Consolas','Cascadia Mono',monospace; }
+.spectrum-probe-card { padding:9px 10px; background:rgba(8,12,18,.9);
+  border:1px solid #2c3a49; border-radius:3px; color:var(--txt); font-size:10.5px; }
+.spectrum-probe-card[hidden] { display:none; }
+.sp-head { display:flex; align-items:center; justify-content:space-between; gap:6px;
+  margin-bottom:7px; }
+.sp-state { color:var(--cyan); font:9px 'Consolas','Cascadia Mono',monospace;
+  letter-spacing:.09em; }
+.sp-state.pinned { color:#ffe181; }
+.sp-threat { padding:2px 6px; border:1px solid #566573; border-radius:9px;
+  color:var(--dim); font:bold 9px 'Consolas','Cascadia Mono',monospace; }
+.sp-threat.low { color:var(--green); border-color:var(--green); }
+.sp-threat.review { color:var(--amber); border-color:var(--amber); }
+.sp-threat.high { color:var(--red); border-color:var(--red); }
+.sp-frequency { margin-bottom:7px; color:#f4f7fa;
+  font:bold 19px/1 'Consolas','Cascadia Mono',monospace; }
+.sp-frequency small { color:var(--dim); font:9px 'Consolas','Cascadia Mono',monospace; }
+.sp-metrics { display:grid; grid-template-columns:1fr 1fr; gap:4px 8px;
+  padding:6px 0; border-top:1px solid #1f2a37; border-bottom:1px solid #1f2a37; }
+.sp-metrics span { color:var(--dim); font-size:9px; display:block; }
+.sp-metrics b { color:#cfd8e3; font:10px 'Consolas','Cascadia Mono',monospace; }
+.sp-identity { margin-top:7px; color:#cfd8e3; line-height:1.35; }
+.sp-identity b { color:#f4f7fa; }
+.sp-pipeline { display:grid; gap:3px; margin-top:7px; }
+.sp-stage { color:#52606f; font:9px 'Consolas','Cascadia Mono',monospace; }
+.sp-stage.done { color:#91a69f; }
+.sp-stage.done::before { content:"✓ "; color:var(--green); }
+.sp-stage.wait::before { content:"· "; color:#52606f; }
+.sp-candidates { margin-top:6px; color:#8fa0b8; line-height:1.35; }
+.sp-candidate { padding:3px 5px; margin-top:3px; border-left:2px solid #2c8f7c;
+  background:rgba(22,44,39,.45); }
+.sp-candidate b { color:#cfd8e3; }
+.sp-legal { margin-top:7px; color:#8d8272; font-size:9px; line-height:1.35; }
+.sp-actions { display:flex; flex-wrap:wrap; gap:5px; margin-top:7px; }
+.sp-actions .btn { font-size:9px; padding:4px 6px; }
+/* F6: legend reworked into a slim chip bar under the chart — the old vertical
+   legend box ate a whole side-column; the chips free that space for the chart
+   and the segment intel panel. Same checkbox ids, same behaviour. */
+.chart-col { flex:1 1 auto; min-width:0; display:flex; flex-direction:column; gap:6px; }
+.legend-chips { display:flex; flex-wrap:wrap; gap:5px 8px; align-items:center;
+  font-size:10.5px; color:#7b8794; }
+.legend-chips .leg-title { font-size:9px; letter-spacing:.1em; text-transform:uppercase;
+  opacity:.8; margin-right:2px; }
+.legend-chips .chip { display:inline-flex; gap:5px; align-items:center; cursor:pointer;
+  border:1px solid #1f2a37; border-radius:999px; padding:2px 9px;
+  background:rgba(8,12,18,.55); white-space:nowrap; }
+.legend-chips .chip:hover { border-color:#2c3a49; color:#cfd8e3; }
+.legend-chips .sw { width:9px; height:9px; border:1px solid; display:inline-block; flex:0 0 auto; }
+/* F6: sustained-segment info area — tab bar + swappable panes where the
+   signal table lives; LIVE pane shades its window on the main chart */
+#live-shade { position:absolute; top:0; bottom:0; display:none; pointer-events:none;
+  background:rgba(255,210,74,.13); border-left:1px solid #ffd24a; border-right:1px solid #ffd24a; }
+.info-tabs { width:70%; display:none; gap:4px; align-items:center; }
+.info-tabs button { background:#1c2733; color:#7b8794; border:1px solid #1f2a37;
+  border-bottom:none; padding:5px 12px; font-family:'Consolas','Cascadia Mono',monospace;
+  font-size:11px; cursor:pointer; border-radius:3px 3px 0 0; letter-spacing:.06em; }
+.info-tabs button:hover { color:#cfd8e3; }
+.info-tabs button.on { color:#ffd24a; background:#0d1319; border-color:#3b2c10; }
+.info-tabs .note { margin-left:auto; font-size:10.5px; }
+.info-pane { width:70%; }
+#pane-live canvas { width:100%; height:150px; display:block; background:#04070c;
+  border:1px solid #26303d; }
+#pane-live .note, #pane-catalog .cat-item { font-size:11px; }
+#pane-catalog .cat-item { padding:7px 9px; border-bottom:1px solid #16202b; }
+#pane-catalog .cat-item b { color:#cfd8e3; font-size:11.5px; }
+#btn-sustain.on { background:#3b2c10; color:#ffd24a; border-color:#ffd24a; }
+.custom-tech { display:none; flex-wrap:wrap; gap:10px 18px; align-items:center; margin-top:8px; }
+.custom-tech.show { display:flex; }
+/* custom/manual sweep controls: field-readable — big values, bright labels,
+   dotted underline = hover for the explanation */
+.custom-tech label { font-size:14px; color:var(--txt); display:inline-flex;
+                     align-items:center; gap:7px; }
+.custom-tech label[title], .manual-adv[title] { cursor:help; }
+.custom-tech .fld { text-decoration:underline dotted #5a6a7a; text-underline-offset:3px; }
+.custom-tech input.small { width:96px; font-size:16px; padding:10px;
+                           text-align:center; }
+.custom-tech input.small::placeholder { font-size:14px; }
+.manual-adv { font-size:13.5px; }
+.manual-adv { display:inline-flex; gap:5px; align-items:center; color:var(--amber); cursor:pointer; }
+/* F2 per-segment expected/found + anomalies side panel */
+.seg-panel { font-size:11px; color:var(--dim); display:flex; flex-direction:column; gap:5px;
+  padding:8px 10px; background:rgba(8,12,18,.55); border:1px solid var(--line); border-radius:3px; }
+.seg-panel .seg-range { color:var(--cyan); font-size:9px; }
+.seg-sub { font-size:9px; letter-spacing:.06em; text-transform:uppercase; color:var(--dim);
+  opacity:.8; margin-top:3px; }
+.seg-count { color:var(--red); }
+.seg-list { display:flex; flex-direction:column; gap:2px; max-height:120px; overflow:auto; }
+.seg-list:empty::after { content:"—"; color:var(--dim); opacity:.5; }
+.seg-item { display:flex; gap:6px; align-items:baseline; line-height:1.25; }
+.seg-item .f { color:var(--txt); font-variant-numeric:tabular-nums; flex:0 0 auto; }
+.seg-item .n { color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.seg-item.looking { opacity:.65; }
+.seg-item.found .ic { color:var(--green); }
+.seg-item.looking .ic { color:var(--amber); }
+.seg-item.anom .f { color:#ffb0a8; }
+.seg-item .mute { margin-left:auto; cursor:pointer; color:var(--dim); flex:0 0 auto; opacity:.6; }
+.seg-item .mute:hover { opacity:1; color:var(--amber); }
+.seg-item.muted { opacity:.4; text-decoration:line-through; }
+.focus-btn { font-size:10px; padding:3px 6px; align-self:stretch; }
+.focus-btn.on { background:var(--warn-bg); color:var(--amber); border-color:var(--amber); }
+/* F4: single-RX (Pluto) shows ONE Main sweep step; RF Explorer keeps LEFT/RIGHT */
+body.single-rx nav .step.rfe-only { display:none; }
+body:not(.single-rx) nav .step.single-only { display:none; }
+/* F8: live-ledger signal thumbnails, next-step chips, segment review, lightbox */
+.sig-thumb { width:72px; height:26px; display:block; background:#04070c;
+  border:1px solid #26303d; border-radius:2px; cursor:zoom-in; }
+.sig-thumb:hover { border-color:var(--cyan); box-shadow:0 0 4px var(--cyan); }
+#tbl-live-ledger td.thumb-cell { padding:2px 6px; }
+#tbl-live-ledger tr[data-sid] { cursor:pointer; }
+.ns-chip { display:inline-block; padding:2px 8px; border-radius:3px; font-size:10px;
+  font-family:var(--mono); background:transparent; border:1px solid; cursor:pointer;
+  white-space:nowrap; letter-spacing:.04em; }
+.ns-chip.listen { border-color:var(--cyan); color:var(--cyan); }
+.ns-chip.identify { border-color:var(--blue); color:var(--blue); }
+.ns-chip.test, .ns-chip.inventory { border-color:var(--amber); color:var(--amber); }
+.ns-chip.clear { border-color:var(--green); color:var(--green); }
+.ns-chip.review { border-color:var(--cyan); color:var(--cyan); background:var(--info-bg); }
+.ns-chip.urgent { border-color:var(--red); color:var(--red); background:var(--err-bg);
+  font-weight:bold; }
+.ns-chip.done { border-color:var(--line); color:var(--dim); cursor:default; }
+.ns-chip:hover { filter:brightness(1.25); }
+#review-banner { display:none; align-items:center; gap:12px; padding:5px 10px;
+  background:var(--warn-bg); border:1px solid var(--amber); color:var(--amber);
+  font-size:12px; border-radius:3px; }
+#review-banner .btn { padding:3px 10px; font-size:11px; }
+#sl-card { background:var(--panel); border:1px solid var(--line); border-radius:4px;
+  padding:16px; width:min(1060px,94vw); max-height:92vh; overflow-y:auto;
+  display:flex; flex-direction:column; gap:12px; }
+#sl-head { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+#sl-head b { font-size:16px; color:var(--bright); }
+#sl-close { margin-left:auto; }
+#sl-img { width:100%; background:#04070c; border:1px solid #26303d; border-radius:3px;
+  min-height:120px; }
+#sl-next { display:flex; gap:10px; align-items:baseline; font-size:12.5px;
+  padding:8px 10px; background:var(--panel2); border:1px solid var(--line);
+  border-radius:3px; }
+#sl-next:empty { display:none; }
+/* sweep-complete NEXT toast */
+#next-step-banner { display:none; position:fixed; top:12px; left:50%; transform:translateX(-50%);
+  z-index:80; align-items:center; gap:12px; padding:8px 12px; background:var(--panel);
+  border:1px solid var(--green); border-radius:6px; box-shadow:0 4px 18px rgba(0,0,0,.4);
+  font-size:13px; color:var(--txt); }
+#next-step-banner.show { display:flex; }
+#next-step-banner #next-step-msg b { color:var(--green); }
+#next-step-banner .btn { padding:5px 12px; font-size:12px; }
+#sl-nav-pos { margin-left:auto; }
+#sl-head #sl-close { margin-left:8px; }
+/* verification rundown — the ordered "how we know what this is" checklist */
+#sl-rundown { display:flex; flex-direction:column; gap:1px; border:1px solid var(--line);
+  border-radius:3px; overflow:hidden; }
+.rd-item { display:flex; gap:10px; align-items:flex-start; padding:7px 10px;
+  background:var(--panel2); font-size:12.5px; }
+.rd-item .rd-ic { flex:0 0 auto; width:16px; text-align:center; font-weight:bold; }
+.rd-item.done .rd-ic { color:var(--green); }
+.rd-item.pending .rd-ic { color:var(--amber); }
+.rd-item.na .rd-ic { color:var(--dim); }
+.rd-item .rd-body { flex:1 1 auto; min-width:0; }
+.rd-item .rd-title { color:var(--bright); }
+.rd-item .rd-detail { color:var(--dim); }
+.rd-item .rd-run { flex:0 0 auto; }
+.rd-cands { display:flex; flex-wrap:wrap; gap:5px; margin-top:5px; }
+.rd-cand { cursor:pointer; border:1px solid var(--cyan); color:var(--cyan);
+  border-radius:10px; padding:1px 9px; font-size:11px; background:var(--info-bg); }
+.rd-cand:hover { background:var(--cyan); color:var(--bg); }
+.rd-cand.top { border-color:var(--green); color:var(--green); background:var(--ok-bg); }
+#sl-compare { border:1px solid var(--cyan); border-radius:3px; padding:10px 12px;
+  background:var(--panel2); }
+#sl-compare h4 { font-size:12px; color:var(--cyan); margin:0 0 8px; letter-spacing:.05em; }
+.cmp-cols { display:grid; grid-template-columns:1fr 1fr; gap:14px; font-size:12px; }
+.cmp-cols .kv { font-size:12px; }
+.cmp-col h5 { font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:.06em;
+  margin:0 0 4px; }
+.cmp-match { color:var(--green); } .cmp-miss { color:var(--amber); }
+
+.overlay { position:fixed; inset:0; background:rgba(5,8,12,.93); display:none;
+           align-items:center; justify-content:center; z-index:50; flex-direction:column; gap:26px; }
+.overlay.show { display:flex; }
+.overlay .msg { font-size:26px; color:#fff; text-align:center; max-width:700px; line-height:1.5; }
+.overlay .sub { color:var(--dim); font-size:14px; }
+
+footer { display:flex; gap:24px; padding:8px 16px; background:var(--panel);
+         border-top:1px solid var(--line); font-size:12px; color:var(--dim); }
+footer b { color:var(--txt); font-weight:normal; }
+footer .sim { color:var(--red); font-weight:bold; }
+
+.progress { height:14px; background:#0d1319; border:1px solid var(--line); border-radius:3px;
+            overflow:hidden; }
+.progress > div { height:100%; background:linear-gradient(90deg,#136b46,var(--green));
+                  width:0%; transition:width .5s; }
+.meter { font-size:46px; color:var(--green); text-align:center; padding:10px;
+         font-weight:bold; }
+.post-review-bar { display:none; align-items:center; gap:12px; padding:8px 16px;
+  background:var(--panel2); border-bottom:1px solid var(--line); font-size:12px; }
+.post-review-bar.show { display:flex; }
+.post-review-bar .pr-dot { width:10px; height:10px; border-radius:50%;
+  background:var(--amber); flex:0 0 auto; }
+.post-review-bar.running .pr-dot { animation:pulse 1s infinite; }
+.post-review-bar.complete .pr-dot { background:var(--green); }
+.post-review-bar.needs-radio .pr-dot { background:var(--amber); }
+.post-review-bar.error .pr-dot { background:var(--red); }
+.post-review-bar .progress { width:150px; height:9px; flex:0 0 auto; }
+.ambient-layout { display:flex; align-items:center; gap:24px; flex-wrap:wrap; }
+.ambient-chart { width:220px; height:220px; flex:0 0 auto; }
+.ambient-legend { flex:1 1 320px; min-width:260px; }
+.ambient-legend-row { display:grid; grid-template-columns:12px 1fr auto; gap:8px;
+  align-items:center; padding:4px 0; border-bottom:1px solid var(--td-line); }
+.ambient-swatch { width:10px; height:10px; border-radius:2px; }
+.ambient-kpis { display:flex; flex-wrap:wrap; gap:20px; margin-bottom:10px; }
+.ambient-kpis b { color:var(--bright); font-size:20px; }
+.ambient-priority { margin-top:12px; border-left:3px solid var(--red);
+  padding:8px 12px; background:var(--err-bg); display:none; }
+.dir-guide { display:grid; grid-template-columns:1fr auto; gap:8px 14px;
+  align-items:center; margin:10px 0; }
+.dir-guide-track { height:18px; background:#0d1319; border:1px solid var(--line);
+  border-radius:3px; overflow:hidden; grid-column:1 / -1; }
+.dir-guide-fill { height:100%; width:0%; transition:width .18s;
+  background:linear-gradient(90deg,var(--green),var(--amber) 68%,var(--red)); }
+.dir-trend { font-size:30px; font-weight:bold; min-width:48px; text-align:center; }
+.dir-stage { color:var(--cyan); font-weight:bold; letter-spacing:.05em; }
+.bigfreq { font-size:22px; color:var(--bright); text-align:center; }
+.kv { display:grid; grid-template-columns:auto 1fr; gap:4px 18px; font-size:13px; }
+.kv div:nth-child(odd) { color:var(--dim); }
+/* ---- public demo mode ---- */
+#demo-banner { display:none; background:var(--warn-bg); color:var(--amber); text-align:center;
+  font-size:12.5px; padding:7px 16px; border-bottom:1px solid var(--amber); font-weight:bold; }
+body.demo #demo-banner { display:block; }
+body.demo nav .step[data-view="poi"],
+body.demo #card-casefiles { display:none !important; }
+/* ---- session tab accordions ---- */
+.sess-group { margin-bottom: 12px; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--panel); }
+.sess-group summary { padding: 12px 16px; cursor: pointer; color: var(--cyan);
+  font-size: 13px; letter-spacing: 1px; list-style: none; user-select: none; }
+.sess-group summary::-webkit-details-marker { display: none; }
+.sess-group summary::before { content: "▸ "; color: var(--dim); }
+.sess-group[open] summary::before { content: "▾ "; }
+.sess-group summary:hover { color: var(--bright); }
+.sess-body { padding: 0 12px 12px; }
+.sess-body .card { margin-bottom: 10px; }
+.sess-body .card:last-child { margin-bottom: 0; }
+#triage-flash { color: var(--amber); margin-bottom: 8px; }
+/* ---- monitor: SDR Console-style S-meter + signal history ---- */
+.smeter { background:#04070c; border:1px solid #26303d; border-radius:3px; padding:8px 10px; margin-bottom:8px; }
+.smeter .row { margin-bottom:6px; gap:18px; flex-wrap:wrap; }
+.smeter b { color:#fff; font-weight:bold; }
+.smeter .sm-peak { color:#ffd24a; }
+.smeter .sm-mean { color:#39d98a; }
+.smeter .sm-snr { color:#00c8ff; }
+.smeter-track { position:relative; height:14px; background:#0d1319; border:1px solid #26303d; border-radius:2px; overflow:hidden; }
+.smeter-fill { height:100%; width:0%; background:linear-gradient(90deg,#136b46,#39d98a 55%,#ffd24a); transition:width .12s; }
+.smeter-peak { position:absolute; top:1px; width:5px; height:12px; background:#ffd24a; border-radius:1px;
+  transform:translateX(-50%); box-shadow:0 0 6px #ffd24a88; transition:left .12s; }
+#insp-history { width:100%; height:56px; display:block; background:#04070c; border:1px solid #26303d; margin-top:4px; }
+/* ---- theme pinning: full-screen sweep overlays are instrument surfaces —
+   they keep the dark ops palette in every theme so live RF stays readable ---- */
+.overlay, #sweep-overlay {
+  --panel:#121922; --panel2:#0e141c; --line:#1f2a37;
+  --txt:#cfd8e3; --dim:#7b8794; --bright:#ffffff;
+  --ui-font:'Consolas','Cascadia Mono',monospace;
+  --green:#2ecc71; --amber:#f39c12; --red:#e74c3c; --blue:#3498db; --cyan:#1abc9c;
+  --hover:#15202b; --input-bg:#0d1319; --td-line:#16202b; --btn-bg:#1c2733;
+  --ok-bg:#103c2c; --warn-bg:#3b2c10; --err-bg:#3b1515; --info-bg:#0d2433; --neutral-bg:#1c2733;
+  font-family:'Consolas','Cascadia Mono',monospace;
+}
+/* ---- mid-sweep split monitor: sweep keeps running in one pane, the live
+   monitor (reparented #inspect-panel) opens in the other. split off = layout
+   byte-identical to before (pane-main recreates the overlay's column+gap). ---- */
+#sweep-split { display:flex; flex-direction:row; justify-content:center; width:100%; min-height:0; }
+#sweep-pane-main { display:flex; flex-direction:column; align-items:center; gap:26px;
+                   flex:1 1 auto; min-width:0; width:100%; }
+#sweep-pane-monitor { display:none; min-width:0; }
+#sweep-overlay.split-on { justify-content:flex-start; overflow:auto; padding:18px 0; }
+#sweep-overlay.split-on #sweep-split { gap:14px; padding:0 1%; }
+#sweep-overlay.split-on #sweep-pane-main { flex:1 1 56%; }
+#sweep-overlay.split-on #sweep-pane-monitor { display:block; flex:0 0 42%; max-height:78vh;
+  overflow:auto; background:var(--panel); border:1px solid var(--line); border-radius:4px; padding:10px; }
+#sweep-overlay.split-on #sweep-pane-main .sweep-stage,
+#sweep-overlay.split-on #sweep-pane-main .info-pane { width:100%; }
+/* stacked variant (⇅): sweep on top, monitor below */
+#sweep-overlay.split-h #sweep-split { flex-direction:column; align-items:center; }
+#sweep-overlay.split-h.split-on #sweep-pane-monitor { flex:0 0 auto; width:96%; max-height:46vh; }
+#sweep-mon-head, #page-mon-head { display:flex; gap:8px; align-items:center; margin-bottom:8px; }
+#sweep-monitor-slot > .card, #page-monitor-slot > .card { margin:0; }
+.seg-item.freqlink { cursor:pointer; }
+.seg-item.freqlink:hover { background:var(--hover); }
+/* ---- page-level monitor dock: same split, everywhere a frequency is clickable.
+   Dock off = layout identical to before (#page-split just passes flex through). ---- */
+#page-split { display:flex; flex:1; min-width:0; min-height:0; }
+#page-split > #panel { flex:1 1 auto; }
+#page-monitor-pane { display:none; min-width:0; overflow-y:auto; background:var(--panel2); padding:12px; }
+body.pdock-on #page-monitor-pane { display:block; }
+body.pdock-on.pdock-v #page-split { flex-direction:row; }
+body.pdock-on.pdock-v #page-monitor-pane { flex:0 0 42%; border-left:1px solid var(--line); }
+body.pdock-on.pdock-h #page-split { flex-direction:column; }
+body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid var(--line); }
+/* ---- style switcher (footer) ---- */
+.themebar { display:flex; align-items:center; gap:3px; }
+.themebar .tb-lbl { font-size:10px; letter-spacing:.14em; color:var(--dim); margin-right:4px; }
+.themebar button { display:inline-flex; align-items:center; gap:5px; cursor:pointer;
+  background:transparent; color:var(--dim); border:1px solid transparent; border-radius:10px;
+  font-family:var(--mono); font-size:11px; padding:2px 8px; }
+.themebar button i { width:8px; height:8px; border-radius:50%; border:1px solid #ffffff44; display:inline-block; }
+.themebar button:hover { color:var(--txt); border-color:var(--line); }
+.themebar button.on { color:var(--txt); border-color:var(--cyan); background:var(--hover); }
+</style>
+</head>
+<body>
+
+<div id="demo-banner">⚠ DEMO — DeConfliction Systems · simulated, no live hardware. Enter any address to explore the preliminary assessment. Do not enter confidential information.</div>
+
+<header>
+  <div class="brand">SENTRY <span>RF INTELLIGENCE</span> // SWEEP CONSOLE</div>
+  <div class="addr" id="hdr-addr">no session</div>
+  <span class="note" id="report-msg"></span>
+  <button class="btn" id="btn-csv" disabled>EXPORT CSV</button>
+  <button class="btn" id="btn-report" disabled>GENERATE REPORT</button>
+</header>
+
+<div id="post-review-bar" class="post-review-bar" role="status" aria-live="polite">
+  <span class="pr-dot"></span>
+  <b id="post-review-label">AUTOMATIC SIGNAL REVIEW</b>
+  <span id="post-review-msg">waiting</span>
+  <div class="progress" id="post-review-progress"><div id="post-review-fill"></div></div>
+  <span id="post-review-count" class="note"></span>
+  <button class="btn" id="post-review-action" style="display:none"></button>
+</div>
+
+<main>
+<nav id="nav">
+  <div class="step" data-view="session"><div class="dot" id="dot-session"></div>1 · SESSION / BASELINE</div>
+  <div class="step" data-view="baseline"><div class="dot" id="dot-baseline"></div>2 · BASELINE TABLE</div>
+  <div class="step" data-view="ambient"><div class="dot" id="dot-ambient"></div>3 · AMBIENT REFERENCE</div>
+  <div class="step single-only" data-view="sweep"><div class="dot" id="dot-sweep"></div>4 · MAIN SWEEP</div>
+  <div class="step rfe-only" data-view="sweepL"><div class="dot" id="dot-sweepL"></div>4 · SWEEP — LEFT PORT</div>
+  <div class="step rfe-only" data-view="sweepR"><div class="dot" id="dot-sweepR"></div>5 · SWEEP — RIGHT PORT</div>
+  <div class="step" data-view="rooms"><div class="dot" id="dot-rooms"></div>6 · ROOMS</div>
+  <div class="step" data-view="directional"><div class="dot" id="dot-directional"></div>7 · DIRECTIONAL</div>
+  <div class="step" data-view="results"><div class="dot" id="dot-results"></div>8 · RESULTS / REPORT</div>
+  <div class="step" data-view="triage"><div class="dot" id="dot-triage"></div>9 · MANUAL TRIAGE</div>
+  <div class="sect">TOOLS</div>
+  <div class="step" data-view="bugscan"><div class="dot" id="dot-bugscan"></div>BUG-FREQUENCY SCAN</div>
+  <div class="step" data-view="poi"><div class="dot" id="dot-poi"></div>PERSONS OF INTEREST</div>
+  <div class="step" data-view="wiki"><div class="dot" id="dot-wiki"></div>SIGNAL WIKI</div>
+  <div class="step" data-view="cases"><div class="dot" id="dot-cases"></div>CASE STUDIES</div>
+  <div class="step" data-view="inventory"><div class="dot" id="dot-inventory"></div>INVENTORY (WiFi/BT)</div>
+  <div class="step" data-view="network"><div class="dot" id="dot-network"></div>NETWORK CHECK (LAN)</div>
+  <div class="step" data-view="devicelab"><div class="dot" id="dot-devicelab"></div>CAPTURE DEVICE (lab)</div>
+  <div class="step" data-view="calibration"><div class="dot" id="dot-calibration"></div>CALIBRATION (shop)</div>
+</nav>
+
+<!-- page-level monitor dock (2026-07-11): clicking a frequency ANYWHERE splits
+     the content area — the view you're on stays put, the live monitor docks
+     beside/below it (MonitorDock in app.js reparents #inspect-panel here). -->
+<div id="page-split">
+<div id="panel">
+
+<!-- ============ SESSION ============ -->
+<section class="view active" id="view-session">
+  <h2>SWEEP SESSION <span class="tag">address → database-verified baseline</span></h2>
+  <p class="note">Expand each section as you need it. <b>Site setup</b> is what you do on arrival;
+     <b>Client paperwork</b> before the sweep briefing; <b>Internal</b> is Shield-only.</p>
+
+  <details class="sess-group" id="sess-site" open>
+    <summary>SITE SETUP — address, radio, baseline</summary>
+    <div class="sess-body">
+  <div class="card">
+    <div class="row">
+      <label>Street address</label>
+      <input type="text" id="in-address" placeholder="123 Main St, City, ST 65536">
+    </div>
+    <div class="row">
+      <label>Broadcast radius (mi)</label><input class="small" id="in-rb" value="25">
+      <label>Land-mobile/cellular radius (mi)</label><input class="small" id="in-rl" value="5">
+      <label>Operator</label><input class="small" id="in-op" style="width:160px">
+    </div>
+    <p class="note">FM/AM/TV transmitters sit on tall towers <b>10–40 mi out</b>, so keep the
+       broadcast radius near <b>25 mi</b> — under ~15 mi it returns no stations (looks empty but isn't).
+       Land-mobile/cellular licensees &amp; towers are local, so ~5 mi is right.</p>
+    <div class="row">
+      <button class="btn primary" id="btn-create">CREATE SESSION</button>
+      <span id="session-msg" class="note"></span>
+    </div>
+  </div>
+  <div class="card">
+    <h3>DEVICE</h3>
+    <div class="row">
+      <label class="note" for="device-source">Source</label>
+      <select id="device-source">
+        <option value="rfexplorer">RF Explorer (6G Combo)</option>
+        <option value="pluto">ADALM-Pluto (SDR)</option>
+        <option value="b220">B220 Mini (USRP SDR, 2 antenna ports)</option>
+      </select>
+      <button class="btn" id="btn-connect">CONNECT</button>
+      <button class="btn" id="btn-install-driver" title="Install the Pluto / USB radio driver — needed once per computer before the radio will connect">INSTALL RADIO DRIVER</button>
+      <span id="device-msg" class="note">not connected</span>
+    </div>
+    <div id="device-roles" class="note" style="display:none; margin:6px 0; padding:6px 8px; border:1px solid var(--line,#345); border-radius:4px;"></div>
+    <p class="note">Pick whichever radio is plugged in, then CONNECT. Your choice is
+       remembered for next time. Only one program can use a given radio at a time.</p>
+    <div id="device-detail" class="kv"></div>
+  </div>
+  <div class="card">
+    <h3>BUILD BASELINE</h3>
+    <p class="note">Queries FCC FM/AM/TV, ULS extract, OpenCellID and the static national
+       allocation table in parallel. Results cached to disk — repeat visits work with
+       degraded internet.</p>
+    <div class="row">
+      <button class="btn primary" id="btn-baseline" disabled>BUILD EXPECTED-SPECTRUM BASELINE</button>
+      <span id="baseline-msg" class="note"></span>
+    </div>
+    <div id="baseline-sources"></div>
+  </div>
+  <div class="card">
+    <h3>SIGNAL ID <span class="tag">sigidwiki — what is this emitter?</span></h3>
+    <p class="note">Enter a frequency (and bandwidth if known), or paste a detected signal's
+       frequency. With an <b>SDR</b> (Pluto or B220) connected this captures live IQ, measures the
+       modulation, and ranks the closest known signal types from a sigidwiki-style reference —
+       then confirm against the linked sigidwiki page. (RF Explorer: frequency/bandwidth match only.)</p>
+    <div class="row">
+      <label class="note" for="id-center">Center MHz</label>
+      <input id="id-center" type="text" placeholder="e.g. 433.92" style="width:110px">
+      <label class="note" for="id-bw">BW kHz</label>
+      <input id="id-bw" type="text" placeholder="optional" style="width:90px">
+      <button class="btn" id="btn-identify">IDENTIFY</button>
+      <span id="id-msg" class="note"></span>
+    </div>
+    <div id="id-results"></div>
+  </div>
+    </div>
+  </details>
+
+  <details class="sess-group" id="sess-client">
+    <summary>CLIENT PAPERWORK — engagement &amp; pre-sweep briefing</summary>
+    <div class="sess-body">
+  <div class="card">
+    <h3>PRE-SWEEP / ENGAGEMENT <span class="tag" style="font-size:11px">client-facing briefing — public RF baseline + terms only</span></h3>
+    <div class="row">
+      <label>Engagement</label>
+      <select id="eng-type">
+        <option value="onsite">On-site (tech sweeps)</option>
+        <option value="remote">Remote (deposit → ship package → return device)</option>
+        <option value="monitoring">Continuous monitoring (keep device, billed)</option>
+      </select>
+      <input type="text" id="eng-client" class="small" style="width:180px" placeholder="client name">
+      <input type="text" id="eng-contact" class="small" style="width:180px" placeholder="client contact">
+    </div>
+    <div class="row">
+      <label>Client's stated concerns (goes in the client briefing)</label>
+    </div>
+    <textarea id="eng-concerns" style="width:100%; height:48px; background:var(--input-bg); color:var(--txt); border:1px solid var(--line); font-family:var(--mono)"></textarea>
+    <div class="row" style="margin-top:8px">
+      <label>Offsite intake meeting (neutral venue near the property)</label>
+      <input type="text" id="eng-offsite" style="flex:1" placeholder="e.g. Mid-Continent Public Library — Liberty Branch, 1000 Kent St">
+    </div>
+    <div class="row">
+      <label>Scheduling / time on site</label>
+      <input type="text" id="eng-scheduling" style="flex:1" placeholder="e.g. Saturdays or Wednesdays; allow four hours on site">
+    </div>
+    <div class="row" style="margin-top:8px">
+      <label><input type="checkbox" class="report-opt" data-opt="rf_environment"> include RF environment &amp; shielding assessment (broadcast + cell-tower proximity; also applies to the final report)</label>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button class="btn" id="btn-eng-save">SAVE ENGAGEMENT</button>
+      <button class="btn primary" id="btn-presweep">GENERATE PRE-SWEEP BRIEFING (PDF)</button>
+      <span class="note" id="eng-msg"></span>
+    </div>
+    <h3 style="margin-top:14px">TECHNICIAN TASKS</h3>
+    <table id="tbl-tech-tasks"></table>
+    <div class="row" style="margin-top:6px">
+      <input type="text" id="tech-task-input" style="flex:1" placeholder="add a technician task">
+      <button class="btn" id="btn-tech-task-add">ADD</button>
+    </div>
+  </div>
+    </div>
+  </details>
+
+  <details class="sess-group" id="sess-internal">
+    <summary>INTERNAL — case files &amp; prior sessions</summary>
+    <div class="sess-body">
+  <div class="card" id="card-casefiles">
+    <h3>CASE FILES <span class="tag" style="font-size:11px" id="card-casefiles-tag">background reports, intake docs — stored locally, never shared externally by the app</span></h3>
+    <p class="note">⚠ Sensitive PII. These are working files for this engagement only. Consumer
+    background data (BeenVerified etc.) is governed by its provider TOS and the FCRA — keep it
+    inside its permissible purpose; do not use it for employment/tenancy/credit decisions.</p>
+    <div class="row">
+      <input type="file" id="case-file-input" multiple>
+      <input type="text" id="case-file-kind" class="small" style="width:160px" placeholder="kind (e.g. background)">
+      <button class="btn" id="btn-case-upload">UPLOAD</button>
+      <span class="note" id="case-msg"></span>
+    </div>
+    <table id="tbl-case-files"></table>
+  </div>
+  <div class="card">
+    <h3>PREVIOUS SESSIONS</h3>
+    <div class="scroll" style="max-height:180px"><table id="tbl-sessions"></table></div>
+  </div>
+  <div class="card" id="card-sweep-history">
+    <div class="row">
+      <h3 style="margin:0">HISTORICAL SWEEPS</h3>
+      <button class="btn" id="btn-history-refresh">REFRESH</button>
+      <span class="note" id="history-msg"></span>
+    </div>
+    <p class="note">Open a previous session above, then correct where a saved sweep was
+      performed or add technician notes here. <b>SAVE + RESCORE</b> preserves the raw RF
+      measurements, updates linked signal metadata, records an audit entry, and recomputes
+      every derived anomaly score in that session.</p>
+    <p class="note caution">Use <b>OUTSIDE / AMBIENT</b> only for exterior reference work.
+      An outside sweep must not receive indoor-strength or room-localization points.</p>
+    <div class="scroll" style="max-height:420px"><table id="tbl-sweep-history"></table></div>
+  </div>
+    </div>
+  </details>
+</section>
+
+<!-- ============ BASELINE TABLE ============ -->
+<section class="view" id="view-baseline">
+  <h2>EXPECTED-SPECTRUM BASELINE <span class="tag" id="baseline-count"></span></h2>
+  <div id="baseline-degraded"></div>
+  <div class="card">
+    <div class="row">
+      <label>Filter</label><input type="text" id="baseline-filter" style="width:240px" placeholder="callsign / service / band">
+      <label>Source</label><select id="baseline-source-filter"><option value="">all</option></select>
+    </div>
+    <canvas id="strip"></canvas>
+    <p class="note">Colored bands = expected allocations · markers after sweeping
+      (green identified · amber known band · red anomaly · ⚠ caution band)</p>
+    <p class="note">Click any <b>frequency</b> below to tune the SDR there — see the analyzer
+       &amp; waterfall and hear the demodulated audio, then step with Next. (Frequencies below
+       325 MHz need the AD9364 extension.)</p>
+    <div class="scroll" style="max-height:480px"><table id="tbl-baseline"></table></div>
+  </div>
+  <div class="card" id="inspect-panel" style="display:none">
+    <div class="row">
+      <b id="insp-title">—</b>
+      <span id="insp-live-badge" class="pill" style="margin-left:4px;color:#6b7b90">○ IDLE</span>
+      <label class="note" for="insp-mode">Mode</label>
+      <select id="insp-mode">
+        <option value="nfm">NFM</option><option value="wfm">WFM</option><option value="am">AM</option><option value="usb">USB</option><option value="lsb">LSB</option><option value="cw">CW</option><option value="pocsag">POCSAG (decode)</option><option value="flex">FLEX (decode)</option><option value="ook">OOK/FSK device (decode)</option><option value="dtmf">DTMF (decode)</option>
+      </select>
+      <span class="ctl-sep"></span>
+      <label class="note" title="step through the hunt list of unknown signals">hunt</label>
+      <button class="btn" id="insp-prev" title="previous signal">◂</button>
+      <button class="btn" id="insp-next" title="next signal">▸</button>
+      <button class="btn" id="insp-auto" title="auto-advance through the hunt list">AUTO ▸▸</button>
+      <label class="note">dwell <input id="insp-dwell" type="number" value="6" min="3" step="1" style="width:44px"></label>
+      <span class="ctl-sep"></span>
+      <label class="note" title="actions on THIS signal">act</label>
+      <button class="btn primary" id="insp-analyze" title="receive & identify — what IS this signal & what's it transmitting?">◎ ANALYZE</button>
+      <button class="btn" id="insp-dissem" title="per-class next action for this signal — runs ANALYZE first if needed, then offers LISTEN / DECODE / CAPTURE EVIDENCE">✈ DISSEMINATE</button>
+      <button class="btn" id="insp-record" title="record demodulated audio of this signal">● REC</button>
+      <button class="btn" id="insp-record-iq" title="capture RAW IQ as forensic evidence (encrypted / unknown intruder — for authorities)">⦿ IQ</button>
+      <button class="btn ctl-push" id="insp-close">Close ✕</button>
+      <span id="insp-msg" class="note"></span>
+    </div>
+    <p id="insp-note" class="note"></p>
+    <div id="insp-attribution" class="row" style="display:none;gap:6px;margin:4px 0;align-items:center"></div>
+    <div id="insp-smeter" class="smeter">
+      <div class="row" style="margin-bottom:4px">
+        <span>PEAK <b class="sm-peak" id="sm-peak">—</b> dBm</span>
+        <span>MEAN <b class="sm-mean" id="sm-mean">—</b> dBm</span>
+        <span>SNR <b class="sm-snr" id="sm-snr">—</b> dB</span>
+        <span class="note">noise floor <span id="sm-floor">—</span> dBm</span>
+      </div>
+      <div class="smeter-track">
+        <div class="smeter-fill" id="sm-bar-fill"></div>
+        <div class="smeter-peak" id="sm-peak-dot" style="left:0;display:none"></div>
+      </div>
+      <div id="sm-demod" class="note" style="margin-top:6px"></div>
+    </div>
+    <div class="row" style="margin-top:6px">
+      <label class="note">Instant BW</label>
+      <select id="insp-ibw" title="SDR capture bandwidth — wider = smoother spectrum; USB may limit at 20 MHz">
+        <option value="2.4">2.4 MHz</option>
+        <option value="5">5 MHz</option>
+        <option value="10">10 MHz</option>
+        <option value="20">20 MHz</option>
+      </select>
+      <label class="note">Filter</label>
+      <select id="insp-bw" title="Demodulator channel width — the shaded yellow band on the analyzer. Narrow for a tight signal (pager/voice), wide for a wireless mic or video subcarrier. Scroll-wheel over the analyzer also adjusts it.">
+        <option value="auto" selected>Auto (mode)</option>
+        <option value="3000">3 kHz</option>
+        <option value="6000">6 kHz</option>
+        <option value="12000">12 kHz</option>
+        <option value="16000">16 kHz</option>
+        <option value="25000">25 kHz</option>
+        <option value="50000">50 kHz</option>
+        <option value="100000">100 kHz</option>
+        <option value="150000">150 kHz</option>
+        <option value="250000">250 kHz</option>
+      </select>
+      <label class="note">Block</label>
+      <select id="insp-block-s" title="Shorter blocks = faster, more live spectrum (more USB load)">
+        <option value="0.1">0.1 s</option>
+        <option value="0.15" selected>0.15 s</option>
+        <option value="0.25">0.25 s</option>
+        <option value="0.5">0.5 s</option>
+      </select>
+      <span class="note" id="insp-ibw-hint">USB 2.0: use 5–10 MHz if audio stutters at 20 MHz</span>
+    </div>
+    <div class="note">LIVE ANALYZER — click to tune the demodulator. Yellow dot = peak in the filter passband; trace uses hang-and-decay smoothing (SDR Console style).</div>
+    <canvas id="insp-analyzer" width="660" height="170" style="width:100%;height:170px;display:block;background:#04070c;border:1px solid #26303d"></canvas>
+    <div class="note" style="margin-top:6px">SIGNAL HISTORY <span class="tag">peak strength · last 60 s while listening</span></div>
+    <canvas id="insp-history" width="660" height="56"></canvas>
+    <div class="note" style="margin-top:6px">WATERFALL (time ↓ × frequency)</div>
+    <canvas id="insp-waterfall" width="660" height="220" style="width:100%;height:220px;display:block;background:#04070c;border:1px solid #26303d"></canvas>
+    <div class="row" style="margin-top:6px"><audio id="insp-audio" controls style="width:100%"></audio></div>
+    <pre id="insp-decode" class="note" style="display:none;white-space:pre-wrap;margin-top:6px;background:#04070c;border:1px solid #26303d;padding:8px"></pre>
+    <div id="insp-analyze-out" style="display:none;margin-top:8px"></div>
+    <div id="insp-recordings" class="note" style="margin-top:6px"></div>
+  </div>
+</section>
+
+<!-- ============ AMBIENT ============ -->
+<section class="view" id="view-ambient">
+  <h2>AMBIENT REFERENCE SWEEP <span class="tag">outside / vehicle at curb — TSCM standard practice</span></h2>
+  <div class="card">
+    <p class="note">Run one full sweep OUTSIDE the premises before sweeping interior rooms.
+    The correlation engine compares interior vs. exterior amplitude per signal — a signal
+    meaningfully stronger inside is locally sourced, even in a "likely normal" band like 2.4 GHz.</p>
+    <div class="row">
+      <label>Time profile</label>
+      <select id="ambient-profile">
+        <option value="quick">Quick Recon (~15 min)</option>
+        <option value="standard" selected>Standard (~45 min)</option>
+        <option value="deep">Deep (~2 hr)</option>
+        <option value="custom">Custom…</option>
+      </select>
+      <input class="small" id="ambient-minutes" value="45" title="Total time budget in minutes — the planner splits it across all segments." style="display:none">
+      <span class="note" id="ambient-eta"></span>
+    </div>
+    <div class="custom-tech" id="custom-ambient">
+      <label title="Segment width — the sweep covers the band in chunks this wide. Narrower = smoother live chart and finer per-view detail, but more segments = longer total scan. Blank = auto from the time profile."><span class="fld">Seg MHz</span> <input class="small" id="ambient-seg" type="number" min="2" step="1" placeholder="auto"></label>
+      <label title="Averaging passes per segment — sweeps averaged together before moving on. More = steadier noise floor and better weak-signal pull-out, but slower. Blank = auto."><span class="fld">Avg passes</span> <input class="small" id="ambient-avg" type="number" min="3" step="1" placeholder="auto"></label>
+      <label title="Max-hold dwell per segment, in seconds — how long the analyzer sits catching short bursts (key fobs, frequency hoppers, Wi-Fi). Longer = better odds on intermittent transmitters. Blank = auto."><span class="fld">MaxHold s</span> <input class="small" id="ambient-mh" type="number" min="2" step="0.5" placeholder="auto"></label>
+      <label title="Resolution bandwidth (SDR only) — the width of each frequency bin. Finer (smaller) separates close-together signals and lowers the displayed noise floor, but sweeps slower. RF Explorer: fixed at segment span ÷ 112. Blank = auto."><span class="fld">RBW kHz</span> <input class="small" id="ambient-rbw" type="number" min="1" step="1" placeholder="auto"></label>
+      <label class="manual-adv" title="The sweep holds on each segment until you press NEXT instead of auto-advancing — walk the antenna around the room, then step. For slow, deliberate room work."><input type="checkbox" id="manual-ambient"> Manual advance — I step each segment</label>
+      <span class="note">hover any box for what it does · narrower segments = smoother chart, longer scan</span>
+    </div>
+    <div class="row">
+      <button class="btn primary big" id="btn-ambient">START AMBIENT SWEEP (both modules)</button>
+    </div>
+  </div>
+  <div class="card" id="ambient-status"></div>
+</section>
+
+<!-- ============ BUG-FREQUENCY SCAN ============ -->
+<section class="view" id="view-bugscan">
+  <h2>BUG-FREQUENCY SCAN <span class="tag">known surveillance bands only — focused depth</span></h2>
+  <div class="card">
+    <p class="note">A focused sweep of <b>only the bands covert devices are known to use</b> —
+    315 / 433 / 915 MHz ISM, DECT, 2.4 / 5.8 GHz Wi-Fi, GPS, and the cellular uplink blocks a
+    GSM/LTE bug transmits in — skipping broadcast and general allocations entirely. The full time
+    budget is spent on those bands, so each gets far deeper dwell and finer resolution than a
+    full-spectrum sweep of the same profile. Run it like an interior sweep: omni antenna, both SMA
+    ports in sequence.</p>
+    <div class="row">
+      <label>Room</label><input type="text" id="bug-room" style="width:220px" placeholder="room label (optional)">
+      <label>Depth</label>
+      <select id="bug-profile">
+        <option value="quick">Quick Recon (~15 min)</option>
+        <option value="standard" selected>Standard (~45 min)</option>
+        <option value="deep">Deep (~2 hr)</option>
+        <option value="custom">Custom…</option>
+      </select>
+      <input class="small" id="bug-minutes" value="45" title="Total time budget in minutes — the planner splits it across all segments." style="display:none">
+      <span class="note" id="bug-eta"></span>
+    </div>
+    <div class="custom-tech" id="custom-bug">
+      <label title="Segment width — the sweep covers the band in chunks this wide. Narrower = smoother live chart and finer per-view detail, but more segments = longer total scan. Blank = auto from the time profile."><span class="fld">Seg MHz</span> <input class="small" id="bug-seg" type="number" min="2" step="1" placeholder="auto"></label>
+      <label title="Averaging passes per segment — sweeps averaged together before moving on. More = steadier noise floor and better weak-signal pull-out, but slower. Blank = auto."><span class="fld">Avg passes</span> <input class="small" id="bug-avg" type="number" min="3" step="1" placeholder="auto"></label>
+      <label title="Max-hold dwell per segment, in seconds — how long the analyzer sits catching short bursts (key fobs, frequency hoppers, Wi-Fi). Longer = better odds on intermittent transmitters. Blank = auto."><span class="fld">MaxHold s</span> <input class="small" id="bug-mh" type="number" min="2" step="0.5" placeholder="auto"></label>
+      <label title="Resolution bandwidth (SDR only) — the width of each frequency bin. Finer (smaller) separates close-together signals and lowers the displayed noise floor, but sweeps slower. RF Explorer: fixed at segment span ÷ 112. Blank = auto."><span class="fld">RBW kHz</span> <input class="small" id="bug-rbw" type="number" min="1" step="1" placeholder="auto"></label>
+      <label class="manual-adv" title="The sweep holds on each segment until you press NEXT instead of auto-advancing — walk the antenna around the room, then step. For slow, deliberate room work."><input type="checkbox" id="manual-bug"> Manual advance — I step each segment</label>
+      <span class="note">hover any box for what it does</span>
+    </div>
+    <div class="row">
+      <button class="btn primary big" id="btn-bugscan">START BUG-FREQUENCY SCAN (both modules)</button>
+    </div>
+  </div>
+  <div class="card" id="bugscan-status"></div>
+</section>
+
+<!-- ============ SWEEP LEFT / RIGHT ============ -->
+<section class="view" id="view-sweepL">
+  <h2>INTERIOR SWEEP — LEFT SMA PORT <span class="tag">Phase A · omni antenna</span></h2>
+  <div class="card">
+    <div class="row">
+      <label>Room</label><input type="text" id="in-room-L" style="width:220px" placeholder="e.g. Office">
+      <label>Profile</label>
+      <select id="profile-L">
+        <option value="quick">Quick Recon</option>
+        <option value="standard" selected>Standard</option>
+        <option value="deep">Deep</option>
+        <option value="custom">Custom…</option>
+      </select>
+      <input class="small" id="minutes-L" value="45" style="display:none">
+      <span class="note" id="eta-L"></span>
+    </div>
+    <div class="custom-tech" id="custom-L">
+      <label title="Segment width — the sweep covers the band in chunks this wide. Narrower = smoother live chart and finer per-view detail, but more segments = longer total scan. Blank = auto from the time profile."><span class="fld">Seg MHz</span> <input class="small" id="seg-L" type="number" min="2" step="1" placeholder="auto"></label>
+      <label title="Averaging passes per segment — sweeps averaged together before moving on. More = steadier noise floor and better weak-signal pull-out, but slower. Blank = auto."><span class="fld">Avg passes</span> <input class="small" id="avg-L" type="number" min="3" step="1" placeholder="auto"></label>
+      <label title="Max-hold dwell per segment, in seconds — how long the analyzer sits catching short bursts (key fobs, frequency hoppers, Wi-Fi). Longer = better odds on intermittent transmitters. Blank = auto."><span class="fld">MaxHold s</span> <input class="small" id="mh-L" type="number" min="2" step="0.5" placeholder="auto"></label>
+      <label title="Resolution bandwidth (SDR only) — the width of each frequency bin. Finer (smaller) separates close-together signals and lowers the displayed noise floor, but sweeps slower. RF Explorer: fixed at segment span ÷ 112. Blank = auto."><span class="fld">RBW kHz</span> <input class="small" id="rbw-L" type="number" min="1" step="1" placeholder="auto"></label>
+      <label class="manual-adv" title="The sweep holds on each segment until you press NEXT instead of auto-advancing — walk the antenna around the room, then step. For slow, deliberate room work."><input type="checkbox" id="manual-L"> Manual advance — I step each segment</label>
+      <span class="note">hover any box for what it does</span>
+    </div>
+    <div class="row"><button class="btn primary big" id="btn-sweep-L">START PHASE A — LEFT MODULE</button></div>
+  </div>
+  <div class="card" id="sweep-status-L"></div>
+</section>
+
+<section class="view" id="view-sweepR">
+  <h2>INTERIOR SWEEP — RIGHT SMA PORT <span class="tag">Phase B · move the omni antenna</span></h2>
+  <div class="card">
+    <div class="row">
+      <label>Room</label><input type="text" id="in-room-R" style="width:220px" placeholder="same room as Phase A">
+      <label>Profile</label>
+      <select id="profile-R">
+        <option value="quick">Quick Recon</option>
+        <option value="standard" selected>Standard</option>
+        <option value="deep">Deep</option>
+        <option value="custom">Custom…</option>
+      </select>
+      <input class="small" id="minutes-R" value="45" style="display:none">
+      <span class="note" id="eta-R"></span>
+    </div>
+    <div class="custom-tech" id="custom-R">
+      <label title="Segment width — the sweep covers the band in chunks this wide. Narrower = smoother live chart and finer per-view detail, but more segments = longer total scan. Blank = auto from the time profile."><span class="fld">Seg MHz</span> <input class="small" id="seg-R" type="number" min="2" step="1" placeholder="auto"></label>
+      <label title="Averaging passes per segment — sweeps averaged together before moving on. More = steadier noise floor and better weak-signal pull-out, but slower. Blank = auto."><span class="fld">Avg passes</span> <input class="small" id="avg-R" type="number" min="3" step="1" placeholder="auto"></label>
+      <label title="Max-hold dwell per segment, in seconds — how long the analyzer sits catching short bursts (key fobs, frequency hoppers, Wi-Fi). Longer = better odds on intermittent transmitters. Blank = auto."><span class="fld">MaxHold s</span> <input class="small" id="mh-R" type="number" min="2" step="0.5" placeholder="auto"></label>
+      <label title="Resolution bandwidth (SDR only) — the width of each frequency bin. Finer (smaller) separates close-together signals and lowers the displayed noise floor, but sweeps slower. RF Explorer: fixed at segment span ÷ 112. Blank = auto."><span class="fld">RBW kHz</span> <input class="small" id="rbw-R" type="number" min="1" step="1" placeholder="auto"></label>
+      <label class="manual-adv" title="The sweep holds on each segment until you press NEXT instead of auto-advancing — walk the antenna around the room, then step. For slow, deliberate room work."><input type="checkbox" id="manual-R"> Manual advance — I step each segment</label>
+      <span class="note">hover any box for what it does</span>
+    </div>
+    <div class="row"><button class="btn primary big" id="btn-sweep-R">START PHASE B — RIGHT MODULE</button></div>
+  </div>
+  <div class="card" id="sweep-status-R"></div>
+</section>
+
+<!-- ============ MAIN SWEEP (single-RX devices: Pluto) ============ -->
+<section class="view" id="view-sweep">
+  <h2>MAIN SWEEP — INSIDE <span class="tag">omni antenna · single wideband RX</span></h2>
+  <div class="card">
+    <p class="note">Inside the premises with the omni antenna. One wideband sweep covers the
+    whole range — no SMA-port swap. Tag a room if you're sweeping room by room.</p>
+    <div class="row">
+      <label>Room</label><input type="text" id="in-room-main" style="width:220px" placeholder="e.g. Office (optional)">
+      <label>Profile</label>
+      <select id="profile-main">
+        <option value="quick">Quick Recon</option>
+        <option value="standard" selected>Standard</option>
+        <option value="deep">Deep</option>
+        <option value="custom">Custom…</option>
+      </select>
+      <input class="small" id="minutes-main" value="45" style="display:none">
+      <span class="note" id="eta-main"></span>
+    </div>
+    <div class="custom-tech" id="custom-main">
+      <label title="Segment width — the sweep covers the band in chunks this wide. Narrower = smoother live chart and finer per-view detail, but more segments = longer total scan. Blank = auto from the time profile."><span class="fld">Seg MHz</span> <input class="small" id="seg-main" type="number" min="2" step="1" placeholder="auto"></label>
+      <label title="Averaging passes per segment — sweeps averaged together before moving on. More = steadier noise floor and better weak-signal pull-out, but slower. Blank = auto."><span class="fld">Avg passes</span> <input class="small" id="avg-main" type="number" min="3" step="1" placeholder="auto"></label>
+      <label title="Max-hold dwell per segment, in seconds — how long the analyzer sits catching short bursts (key fobs, frequency hoppers, Wi-Fi). Longer = better odds on intermittent transmitters. Blank = auto."><span class="fld">MaxHold s</span> <input class="small" id="mh-main" type="number" min="2" step="0.5" placeholder="auto"></label>
+      <label title="Resolution bandwidth (SDR only) — the width of each frequency bin. Finer (smaller) separates close-together signals and lowers the displayed noise floor, but sweeps slower. RF Explorer: fixed at segment span ÷ 112. Blank = auto."><span class="fld">RBW kHz</span> <input class="small" id="rbw-main" type="number" min="1" step="1" placeholder="auto"></label>
+      <label class="manual-adv" title="The sweep holds on each segment until you press NEXT instead of auto-advancing — walk the antenna around the room, then step. For slow, deliberate room work."><input type="checkbox" id="manual-main"> Manual advance — I step each segment</label>
+      <span class="note">hover any box for what it does</span>
+    </div>
+    <div id="sweep-radio-ready" class="note" style="margin:6px 0"></div>
+    <div class="row"><button class="btn primary big" id="btn-sweep-main">START MAIN SWEEP</button></div>
+  </div>
+  <div class="card" id="sweep-status-main"></div>
+</section>
+
+<!-- ============ ROOMS ============ -->
+<section class="view" id="view-rooms">
+  <h2>ROOM MODE <span class="tag">multi-room comparison · localization</span></h2>
+  <div class="card">
+    <p class="note">Tag each sweep with a room and repeat Phases A+B per room. Signals whose
+    amplitude jumps in one room get a localization score and rank to the top.</p>
+    <div class="row">
+      <label>Next room</label><input type="text" id="in-next-room" style="width:220px" placeholder="Master Bedroom">
+      <button class="btn primary" id="btn-next-room">NEXT ROOM → GO TO PHASE A</button>
+    </div>
+  </div>
+  <div class="card">
+    <h3>ROOM × FREQUENCY HEAT TABLE (peak dBm)</h3>
+    <div class="scroll"><table id="tbl-rooms"></table></div>
+  </div>
+</section>
+
+<!-- ============ DIRECTIONAL ============ -->
+<section class="view" id="view-directional">
+  <h2>DIRECTIONAL FOLLOW-UP <span class="tag">attach the directional antenna</span></h2>
+  <div class="card">
+    <p class="note" id="dir-instruction">Complete a sweep first — anomalies will queue here.</p>
+    <div class="scroll" style="max-height:200px"><table id="tbl-dir-queue"></table></div>
+  </div>
+  <div class="card" id="dir-live" style="display:none">
+    <div class="bigfreq" id="dir-freq"></div>
+    <div class="meter" id="dir-meter">—</div>
+    <div class="dir-guide">
+      <div>
+        <div class="dir-stage" id="dir-stage">DIRECTIONAL ANTENNA - sweep slowly</div>
+        <div class="note" id="dir-guidance">Move a few feet, pause, and let the reading settle.</div>
+      </div>
+      <div class="dir-trend" id="dir-trend">—</div>
+      <div class="dir-guide-track"><div class="dir-guide-fill" id="dir-strength-fill"></div></div>
+    </div>
+    <canvas id="dirchart"></canvas>
+    <div class="row" style="margin-top:10px">
+      <button class="btn" id="btn-dir-audio">GUIDANCE BEEP ON</button>
+      <input type="text" id="dir-notes" style="flex:1" placeholder="operator notes (bearing, suspected object…)">
+      <button class="btn" id="btn-dir-save">LOG READING + NOTES</button>
+      <button class="btn" id="btn-dir-next">NEXT ANOMALY →</button>
+      <button class="btn danger" id="btn-dir-stop">STOP</button>
+    </div>
+  </div>
+  <div class="card">
+    <h3>LOGGED DIRECTIONAL READINGS</h3>
+    <div class="scroll" style="max-height:200px"><table id="tbl-dir-log"></table></div>
+  </div>
+
+  <!-- PHASE DF (B220 dual coherent RX) -->
+  <div class="card" id="df-card">
+    <h3>PHASE DIRECTION FINDING <span class="tag">B220 two-antenna bearing — coherent RX-A + RX-B</span></h3>
+    <p class="note">Unlike the amplitude "warmer/colder" hunt above, this reads the
+      <b>phase difference</b> of the wavefront across two antennas and computes an actual
+      bearing. Needs the <b>B220</b> (two RX chains, shared LO) and both antennas on a bar a
+      known distance apart.
+      <b>Two-element arrays have a front/back mirror</b> — the true bearing and its mirror are
+      both shown; rotate the bar to break the tie (the true one stays put).</p>
+    <div class="row">
+      <label>Frequency MHz</label><input class="small" id="df-center" style="width:110px" placeholder="e.g. 433.92">
+      <label>Antenna spacing m</label><input class="small" id="df-spacing" style="width:70px" value="0.35"
+        title="Centre-to-centre distance between the two antennas. Must be ≤ half a wavelength at the target frequency for an unambiguous angle.">
+      <label>Room</label><input class="small" id="df-room" style="width:130px" placeholder="optional">
+      <button class="btn primary" id="btn-df-start">START PHASE DF</button>
+      <span class="note" id="df-msg"></span>
+    </div>
+    <div id="df-live" style="display:none; margin-top:10px">
+      <div style="display:flex; gap:16px; align-items:center; flex-wrap:wrap">
+        <canvas id="df-compass" width="220" height="220"
+          style="background:#04070c; border:1px solid #26303d; border-radius:6px; flex:0 0 auto"></canvas>
+        <div style="flex:1; min-width:220px">
+          <div class="bigfreq" id="df-bearing">—</div>
+          <div class="note" id="df-verdict" style="margin:4px 0"></div>
+          <div class="kv" id="df-stats" style="font-size:12px"></div>
+          <div class="note caution" id="df-warn" style="margin-top:6px"></div>
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn primary" id="btn-df-cal"
+          title="Hold the antenna bar broadside to the suspected emitter (both antennas the same distance from it) and tap this to zero the phase">◎ CALIBRATE (broadside = 0°)</button>
+        <button class="btn danger" id="btn-df-stop">STOP</button>
+        <span class="note">Calibrate once per frequency — retuning resets it.</span>
+      </div>
+    </div>
+    <div class="scroll" style="max-height:180px; margin-top:10px"><table id="tbl-df-log"></table></div>
+  </div>
+</section>
+
+<!-- ============ RESULTS ============ -->
+<section class="view" id="view-results">
+  <h2>RESULTS <span class="tag">anomalies ranked by score</span></h2>
+  <div class="card" id="results-summary" style="display:none"></div>
+  <div class="card" id="ambient-overview-card">
+    <h3>AMBIENT / RF ENVIRONMENT OVERVIEW <span class="tag">likely emitters, not raw hit count</span></h3>
+    <div id="ambient-overview-wait" class="note">Automatic post-sweep review has not run yet.</div>
+    <div id="ambient-overview" style="display:none">
+      <div class="ambient-kpis" id="ambient-kpis"></div>
+      <div class="ambient-layout">
+        <canvas id="ambient-pie" class="ambient-chart" width="220" height="220"></canvas>
+        <div class="ambient-legend" id="ambient-legend"></div>
+      </div>
+      <div class="ambient-priority" id="ambient-priority"></div>
+      <div class="row" id="ambient-prompt-row" style="margin-top:12px;display:none">
+        <div style="flex:1">
+          <b id="ambient-prompt-title"></b>
+          <div class="note" id="ambient-prompt-detail"></div>
+        </div>
+        <button class="btn primary" id="ambient-prompt-action"></button>
+      </div>
+      <p class="note" id="ambient-method"></p>
+    </div>
+  </div>
+  <div class="card">
+    <h3>SIGNAL HUNT <span class="tag">tune &amp; step the emitters NOT explained by the baseline</span></h3>
+    <div class="row">
+      <button class="btn primary" id="btn-hunt">▸ JUMP TO FIRST UNKNOWN</button>
+      <span class="note">Then ◂ / ▸ or AUTO in the tune panel steps through them. Needs an interior sweep first.</span>
+    </div>
+    <div class="scroll" style="max-height:240px"><table id="tbl-hunt"></table></div>
+  </div>
+  <div class="card">
+    <h3>REPORT OPTIONS <span class="tag" style="font-size:11px">extra sections to include when you GENERATE REPORT</span></h3>
+    <div class="row">
+      <label><input type="checkbox" class="report-opt" data-opt="rf_environment"> RF environment &amp; shielding assessment</label>
+      <label><input type="checkbox" class="report-opt" data-opt="rf_exposure"> RF exposure context (balanced, w/ conflicts of interest)</label>
+      <label><input type="checkbox" class="report-opt" data-opt="glossary"> Client glossary</label>
+      <label><input type="checkbox" class="report-opt" data-opt="case_studies"> Anonymized case-study examples (device library)</label>
+      <span class="note" id="report-opt-msg"></span>
+    </div>
+  </div>
+  <div class="card">
+    <h3>ANOMALIES — could NOT be verified against any licensed/known source</h3>
+    <div class="row">
+      <button class="btn primary" id="btn-capture-all">CAPTURE ALL → SIGNAL WIKI</button>
+      <button class="btn" id="btn-discord">ASK COMMUNITY (Discord, sanitized)</button>
+      <span class="note" id="discord-msg"></span>
+    </div>
+    <div class="scroll" style="max-height:340px"><table id="tbl-anomalies"></table></div>
+  </div>
+  <div class="card" id="stimulate-card">
+    <h3>ACTIVE PROBE (PING) <span class="tag">transmit a stimulus, find what reacts — needs a 2TX/2RX radio</span></h3>
+    <p class="note" style="color:#ffd24a;border-left:3px solid #ffd24a;padding-left:8px">
+      ⚠ This TRANSMITS. It only finds devices that REACT to a ping (receivers,
+      oscillators, junctions) — a "no response" is <b>not</b> a clean bill; run it
+      alongside the passive sweep, never instead of it. Simultaneous stimulate-and-listen
+      needs the <b>B220 (2TX/2RX)</b>; it is bench-pending, not yet field-validated.
+      Stay in bands you are authorized to transmit in (ISM 902–928 / 2400–2483.5 / 5725–5875 MHz).</p>
+    <div class="row">
+      <label>Watch @ MHz <input id="stim-center" type="number" step="0.001" style="width:110px" placeholder="915.0"></label>
+      <label>Ping band <input id="stim-lo" type="number" step="0.1" style="width:90px" placeholder="902"></label>
+      <label>to <input id="stim-hi" type="number" step="0.1" style="width:90px" placeholder="928"></label>
+      <label title="Transmit outside the authorized ISM bands on your own authority — logged"><input id="stim-override" type="checkbox"> band override</label>
+      <button class="btn primary" id="btn-stimulate">▶ PROBE</button>
+      <span class="note" id="stim-msg"></span>
+    </div>
+    <div id="stim-result"></div>
+  </div>
+  <div class="card" id="emanation-card">
+    <h3>PASSIVE EMANATION SCAN <span class="tag">find the SILENT bugs by the RF they leak — no transmitting</span></h3>
+    <p class="note">Catches a covert camera/recorder that never transmits and won't react to a
+      ping: its clock still <b>leaks</b> a comb of evenly-spaced tones. Needs an SDR (Pluto/B220),
+      a close antenna, and a relatively quiet spot. A null result is one independent look, <b>not</b>
+      a clean bill — run it alongside the sweep and the active probe.</p>
+    <div class="row">
+      <label>Scan band <input id="ema-lo" type="number" step="1" style="width:90px" placeholder="80"></label>
+      <label>to <input id="ema-hi" type="number" step="1" style="width:90px" placeholder="1000"></label>
+      <span class="note">MHz — where device clocks emanate (this is slow: many averaged captures)</span>
+      <button class="btn primary" id="btn-emanation">▶ SCAN</button>
+      <span class="note" id="ema-msg"></span>
+    </div>
+    <div id="ema-result"></div>
+  </div>
+  <div class="card">
+    <h3>PREDICTED vs FOUND — did everything we expected actually show up?</h3>
+    <div class="row"><span class="note" id="expected-summary">run a sweep first</span>
+      <label><input type="checkbox" id="expected-show-found"> show received too</label>
+    </div>
+    <div class="scroll" style="max-height:300px"><table id="tbl-expected"></table></div>
+  </div>
+  <div class="card">
+    <h3>ALL DETECTED SIGNALS</h3>
+    <div class="row">
+      <label>Phase</label>
+      <select id="signals-phase"><option value="">all</option>
+        <option value="interior">interior</option><option value="ambient">ambient</option></select>
+    </div>
+    <div class="scroll" style="max-height:340px"><table id="tbl-signals"></table></div>
+  </div>
+  <div class="card">
+    <h3>GENERATED REPORTS (archived per session)</h3>
+    <table id="tbl-reports"></table>
+  </div>
+</section>
+
+<!-- ============ MANUAL TRIAGE (gated post-hoc review) ============ -->
+<section class="view" id="view-triage">
+  <h2>MANUAL TRIAGE <span class="tag">step 9 — gated review of unexplained detections</span></h2>
+  <div class="card">
+    <h3>REVIEW QUEUE <span class="tag">decide every signal the baseline doesn't explain</span></h3>
+    <p class="note">AUTOPILOT logs and ranks detections hands-off. MANUAL is a forced, complete review:
+       cleared / suspect / flag / ask-client, with notes. The review isn't done until nothing is left
+       unreviewed. <span id="triage-mode" class="pill" style="margin-left:6px"></span></p>
+    <div id="triage-flash" class="note" style="display:none"></div>
+    <div class="row">
+      <button class="btn primary" id="btn-triage-load">↻ LOAD LAST SWEEP</button>
+      <span id="triage-summary" class="note"></span>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <label><input type="checkbox" id="triage-filter-novel"> ▲ NEW only</label>
+      <label>Min score</label>
+      <input class="small" id="triage-filter-score" type="number" min="0" max="100" step="1" placeholder="any" style="width:56px">
+      <label>Room</label>
+      <select id="triage-filter-room" style="width:140px"><option value="">all rooms</option></select>
+      <label>Status</label>
+      <select id="triage-filter-status" style="width:120px">
+        <option value="unreviewed" selected>unreviewed</option>
+        <option value="">all</option>
+        <option value="cleared">cleared</option>
+        <option value="suspect">suspect</option>
+        <option value="flagged">flagged</option>
+        <option value="ask_client">ask client</option>
+      </select>
+      <span id="triage-filter-count" class="note"></span>
+    </div>
+    <div class="row">
+      <button class="btn" id="btn-triage-bulk-clear" title="Mark all visible unreviewed signals as Cleared">CLEAR VISIBLE → Cleared</button>
+      <button class="btn" id="btn-triage-bulk-ism" title="Clear unreviewed likely-normal signals in caution/ISM allocation bands">CLEAR LIKELY-NORMAL ISM (visible)</button>
+      <span id="triage-bulk-msg" class="note"></span>
+    </div>
+    <div id="triage-gate" class="note" style="margin-top:6px"></div>
+    <div class="scroll" style="max-height:520px;margin-top:6px"><table id="tbl-triage"></table></div>
+  </div>
+</section>
+
+<!-- ============ PERSONS OF INTEREST ============ -->
+<section class="view" id="view-poi">
+  <h2>PERSONS OF INTEREST / DECONFLICTION <span class="tag">internal working assessment — not in the client report</span></h2>
+  <div class="card">
+    <div class="row">
+      <button class="btn" id="btn-internal-memo">DOWNLOAD CONFIDENTIAL INTERNAL MEMO (PDF)</button>
+      <button class="btn primary" id="btn-analyze">ANALYZE THREAT VECTORS (multi-AI)</button>
+      <span class="note" id="memo-msg">for Shield's files / counsel — confidential, not for the client</span>
+    </div>
+    <p class="note">Client-named or investigator-identified persons to <b>clear</b>. Goal is to
+    move people to CLEARED by ruling out access, means, and motive. Capability is assessed from
+    <b>evidence</b> (profession, credentials, demonstrated skill) — record the basis. Internal,
+    investigative hypothesis only; never an FCRA consumer report or basis for adverse action.</p>
+    <div style="display:flex; gap:14px">
+      <div class="scroll" style="flex:1; max-height:540px"><table id="tbl-poi"></table></div>
+      <div style="flex:1.5">
+        <div class="card" style="margin:0">
+          <div class="row">
+            <input type="text" id="poi-name" style="flex:1" placeholder="name *">
+            <select id="poi-status">
+              <option value="open">OPEN</option>
+              <option value="concern">CONCERN</option>
+              <option value="cleared">CLEARED</option>
+            </select>
+          </div>
+          <div class="row">
+            <input type="text" id="poi-relationship" class="small" style="width:180px" placeholder="relationship to client">
+            <input type="text" id="poi-aliases" class="small" style="width:160px" placeholder="aliases">
+            <input type="text" id="poi-source" class="small" style="width:160px" placeholder="source of facts">
+          </div>
+          <div class="row" style="margin-top:6px">
+            <label style="margin-top:0"><input type="checkbox" id="poi-named-client"> named by the client — will appear <b>by name</b> in the client pre-sweep briefing (leave unchecked for investigator-identified persons)</label>
+          </div>
+          <label>Motive (client-stated dispute)</label>
+          <textarea id="poi-motive" style="width:100%; height:44px"></textarea>
+          <div class="row" style="margin-top:8px">
+            <label>Access</label>
+            <select id="poi-access-tier"><option value="unknown">unknown</option>
+              <option value="none">none</option><option value="low">low</option><option value="high">high</option></select>
+            <input type="text" id="poi-access-note" style="flex:1" placeholder="could they reach the premises?">
+          </div>
+          <div class="row">
+            <label>Technical capability</label>
+            <select id="poi-capability-tier"><option value="unknown">unknown</option>
+              <option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select>
+          </div>
+          <label>Capability basis (REQUIRED if tier set — profession, credentials, demonstrated skill)</label>
+          <textarea id="poi-capability-basis" style="width:100%; height:44px"></textarea>
+          <label>Resources relevant to commissioning surveillance</label>
+          <textarea id="poi-resources" style="width:100%; height:36px"></textarea>
+          <label>Documented conduct (harassment, litigation, restraining orders)</label>
+          <textarea id="poi-conduct" style="width:100%; height:44px"></textarea>
+          <label>Analyst judgment (your own read)</label>
+          <textarea id="poi-notes" style="width:100%; height:44px"></textarea>
+          <label>Opportunity vectors — social/institutional areas warranting observation or de-confliction (shared workplace, custody exchanges, common associates, shared premises access). Hypotheses, not findings.</label>
+          <textarea id="poi-opportunity" style="width:100%; height:44px"></textarea>
+          <div class="row" style="margin-top:8px">
+            <button class="btn primary" id="btn-poi-save">SAVE</button>
+            <button class="btn" id="btn-poi-new">NEW / CLEAR FORM</button>
+            <button class="btn danger" id="btn-poi-delete">DELETE</button>
+            <span class="note" id="poi-msg"></span>
+          </div>
+          <div id="poi-docs" style="display:none; margin-top:12px; border-top:1px solid var(--line); padding-top:10px">
+            <h3 style="margin-top:0">ATTACHED DOCUMENTS <span class="tag">client-authorized only — permissible purpose, no dragnet on uninvolved third parties</span></h3>
+            <table id="tbl-poi-docs"></table>
+            <div class="row" style="margin-top:6px">
+              <input type="file" id="poi-doc-input" multiple>
+              <input type="text" id="poi-doc-kind" class="small" style="width:140px" value="background">
+              <button class="btn" id="btn-poi-doc-attach">ATTACH</button>
+              <span class="note" id="poi-doc-msg"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CASE STUDIES ============ -->
+<section class="view" id="view-cases">
+  <h2>CASE-STUDY / DEVICE LIBRARY <span class="tag">anonymized composites — citable in client reports as education</span></h2>
+  <div class="card">
+    <p class="note">Examples of real device finds, kept as <b>de-identified composites</b>: details
+    altered and combined across cases so no client, subject, or location is identifiable. Only
+    entries with the attestation checked can render in reports (Results tab → report options →
+    anonymized case-study examples).</p>
+    <div style="display:flex; gap:14px">
+      <div class="scroll" style="flex:1; max-height:560px"><table id="tbl-cases"></table></div>
+      <div style="flex:1.5">
+        <div class="card" style="margin:0">
+          <input type="text" id="cs-title" style="width:100%" placeholder="title *">
+          <label>Device class (generic — e.g. consumer GPS tracker, audio transmitter)</label>
+          <textarea id="cs-device" style="width:100%; height:36px"></textarea>
+          <label>RF signature (generic signal description, no case specifics)</label>
+          <textarea id="cs-rf" style="width:100%; height:44px"></textarea>
+          <label>How it was found</label>
+          <textarea id="cs-discovery" style="width:100%; height:44px"></textarea>
+          <label>Case history — COMPOSITE ONLY: alter and combine details so nobody is identifiable</label>
+          <textarea id="cs-history" style="width:100%; height:60px"></textarea>
+          <label>What it teaches</label>
+          <textarea id="cs-lessons" style="width:100%; height:44px"></textarea>
+          <div class="row" style="margin-top:8px">
+            <label style="margin-top:0"><input type="checkbox" id="cs-deid"> I attest this is a de-identified composite — required before it can appear in any report</label>
+          </div>
+          <div class="row">
+            <button class="btn primary" id="btn-cs-save">SAVE</button>
+            <button class="btn" id="btn-cs-new">NEW / CLEAR</button>
+            <button class="btn danger" id="btn-cs-delete">DELETE</button>
+            <span class="note" id="cs-msg"></span>
+          </div>
+          <div id="cs-photo-block" style="display:none">
+            <h3>DEVICE PHOTO</h3>
+            <img id="cs-photo" style="max-width:260px; max-height:200px; display:none; border:1px solid var(--line)">
+            <div class="row" style="margin-top:6px">
+              <input type="file" id="cs-photo-input" accept="image/*">
+              <button class="btn" id="btn-cs-photo">UPLOAD PHOTO</button>
+              <span class="note" id="cs-photo-msg"></span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SIGNAL WIKI ============ -->
+<style>
+#view-poi textarea, #view-poi label, #view-cases textarea, #view-cases label { display:block; width:100%; }
+#view-poi label, #view-cases label { color:var(--dim); font-size:11px; margin-top:6px; }
+#view-poi textarea, #view-cases textarea { background:var(--input-bg); color:var(--txt); border:1px solid var(--line);
+  font-family:var(--mono); font-size:12px; padding:6px; }
+</style>
+<section class="view" id="view-wiki">
+  <h2>SIGNAL WIKI <span class="tag">internal library — zoom fingerprints across all sweeps</span></h2>
+  <div class="card">
+    <div class="row">
+      <label>Category</label><select id="wiki-cat"><option value="">all</option></select>
+      <label>Search</label><input type="text" id="wiki-q" style="width:220px" placeholder="label / notes / description">
+      <span class="note" id="wiki-count"></span>
+    </div>
+    <div style="display:flex; gap:14px">
+      <div class="scroll" style="flex:1; max-height:560px"><table id="tbl-wiki"></table></div>
+      <div id="wiki-detail" style="flex:1.4; display:none">
+        <div class="card" style="margin:0">
+          <div class="row">
+            <input type="text" id="wiki-label" style="flex:1; font-weight:bold">
+            <select id="wiki-status">
+              <option value="unconfirmed">UNCONFIRMED</option>
+              <option value="identified">IDENTIFIED</option>
+              <option value="threat">THREAT / DEVICE FOUND</option>
+            </select>
+          </div>
+          <div id="wiki-img" style="margin:10px 0"></div>
+          <div id="wiki-timeline"></div>
+          <div id="wiki-match"></div>
+          <div class="kv" id="wiki-meta" style="margin:10px 0"></div>
+          <p class="note" id="wiki-desc" style="white-space:pre-wrap"></p>
+          <div class="row">
+            <input type="text" id="wiki-cat-edit" class="small" style="width:220px" title="category">
+            <button class="btn" id="btn-wiki-save">SAVE</button>
+            <button class="btn" id="btn-wiki-ai">AI DESCRIBE</button>
+            <button class="btn" id="btn-wiki-recapture">RECAPTURE (live)</button>
+          </div>
+          <div class="row"><textarea id="wiki-notes" style="width:100%; height:70px; background:var(--input-bg); color:var(--txt); border:1px solid var(--line); font-family:var(--mono)" placeholder="analyst notes"></textarea></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ INVENTORY ============ -->
+<section class="view" id="view-inventory">
+  <h2>WIRELESS DEVICE INVENTORY <span class="tag">rule out client-owned WiFi / Bluetooth devices</span></h2>
+  <div class="card">
+    <p class="note">Scan with the laptop's own adapters, then walk the list with the client:
+    mark each device they account for as OWNED. Anything <b>loud (≥ −55 dBm) and unowned</b>
+    is highlighted — those are the 2.4 GHz hits to chase, not the client's soundbar.</p>
+    <div class="row">
+      <button class="btn primary" id="btn-scan-wifi">SCAN WiFi (netsh)</button>
+      <button class="btn primary" id="btn-scan-ble">SCAN BLUETOOTH LE</button>
+      <button class="btn" id="btn-scan-ble-detail">BLUETOOTH DETAIL SWEEP</button>
+      <span class="note" id="inv-msg"></span>
+    </div>
+    <div class="scroll" style="max-height:480px"><table id="tbl-inventory"></table></div>
+  </div>
+  <div class="card" id="ble-detail-card" style="display:none">
+    <h3 style="margin-top:0">BLUETOOTH DETAIL SWEEP <span class="tag">every advertiser, fully identified — trackers first</span></h3>
+    <p class="note">Standalone read (not saved to the inventory). Every device's MAC
+    address type, vendor, decoded advertisement, and any <b>location tracker</b>
+    (AirTag / Tile / SmartTag) it looks like. Use SCAN BLUETOOTH LE above to persist a
+    device and mark it client-owned.</p>
+    <div id="ble-detail-msg" class="note"></div>
+    <div class="scroll" style="max-height:520px"><div id="ble-detail-list"></div></div>
+  </div>
+</section>
+
+<!-- ============ DEVICE CAPTURE LAB ============ -->
+<section class="view" id="view-devicelab">
+  <h2>CAPTURE DEVICE <span class="tag">guided bench / known-DUT characterization</span></h2>
+  <p class="note">Camera-first guided flow: photo → ID → antenna → <b>near-field live</b>
+    (freq scan + WALK TEST proves the emission is this device, camera records) →
+    back away 10&nbsp;ft → next room → extra stops → <b>exercise states</b> (idle /
+    in-use / powered-off) → optional TX probe (ISM) → demod → commit. The app watches a
+    LIVE peak-hold view and voice-prompts each move — bursts are kept, hands stay free.
+    Demod is intentional on the DUT — not bulk ambient intercept.</p>
+
+  <div class="card">
+    <div class="row" style="gap:10px;flex-wrap:wrap">
+      <button class="btn primary big" id="dl-start">▶ START CAPTURE</button>
+      <button class="btn" id="dl-refresh">REFRESH</button>
+      <span class="note" id="dl-radio">Radio: —</span>
+    </div>
+    <div id="dl-guide" class="card" style="margin-top:12px;background:var(--info-bg);border:1px solid var(--blue)">
+      <h3 style="margin:0 0 6px" id="dl-guide-title">Start a capture when ready</h3>
+      <ol id="dl-guide-do" class="note" style="margin:0 0 0 18px"></ol>
+      <p class="note" id="dl-guide-why" style="margin-top:8px"></p>
+    </div>
+  </div>
+
+  <div class="card" id="dl-panel" style="display:none">
+    <div class="row" style="justify-content:space-between;flex-wrap:wrap">
+      <b>Package <span id="dl-pkg-id"></span></b>
+      <span class="pill" id="dl-status">—</span>
+    </div>
+    <p class="note" id="dl-msg"></p>
+
+    <!-- PHOTO -->
+    <div id="dl-step-photo" class="dl-step">
+      <h3>1 · Photo of the device</h3>
+      <div class="row" style="gap:12px;align-items:flex-start;flex-wrap:wrap">
+        <div>
+          <video id="dl-video" width="320" height="240" autoplay playsinline muted
+                 style="background:#000;border:1px solid var(--line);border-radius:4px"></video>
+          <div class="row" style="margin-top:6px;gap:6px">
+            <button class="btn" id="dl-cam-start">ENABLE CAMERA</button>
+            <button class="btn primary" id="dl-snap">SNAP PHOTO</button>
+            <label class="btn" style="cursor:pointer">UPLOAD
+              <input type="file" id="dl-upload" accept="image/*" capture="environment" style="display:none">
+            </label>
+          </div>
+        </div>
+        <div>
+          <canvas id="dl-canvas" width="320" height="240"
+                  style="display:none;border:1px solid var(--line);border-radius:4px"></canvas>
+          <img id="dl-preview" alt="DUT photo" style="max-width:320px;display:none;border:1px solid var(--line)">
+        </div>
+      </div>
+      <div style="margin-top:10px">
+        <label class="note">Device name / make-model</label><br>
+        <input id="dl-name" placeholder="e.g. Wyze Cam v3, Toyota fob, unknown black box" style="width:100%;max-width:520px">
+      </div>
+      <div style="margin-top:8px">
+        <label class="note">Description (what it is, ports, how it behaves, power, anything useful)</label><br>
+        <textarea id="dl-desc" rows="3" style="width:100%;max-width:520px;font-family:inherit"
+          placeholder="e.g. Small cube cam, USB-C, glows blue, claims 2.4 GHz Wi-Fi…"></textarea>
+      </div>
+      <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
+        <input id="dl-photo-notes" placeholder="Photo notes (angle, label text…)" style="min-width:200px">
+        <button class="btn primary" id="dl-photo-next">SAVE PHOTO → CONTINUE</button>
+        <button class="btn" id="dl-photo-skip">SKIP PHOTO</button>
+      </div>
+    </div>
+
+    <!-- IDENTIFY -->
+    <div id="dl-step-identify" class="dl-step" style="display:none">
+      <h3>2 · Device class &amp; frequency guess</h3>
+      <p class="note" id="dl-lookup-note"></p>
+      <div style="margin-bottom:8px">
+        <label class="note">Description (edit anytime — used for catalog match)</label><br>
+        <textarea id="dl-desc2" rows="2" style="width:100%;max-width:520px;font-family:inherit"
+          placeholder="Refine description if needed"></textarea>
+      </div>
+      <div class="row" style="gap:8px;flex-wrap:wrap;margin-bottom:8px">
+        <label>Catalog class
+          <select id="dl-catalog"></select>
+        </label>
+        <label>Center MHz <input id="dl-center" type="number" step="0.001" style="width:110px"></label>
+        <label>BW kHz <input id="dl-bw" type="number" step="1" style="width:90px"></label>
+      </div>
+      <div id="dl-guesses" class="note"></div>
+      <p class="note" style="color:var(--cyan)"><b>Libre RXA</b> = omni · <b>Libre RXB</b> = directional · NF probes chosen on the next step.</p>
+      <button class="btn primary" id="dl-id-next">CONFIRM CLASS → ANTENNA</button>
+    </div>
+
+    <!-- ANTENNA -->
+    <div id="dl-step-antenna" class="dl-step" style="display:none">
+      <h3>3 · Libre ports &amp; antennas</h3>
+      <p class="note"><b>Libre RXA</b> = omni (whip/duck) · <b>Libre RXB</b> = directional (LPDA/Yagi).
+        Near-field step uses a dedicated probe type you pick below.</p>
+      <div class="row" style="gap:16px;flex-wrap:wrap;align-items:flex-start">
+        <div class="card" style="min-width:220px;flex:1">
+          <b style="color:var(--cyan)">Libre RXA — OMNI</b>
+          <p class="note">Plug omni on RXA / RX2-A. Default for 10 ft &amp; next room.</p>
+          <select id="dl-rxa-ant"></select>
+        </div>
+        <div class="card" style="min-width:220px;flex:1">
+          <b style="color:var(--amber)">Libre RXB — DIRECTIONAL</b>
+          <p class="note">Plug LPDA/Yagi on RXB / RX2-B. Peak toward DUT when used.</p>
+          <select id="dl-rxb-ant"></select>
+        </div>
+      </div>
+      <div style="margin-top:12px">
+        <b>Near-field probes</b> <span class="note">(assign which physical probe you will use at ≤1 ft)</span>
+        <div id="dl-nf-gallery" class="row" style="gap:10px;flex-wrap:wrap;margin-top:8px"></div>
+        <input type="hidden" id="dl-nf-ant" value="hfield_loop">
+      </div>
+      <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
+        <input id="dl-ant-notes" placeholder="Cable length / polarity / custom probe notes" style="min-width:260px">
+        <button class="btn primary" id="dl-ant-next">SAVE ANTENNAS → FREQ</button>
+      </div>
+      <p class="note" style="margin-top:8px"><b>TX probe later:</b> TX antenna on <b>TX/RX-A</b> only.</p>
+    </div>
+
+    <!-- FREQ CONFIRM (legacy packages only — the near-field live view replaced it) -->
+    <div id="dl-step-freq" class="dl-step" style="display:none">
+      <h3>4 · Confirm frequency (power DUT on)</h3>
+      <p class="note">Power the device. Correct the tune if your spectrum peak is elsewhere.</p>
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        <label>Center MHz <input id="dl-center2" type="number" step="0.001" style="width:120px"></label>
+        <label>BW kHz <input id="dl-bw2" type="number" step="1" style="width:90px"></label>
+        <button class="btn primary" id="dl-freq-next">LOCK FREQ → 10 FT CAPTURE</button>
+      </div>
+    </div>
+
+    <!-- NEAR-FIELD TRIAGE: find it live, then WALK TEST proves it -->
+    <div id="dl-step-triage" class="dl-step" style="display:none">
+      <h3>4 · Near-field — find it, then prove it</h3>
+      <p class="note">Hold the NF probe within ~1 ft of the DUT and power it on.
+        GO LIVE scans the guess frequencies until energy appears (peak-hold keeps
+        button-press bursts). Then the WALK TEST: camera records while you sweep the
+        DUT toward / away from the probe on the spoken cadence — power tracking your
+        motion proves the emission is THIS device.</p>
+      <div class="row" style="gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+        <button class="btn primary big" id="dl-tri-live">▶ GO LIVE</button>
+        <label>Port
+          <select id="dl-tri-port">
+            <option value="RXB">RXB — NF probe</option>
+            <option value="RXA">RXA — NF probe</option>
+          </select>
+        </label>
+        <label>NF probe <select id="dl-tri-nf"></select></label>
+        <label>Center MHz <input id="dl-tri-center" type="number" step="0.001" style="width:110px"></label>
+        <button class="btn" id="dl-tri-retune">RETUNE</button>
+        <label class="note" title="spoken prompts so you never look at the laptop">
+          <input type="checkbox" class="dl-voice" checked> voice</label>
+      </div>
+      <div class="card" style="background:var(--panel2)">
+        <div class="row" style="justify-content:space-between;flex-wrap:wrap">
+          <b id="dl-tri-status">Idle — GO LIVE to start</b>
+          <span class="note"><span id="dl-tri-gain"></span> <span id="dl-tri-snr">SNR —</span></span>
+        </div>
+        <div id="dl-tri-hot" style="display:none;background:var(--err-bg);border:1px solid var(--red);border-radius:4px;padding:8px;margin:6px 0">
+          <b style="color:var(--red)">⚠ TOO HOT — front end clipping even at minimum gain.</b>
+          <span class="note">Compressed input fabricates false peaks and kills the walk test.
+          Fit a 10–30 dB SMA pad inline on the probe cable, then log it:</span>
+          <label class="note">pad dB <input id="dl-pad-db" type="number" step="1" value="20" style="width:70px"></label>
+          <button class="btn" id="dl-pad-set">LOG PAD</button>
+          <span class="note" id="dl-pad-cur"></span>
+        </div>
+        <div style="height:14px;background:#1a222c;border-radius:3px;margin:6px 0;overflow:hidden">
+          <div id="dl-tri-bar" style="height:100%;width:0%;background:var(--dim);transition:width .25s"></div>
+        </div>
+        <canvas id="dl-tri-trace" width="640" height="90"
+                style="width:100%;max-width:640px;height:90px;background:#0a0e14;border:1px solid var(--line);border-radius:3px"></canvas>
+        <canvas id="dl-tri-spec" width="640" height="120"
+                style="width:100%;max-width:640px;height:120px;background:#0a0e14;border:1px solid var(--line);border-radius:3px;margin-top:6px"></canvas>
+        <p class="note">Top: live power over time (the walk test reads this). Bottom: peak-hold spectrum.</p>
+      </div>
+      <div class="row" style="gap:12px;align-items:flex-start;flex-wrap:wrap;margin-top:10px">
+        <div class="card" style="min-width:260px;flex:1">
+          <b>WALK TEST <span class="note">— camera + RF on the same clock</span></b>
+          <div class="row" style="gap:10px;align-items:flex-start;flex-wrap:wrap;margin-top:6px">
+            <video id="dl-tri-cam" width="200" height="150" autoplay playsinline muted
+                   style="background:#000;border:1px solid var(--line);border-radius:4px"></video>
+            <div style="flex:1;min-width:160px">
+              <button class="btn primary" id="dl-walk-go">🚶 START WALK TEST</button>
+              <div style="margin-top:8px">
+                <span class="pill" id="dl-walk-phase" style="display:none;font-size:16px">—</span>
+              </div>
+              <p class="note" id="dl-walk-verdict"></p>
+            </div>
+          </div>
+        </div>
+        <div class="card" style="min-width:260px;flex:1">
+          <b>IDENTIFICATION</b>
+          <div id="dl-ident" class="note" style="margin-top:6px">No evidence yet — go live and capture.</div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:10px">
+        <b>WIDE FIND <span class="note">— no guess list: full-span off/on differential</span></b>
+        <p class="note">Pass 1 sweeps the whole span with the DUT <b>POWERED OFF</b> (baseline),
+          pass 2 with it ON. New energy = the device, wherever it actually transmits.
+          Harmonic families are tagged — the fundamental is the lowest of a family, not the loudest peak.</p>
+        <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center">
+          <label>Span
+            <select id="dl-wf-span">
+              <option value="subghz">Sub-GHz (70–1000)</option>
+              <option value="ism24">2.4 GHz ISM (2300–2500)</option>
+              <option value="wifi5">5 GHz (5150–5900)</option>
+              <option value="full">Full (70–6000, slow)</option>
+            </select>
+          </label>
+          <button class="btn primary" id="dl-wf-go">🔍 START WIDE FIND (power DUT OFF first)</button>
+          <button class="btn" id="dl-wf-stop" style="display:none">■ STOP</button>
+        </div>
+        <div id="dl-wf-panel" style="display:none;margin-top:8px">
+          <div class="row" style="justify-content:space-between;flex-wrap:wrap">
+            <b id="dl-wf-phase">—</b>
+            <span class="note" id="dl-wf-cur"></span>
+          </div>
+          <div style="height:12px;background:#1a222c;border-radius:3px;margin:6px 0;overflow:hidden">
+            <div id="dl-wf-bar" style="height:100%;width:0%;background:var(--cyan);transition:width .4s"></div>
+          </div>
+          <div id="dl-wf-await" style="display:none;background:var(--info-bg);border:1px solid var(--blue);border-radius:4px;padding:8px;margin:6px 0">
+            <b>Baseline done. POWER THE DUT ON now</b> (insert battery / plug in), then
+            <button class="btn primary" id="dl-wf-continue">▶ CONTINUE — PASS 2</button>
+          </div>
+          <div id="dl-wf-results"></div>
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
+        <input id="dl-tri-notes" placeholder="Near-field notes" style="min-width:180px">
+        <button class="btn primary big" id="dl-tri-next">✔ RECORD NEAR-FIELD → BACK AWAY TO 10 FT</button>
+      </div>
+    </div>
+
+    <!-- RANGE LADDER (10 ft / next room / extra stops) -->
+    <div id="dl-step-capture" class="dl-step" style="display:none">
+      <h3 id="dl-cap-title">5 · RF capture</h3>
+      <p class="note" id="dl-cap-instr"></p>
+      <div id="dl-ladder" class="row" style="gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:8px"></div>
+      <div class="row" style="gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+        <button class="btn primary" id="dl-cap-live">▶ GO LIVE (hands-free)</button>
+        <label class="note" title="fires the capture when the reading holds steady 3 s, then voice-prompts the next stop">
+          <input type="checkbox" id="dl-cap-auto" checked> auto-capture when steady</label>
+        <label class="note"><input type="checkbox" class="dl-voice" checked> voice</label>
+        <span class="note" id="dl-cap-stable"></span>
+      </div>
+      <div class="row" style="gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+        <label>Libre port
+          <select id="dl-cap-port">
+            <option value="RXA">RXA — omni</option>
+            <option value="RXB">RXB — directional</option>
+          </select>
+        </label>
+        <div id="dl-cap-nf-wrap" style="display:none">
+          <label>Near-field probe <select id="dl-cap-nf"></select></label>
+        </div>
+        <input id="dl-cap-notes" placeholder="Notes for this distance" style="min-width:180px">
+        <button class="btn primary big" id="dl-cap-go">⦿ CAPTURE NOW</button>
+      </div>
+      <!-- live visual: power trace + peak-hold spectrum + SNR meter -->
+      <div class="card" style="background:var(--panel2);margin-top:8px">
+        <div class="row" style="justify-content:space-between;flex-wrap:wrap">
+          <b id="dl-cap-status">Waiting for capture…</b>
+          <span class="note"><span id="dl-cap-gain"></span> <span id="dl-cap-snr">SNR —</span></span>
+        </div>
+        <div id="dl-cap-hot" style="display:none;background:var(--err-bg);border:1px solid var(--red);border-radius:4px;padding:6px;margin:6px 0">
+          <b style="color:var(--red)">⚠ CLIPPING at minimum gain</b>
+          <span class="note">— fit/keep the attenuator pad on the probe line (log it on the near-field step).</span>
+        </div>
+        <div style="height:14px;background:#1a222c;border-radius:3px;margin:6px 0;overflow:hidden">
+          <div id="dl-snr-bar" style="height:100%;width:0%;background:var(--dim);transition:width .25s"></div>
+        </div>
+        <canvas id="dl-cap-trace" width="640" height="70"
+                style="width:100%;max-width:640px;height:70px;background:#0a0e14;border:1px solid var(--line);border-radius:3px;margin-bottom:6px"></canvas>
+        <canvas id="dl-spec" width="640" height="160"
+                style="width:100%;max-width:640px;height:160px;background:#0a0e14;border:1px solid var(--line);border-radius:3px"></canvas>
+        <p class="note" id="dl-spec-hint">GO LIVE = rolling peak-hold (bursts kept); CAPTURE NOW = manual fallback.</p>
+      </div>
+      <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px">
+        <input id="dl-stop-label" placeholder="Add a stop (down the hall, outside…)" style="min-width:200px">
+        <button class="btn" id="dl-stop-add">+ ADD STOP</button>
+      </div>
+      <div id="dl-cap-results" style="margin-top:10px"></div>
+    </div>
+
+    <!-- DUT EXERCISE STATES -->
+    <div id="dl-step-states" class="dl-step" style="display:none">
+      <h3>7 · Exercise the device — capture each state</h3>
+      <p class="note">Put the DUT in the highlighted state, hold it there, then CAPTURE STATE.
+        The powered-off capture must go silent — that closes attribution. A real sweep can
+        then match "camera in record mode", not just "2.4 GHz wideband".</p>
+      <div class="row" style="gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+        <button class="btn primary" id="dl-st-live">▶ GO LIVE</button>
+        <span class="note" id="dl-st-snr">SNR —</span>
+        <label class="note"><input type="checkbox" class="dl-voice" checked> voice</label>
+      </div>
+      <canvas id="dl-st-trace" width="640" height="70"
+              style="width:100%;max-width:640px;height:70px;background:#0a0e14;border:1px solid var(--line);border-radius:3px"></canvas>
+      <div id="dl-states" class="row" style="gap:10px;flex-wrap:wrap;align-items:stretch;margin-top:8px"></div>
+      <div class="row" style="margin-top:10px;gap:8px">
+        <button class="btn primary" id="dl-st-done">STATES DONE → TX PROBE</button>
+      </div>
+    </div>
+
+    <!-- STIMULATE -->
+    <div id="dl-step-stim" class="dl-step" style="display:none">
+      <h3>8 · TX interaction (optional)</h3>
+      <p class="note"><b>Which port:</b> TX antenna on <b>TX/RX-A</b> (channel&nbsp;0). Lab RX stays on
+        <b>RX2-B</b>. Default single-radio stim listens on the radio’s RX2 while TX keys TX/RX —
+        keep antennas isolated (don’t share a cable). Authorized ISM only unless you override.
+        Null ≠ clean.</p>
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        <label><input type="checkbox" id="dl-stim-override"> Override band (logged)</label>
+        <button class="btn primary" id="dl-stim-go">▶ PROBE TX (via TX/RX-A)</button>
+        <button class="btn" id="dl-stim-skip">SKIP → DEMOD</button>
+      </div>
+      <div id="dl-stim-result" style="margin-top:8px"></div>
+    </div>
+
+    <!-- DEMOD -->
+    <div id="dl-step-demod" class="dl-step" style="display:none">
+      <h3>9 · Demod / analyze DUT</h3>
+      <p class="note">Intentional lab analyze on this test article (modulation, candidates, optional audio).</p>
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        <select id="dl-demod-mode">
+          <option value="">auto</option>
+          <option value="nfm">nfm</option>
+          <option value="wfm">wfm</option>
+          <option value="am">am</option>
+          <option value="usb">usb</option>
+          <option value="lsb">lsb</option>
+        </select>
+        <button class="btn primary" id="dl-demod-go">◎ ANALYZE / DEMOD</button>
+        <button class="btn" id="dl-demod-skip">SKIP → COMMIT</button>
+      </div>
+      <div id="dl-demod-result" style="margin-top:8px"></div>
+      <audio id="dl-audio" controls style="display:none;width:100%;margin-top:8px"></audio>
+    </div>
+
+    <!-- COMMIT -->
+    <div id="dl-step-commit" class="dl-step" style="display:none">
+      <h3 style="color:var(--green)">10 · Ready to commit</h3>
+      <p class="note">Review the summary, then freeze the package (and save a signature library entry).</p>
+      <pre id="dl-summary" class="note" style="white-space:pre-wrap;background:var(--panel2);padding:10px;border-radius:4px"></pre>
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        <input id="dl-commit-notes" placeholder="Final notes (serial, battery, firmware…)" style="min-width:260px">
+        <label><input type="checkbox" id="dl-save-sig" checked> Save to signature library</label>
+        <button class="btn primary big" id="dl-commit">✓ COMMIT PACKAGE</button>
+      </div>
+      <p class="note" id="dl-commit-msg" style="color:var(--green);font-weight:bold"></p>
+    </div>
+
+    <div style="margin-top:14px">
+      <h4 class="note">Tech log</h4>
+      <div id="dl-log" class="note" style="max-height:160px;overflow:auto"></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h3 style="margin-top:0">Past packages</h3>
+    <div class="scroll" style="max-height:200px"><table id="dl-packages"></table></div>
+  </div>
+</section>
+
+<!-- ============ NETWORK CHECK (LAN) ============ -->
+<section class="view" id="view-network">
+  <h2>NETWORK CHECK <span class="tag">who is on the client's WiFi / LAN</span></h2>
+  <div class="card">
+    <p class="note">Lists every device on <b>this laptop's own network</b> — IP, MAC,
+    vendor, and hostname — by reading the ARP table, a quick ping sweep, and reverse DNS.
+    <b>Read-only discovery: no passwords, no interception.</b> Walk the list with the client and
+    mark each device they account for as <b>OWNED</b>; anything left is <b>unrecognized</b>.
+    Blocking is never automatic — you confirm each one, and it's logged.</p>
+    <div class="row">
+      <button class="btn primary" id="btn-netscan">SCAN NETWORK</button>
+      <label class="note" style="display:inline-flex;gap:5px;align-items:center">
+        <input type="checkbox" id="net-ping" checked> ping sweep (finds quiet devices)</label>
+      <label class="note" style="display:inline-flex;gap:5px;align-items:center">
+        <input type="checkbox" id="net-unrec-only"> unrecognized only</label>
+      <span class="note" id="net-msg"></span>
+    </div>
+    <div class="scroll" style="max-height:520px"><table id="tbl-network"></table></div>
+    <p class="note" id="net-enforce-note" style="display:none"></p>
+  </div>
+</section>
+
+<!-- ============ CALIBRATION ============ -->
+<section class="view" id="view-calibration">
+  <h2>CALIBRATION / EXPERIMENT MODE <span class="tag">run at the shop, not client sites</span></h2>
+  <div class="card">
+    <p class="note">Runs the same segment under each strategy (Normal raw, Average×N, Max×28,
+    MaxHold×T, varying spans) against a known test source, then persists the winning per-band
+    configuration to config.yaml — production sweeps get tuned to this exact unit.</p>
+    <div class="row">
+      <label>Test source frequency (MHz)</label>
+      <input class="small" id="cal-freq" value="433.92">
+      <button class="btn primary" id="btn-cal">RUN CALIBRATION</button>
+      <button class="btn danger" id="btn-cal-abort">ABORT</button>
+      <span class="note" id="cal-msg"></span>
+    </div>
+    <div class="scroll" style="max-height:420px"><table id="tbl-cal"></table></div>
+  </div>
+</section>
+
+</div><!-- /panel -->
+<div id="page-monitor-pane">
+  <div id="page-mon-head" style="margin:0 0 8px">
+    <b style="color:var(--cyan);letter-spacing:1px">LIVE MONITOR</b>
+    <span class="note" id="page-mon-note"></span>
+    <span style="flex:1 1 auto"></span>
+    <button class="btn" id="btn-pdock-orient" title="flip the split: side-by-side ⇄ stacked">⇅</button>
+    <button class="btn" id="btn-pdock-close" title="close the monitor pane (stops listening)">✕</button>
+  </div>
+  <div id="page-monitor-slot"></div>
+</div>
+</div><!-- /page-split -->
+</main>
+
+<footer>
+  <div>PORT <b id="ft-port">—</b></div>
+  <div>MODEL <b id="ft-model">—</b></div>
+  <div>FW <b id="ft-fw">—</b></div>
+  <div>MODULE <b id="ft-module">—</b></div>
+  <div>RANGE <b id="ft-range">—</b></div>
+  <div>BAT <b id="ft-bat">—</b></div>
+  <div id="ft-sim"></div>
+  <div style="flex:1"></div>
+  <div class="themebar" role="group" aria-label="UI style">
+    <span class="tb-lbl">STYLE</span>
+    <button data-t="" type="button" title="Ops — dark terminal"><i style="background:#0b0f14"></i>OPS</button>
+    <button data-t="t-day" type="button" title="Daylight — clean light"><i style="background:#f7f9fb"></i>DAY</button>
+    <button data-t="t-file" type="button" title="Case File — paper dossier"><i style="background:#efe7d2"></i>FILE</button>
+    <button data-t="t-neon" type="button" title="Neon — spectrum violet"><i style="background:#7c5cff"></i>NEON</button>
+  </div>
+  <div id="ft-wake"></div>
+  <div id="ft-msg">idle</div>
+</footer>
+
+<!-- antenna prompts / sweep overlay -->
+<div class="overlay" id="overlay">
+  <div class="msg" id="overlay-msg"></div>
+  <div class="sub" id="overlay-sub"></div>
+  <div class="row">
+    <button class="btn primary big" id="overlay-confirm">CONFIRM</button>
+    <button class="btn danger" id="overlay-cancel">CANCEL</button>
+  </div>
+</div>
+
+<div class="overlay" id="sweep-overlay">
+  <div class="msg" id="sweep-overlay-title">SWEEPING</div>
+  <div style="width:70%"><div class="progress"><div id="sweep-bar"></div></div></div>
+  <div class="sub" id="sweep-overlay-detail"></div>
+  <!-- mid-sweep SPLIT (2026-07-11): clicking any frequency while sweeping splits
+       this overlay — the sweep keeps running in pane-main, the live monitor
+       (the #inspect-panel, reparented by SweepSplit in app.js) opens beside or
+       below it. Orientation is an operator toggle (⇄ / ⇅), persisted. -->
+  <div id="sweep-split">
+  <div id="sweep-pane-main">
+  <div class="sweep-stage">
+    <div class="chart-col">
+      <!-- F8: historic segment review — chart frozen on a past segment's
+           stored max-hold + average until BACK TO LIVE -->
+      <div id="review-banner">
+        <button class="btn" id="btn-back-live">◂ BACK TO LIVE</button>
+        <span id="review-banner-text"></span>
+      </div>
+      <div class="chart-wrap">
+        <canvas id="livechart" style="width:100%" tabindex="0" aria-label="Live spectrum. Move the pointer to inspect a frequency; click to pin monitoring."></canvas>
+        <div id="sweep-label-layer"></div>
+        <div class="spectrum-probe-layer" id="sp-layer-chart" aria-hidden="true">
+          <div class="sp-band"></div>
+          <div class="sp-line"><span class="sp-readout"></span></div>
+        </div>
+        <div id="live-shade"></div>
+      </div>
+      <!-- the waterfall lives INSIDE chart-col so it gets the exact same
+           flex-computed width as the chart above it: as a sibling of
+           .sweep-stage at width:70% it was 262px wider (the 250px seg-panel +
+           12px gap), so waterfall columns drifted right of their chart peaks -->
+      <div class="waterfall-wrap">
+        <canvas id="waterfall" style="width:100%; height:120px; background:#000208; border:1px solid var(--line)" tabindex="0" aria-label="Waterfall. Move the pointer to inspect a frequency; click to pin monitoring."></canvas>
+        <div class="spectrum-probe-layer" id="sp-layer-waterfall" aria-hidden="true">
+          <div class="sp-band"></div>
+          <div class="sp-line"></div>
+        </div>
+      </div>
+      <!-- F6: legend as a slim chip bar — same checkboxes, a fraction of the space -->
+      <div class="legend-chips" id="sweep-legend">
+        <span class="leg-title">KEY</span>
+        <label class="chip" title="Show/hide the signal labels on the chart"><input type="checkbox" id="leg-show" checked> labels</label>
+        <label class="chip" title="Matched to a known transmitter"><input type="checkbox" id="leg-identified" checked><span class="sw" style="border-color:#2ecc71"></span>Identified</label>
+        <label class="chip" title="Known band — probably a legit device"><input type="checkbox" id="leg-known" checked><span class="sw" style="border-color:#f39c12"></span>Likely normal</label>
+        <label class="chip" title="Matches nothing — worth a look"><input type="checkbox" id="leg-anomaly" checked><span class="sw" style="border-color:#e74c3c"></span>Anomaly</label>
+        <label class="chip" title="Just found, still identifying"><input type="checkbox" id="leg-scanning" checked><span class="sw" style="border-color:#ffd24a"></span>Detecting…</label>
+        <label class="chip" title="Band that can mask a bug"><input type="checkbox" id="leg-caution" checked><span class="sw" style="border-color:#e74c3c;background:#e74c3c22"></span>⚠ Caution</label>
+      </div>
+    </div>
+    <div class="sweep-side">
+      <!-- F2: what we expect in THIS segment, flipping looking… → found, + anomalies -->
+      <div class="seg-panel" id="seg-panel">
+        <div class="leg-title">THIS SEGMENT <span id="seg-range" class="seg-range"></span></div>
+        <button class="btn focus-btn" id="btn-focus-anomalies" title="Hide the expected/known signals and rescale the chart so weak anomalies stand out for directional triage">🔇 FOCUS ANOMALIES</button>
+        <div class="seg-sub">Expected here</div>
+        <div id="seg-expected" class="seg-list"></div>
+        <div class="seg-sub">Anomalies <span id="seg-anom-count" class="seg-count"></span></div>
+        <div id="seg-anomalies" class="seg-list"></div>
+      </div>
+      <div class="spectrum-probe-card" id="spectrum-probe-card" hidden>
+        <div class="sp-head">
+          <span class="sp-state" id="sp-state">HOVER PREVIEW</span>
+          <span class="sp-threat" id="sp-threat">UNASSESSED</span>
+        </div>
+        <div class="sp-frequency"><span id="sp-center">—</span> <small>MHz</small></div>
+        <div class="sp-metrics">
+          <div><span>CURSOR</span><b id="sp-cursor">—</b></div>
+          <div><span>OCCUPIED WIDTH</span><b id="sp-width">—</b></div>
+          <div><span>PEAK</span><b id="sp-power">—</b></div>
+          <div><span>SNR</span><b id="sp-snr">—</b></div>
+        </div>
+        <div class="sp-identity" id="sp-identity"></div>
+        <div class="sp-pipeline" id="sp-pipeline"></div>
+        <div class="sp-candidates" id="sp-candidates"></div>
+        <div class="sp-legal">Passive pinning characterizes RF metadata and does not decrypt protected payloads. Receiver/analyze remains a deliberate operator action.</div>
+        <div class="sp-actions">
+          <button class="btn primary" id="sp-open-monitor" type="button">OPEN RECEIVER / ANALYZE</button>
+          <button class="btn" id="sp-unpin" type="button">RELEASE</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <!-- F6: sustained-segment intel — tabs swap what lives in the table slot -->
+  <div class="info-tabs" id="sweep-info-tabs">
+    <button data-tab="signals" class="on" type="button">SIGNALS</button>
+    <button data-tab="live" type="button" title="Zoomed live view — drag on the chart above to pick the window">LIVE VIEW</button>
+    <button data-tab="expected" type="button" title="Licensed records expected in this segment">EXPECTED HERE</button>
+    <button data-tab="catalog" type="button" title="Covert-device classes known to use this band">BUG CATALOG</button>
+    <span class="note" id="sustain-hint">segment held — the radio keeps watching this span</span>
+  </div>
+  <div class="scroll info-pane" id="pane-signals" style="max-height:150px; background:var(--panel)">
+    <table id="tbl-live-ledger"></table>
+  </div>
+  <div class="info-pane" id="pane-live" style="display:none">
+    <canvas id="livezoom" width="900" height="150"></canvas>
+    <div class="note">drag a span on the main chart to zoom the live window · double-click the chart to reset to the whole segment</div>
+  </div>
+  <div class="scroll info-pane" id="pane-expected" style="display:none; max-height:150px; background:var(--panel)">
+    <table id="tbl-seg-expected"></table>
+  </div>
+  <div class="scroll info-pane" id="pane-catalog" style="display:none; max-height:150px; background:var(--panel)">
+    <div id="catalog-body"></div>
+  </div>
+  </div><!-- /sweep-pane-main -->
+  <div id="sweep-pane-monitor">
+    <div id="sweep-mon-head">
+      <b style="color:var(--cyan);letter-spacing:1px">LIVE MONITOR</b>
+      <span class="note" id="sweep-mon-note"></span>
+      <span style="flex:1 1 auto"></span>
+      <button class="btn" id="btn-split-orient" title="flip the split: side-by-side ⇄ stacked">⇅</button>
+      <button class="btn" id="btn-split-close" title="close the monitor pane (stops listening)">✕</button>
+    </div>
+    <div id="sweep-monitor-slot"></div>
+  </div>
+  </div><!-- /sweep-split -->
+  <div class="row">
+    <div class="sub" id="sweep-overlay-eta"></div>
+    <!-- LIVE RBW: turn resolution bandwidth mid-sweep (SDR only); takes effect on
+         the next segment. Blank = keep the current/config value. -->
+    <label class="note" id="sweep-rbw-wrap" title="Resolution bandwidth — finer resolves close signals, coarser sweeps faster. Applies on the next segment. RF Explorer: fixed at span/112.">RBW
+      <input class="small" id="sweep-rbw" type="number" min="1" step="1" placeholder="kHz" style="width:60px">
+      <span class="note" id="sweep-rbw-now"></span>
+    </label>
+    <button class="btn" id="btn-sustain" title="Hold this segment — keep sweeping it live until you resume">⏸ SUSTAIN SEGMENT</button>
+    <button class="btn primary" id="btn-next-segment" style="display:none">NEXT SEGMENT →</button>
+    <button class="btn danger" id="btn-abort">ABORT PHASE (keep data)</button>
+    <button class="btn" id="btn-hide-overlay">RUN IN BACKGROUND</button>
+  </div>
+</div>
+
+<!-- sweep-complete NEXT suggestion (so a finished sweep never just sits there) -->
+<div id="next-step-banner">
+  <span id="next-step-msg"></span>
+  <button class="btn primary" id="next-step-go"></button>
+  <button class="btn" id="next-step-x" title="dismiss">✕</button>
+</div>
+
+<!-- F8: signal lightbox — expanded fingerprint + everything known + actions -->
+<div class="overlay" id="sig-lightbox" style="z-index:70">
+  <div id="sl-card">
+    <div id="sl-head">
+      <button class="btn" id="sl-nav-prev" title="previous signal (←)">◂</button>
+      <button class="btn" id="sl-nav-next" title="next signal (→)">▸</button>
+      <b id="sl-title"></b>
+      <span id="sl-pills"></span>
+      <span class="note" id="sl-nav-pos"></span>
+      <button class="btn" id="sl-close">✕ CLOSE</button>
+    </div>
+    <img id="sl-img" alt="signal spectrum capture">
+    <div id="sl-next"></div>
+    <div id="sl-rundown"></div>
+    <div id="sl-compare" style="display:none"></div>
+    <div id="sl-grid" class="kv"></div>
+    <div class="row" id="sl-actions"></div>
+    <div class="note" id="sl-msg"></div>
+  </div>
+</div>
+
+<!-- F7: abort choice — pause & save vs confirmed abort & erase -->
+<div class="overlay" id="abort-dialog" style="z-index:60">
+  <div class="msg">Stop this sweep?</div>
+  <div class="sub">PAUSE keeps everything recorded so far in the session.<br>
+    ERASE deletes this sweep's signals and segments — the baseline, other rooms, and the session itself are kept.</div>
+  <div class="row">
+    <button class="btn primary big" id="abort-save">⏸ PAUSE RADIO — SAVE SESSION DATA</button>
+    <button class="btn danger big" id="abort-erase">✕ CONFIRM ABORT — ERASE SWEEP DATA</button>
+    <button class="btn big" id="abort-cancel">◂ KEEP SWEEPING</button>
+  </div>
+</div>
+
+<script>
+(function(){
+  var tbtns=document.querySelectorAll(".themebar button");
+  function mark(){
+    var cur=document.documentElement.className||"";
+    tbtns.forEach(function(b){b.classList.toggle("on",b.getAttribute("data-t")===cur);});
+  }
+  tbtns.forEach(function(b){
+    b.addEventListener("click",function(){
+      var t=b.getAttribute("data-t");
+      document.documentElement.className=t;
+      try{localStorage.setItem("dcs-theme",t);}catch(e){}
+      mark();
+    });
+  });
+  mark();
+})();
+</script>
+<script src="/static/app.js"></script>
+</body>
+</html>

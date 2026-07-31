@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{{ report_id }}</title>
+<style>
+  /* Shield Security Systems report template — same design system as the
+     marketing site (navy / accent blue / Open Sans). Renders to PDF via
+     headless Edge. Edit freely: every report inherits this file. */
+  :root{
+    --navy:#002e60; --navy2:#001f42; --blue:#00559d; --accent:#40a1f3;
+    --ink:#2a2f36; --grey:#5c6670; --line:#e3e7ec; --bg:#f3f6f9;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;-webkit-print-color-adjust:exact;print-color-adjust:exact;}
+  @page{size:letter;margin:0.7in 0 0.9in;}
+  body{font-family:"Open Sans","Segoe UI",Arial,Helvetica,sans-serif;color:var(--ink);
+       line-height:1.55;font-size:10.5pt;}
+  .sheet{padding:0 0.8in;}
+  .pagebreak{page-break-after:always;}
+  tr, .callout{page-break-inside:avoid;}
+  h2, h3, .tcap{page-break-after:avoid;}
+
+  .eyebrow{color:var(--accent);font-size:8.5pt;font-weight:700;letter-spacing:2.5px;
+           text-transform:uppercase;}
+  h1{color:var(--navy);font-size:26pt;line-height:1.15;font-weight:800;margin:14px 0 6px;}
+  h2{color:var(--navy);font-size:14.5pt;font-weight:800;margin:26px 0 10px;
+     border-bottom:2px solid var(--navy);padding-bottom:6px;}
+  h2 .secnum{color:var(--accent);margin-right:8px;}
+  h3{color:var(--blue);font-size:11pt;font-weight:800;margin:18px 0 6px;}
+  p{margin:0 0 9px;}
+  .sub{color:var(--grey);font-size:11pt;margin-top:4px;}
+  .small{font-size:8.5pt;color:var(--grey);}
+
+  /* fixed footer repeats on every printed page */
+  .docfoot{margin-top:30px;font-size:8pt;color:var(--grey);
+           border-top:1px solid var(--line);padding-top:8px;
+           display:flex;justify-content:space-between;}
+  .docfoot b{color:var(--navy);}
+
+  /* ----- cover ----- */
+  .cover{padding:0 0.8in;height:9.3in;display:flex;flex-direction:column;}
+  .cover-top{display:flex;align-items:flex-start;justify-content:space-between;}
+  .cover-top img.logo{height:62px;}
+  .meta{font-size:9.5pt;color:var(--ink);line-height:1.75;text-align:right;}
+  .meta b{color:var(--navy);font-weight:800;letter-spacing:.4px;}
+  .navyrule{height:4px;background:var(--navy);margin:18px 0 0;}
+  .navyrule:after{content:"";display:block;width:120px;height:4px;background:var(--accent);}
+  .cover-photo{margin-top:22px;}
+  .cover-photo img{width:100%;height:4.6in;object-fit:cover;display:block;
+                   border:1px solid var(--line);}
+  .cover-photo .cap{font-size:8pt;color:var(--grey);margin-top:5px;}
+  .cover-title{margin-top:auto;}
+  .cover-title h1{font-size:30pt;max-width:9in;}
+  .cover-title .hl{color:var(--accent);}
+  .classify{margin-top:16px;display:inline-block;background:var(--navy);color:#fff;
+            font-size:8.5pt;font-weight:800;letter-spacing:1.6px;padding:7px 14px;}
+
+  /* ----- tables ----- */
+  .tcap{color:var(--accent);font-size:8pt;font-weight:700;letter-spacing:2px;
+        text-transform:uppercase;margin:16px 0 4px;}
+  table{width:100%;border-collapse:collapse;font-size:9.5pt;}
+  th{text-align:left;color:var(--navy);font-weight:800;font-size:8.5pt;
+     letter-spacing:.8px;text-transform:uppercase;border-bottom:2px solid var(--navy);
+     padding:7px 10px 7px 0;}
+  td{padding:7px 10px 7px 0;border-bottom:1px solid var(--line);vertical-align:top;}
+  tr:last-child td{border-bottom:1px solid #c8d0d9;}
+  td.num, th.num{text-align:right;padding-right:0;}
+
+  .callout{background:var(--bg);border-left:4px solid var(--accent);padding:14px 18px;
+           margin:14px 0;}
+  .callout p:last-child{margin-bottom:0;}
+  .named{font-weight:800;color:var(--navy);}
+  .disc{font-size:8.5pt;color:var(--grey);font-style:italic;}
+
+  ul.terms{list-style:none;margin:6px 0 12px;}
+  ul.terms li{padding:5px 0 5px 20px;position:relative;}
+  ul.terms li:before{content:"";position:absolute;left:0;top:12px;width:7px;height:7px;
+                     background:var(--accent);border-radius:2px;}
+
+  .legend{display:flex;flex-wrap:wrap;gap:14px;margin-top:8px;font-size:8.5pt;color:var(--grey);}
+  .legend .chip{display:inline-block;width:11px;height:11px;border-radius:2px;
+                vertical-align:-1px;margin-right:5px;}
+
+  .figrow{display:flex;gap:16px;margin-top:12px;page-break-inside:avoid;}
+  .fig{flex:1;min-width:0;}
+  .fig svg{width:100%;height:auto;border:1px solid var(--line);display:block;}
+  .fig .figtitle{font-weight:800;color:var(--navy);font-size:9.5pt;margin-bottom:4px;}
+  .fig .figcap{font-size:8.5pt;color:var(--grey);margin-top:5px;}
+</style>
+</head>
+<body>
+
+<!-- ================= COVER ================= -->
+<div class="cover pagebreak">
+  <div class="cover-top">
+    {% if logo_b64 %}<img class="logo" src="data:image/png;base64,{{ logo_b64 }}">{% endif %}
+    <div class="meta">
+      <b>CLIENT</b>&nbsp; {{ client_initials }}<br>
+      <b>CASE</b>&nbsp; TSCM / Leasehold Residential<br>
+      <b>DATE</b>&nbsp; {{ date_long }}<br>
+      <b>REPORT ID</b>&nbsp; {{ report_id }}
+    </div>
+  </div>
+  <div class="navyrule"></div>
+  {% if aerial_b64 %}
+  <div class="cover-photo">
+    <img src="data:image/png;base64,{{ aerial_b64 }}">
+    <div class="cap">Subject property — overhead view. Imagery: Esri World Imagery (Maxar).</div>
+  </div>
+  {% endif %}
+  <div class="cover-title">
+    <div class="eyebrow">Technical Surveillance Counter-Measures</div>
+    <h1>Leasehold Estate Security &amp;<br><span class="hl">Counterintelligence Review</span></h1>
+    <div class="sub">Pre-Engagement Briefing — scope, expected RF environment, and methodology</div>
+    <div class="classify">CONFIDENTIAL — PREPARED FOR CLIENT</div>
+  </div>
+</div>
+
+<!-- ================= BODY ================= -->
+<div class="sheet">
+
+  <h2><span class="secnum">1.</span>SCOPE, CONFIDENTIALITY &amp; ENGAGEMENT TERMS</h2>
+  <p>Before any sweep, {{ company }} assembles a database-verified picture of every radio
+  signal that is <i>expected</i> at the subject property — licensed broadcast stations,
+  public-safety and land-mobile systems, cellular infrastructure, and the national frequency
+  allocations. This briefing presents that expected environment in advance. During the sweep,
+  any emission that cannot be matched to this known picture becomes a candidate for physical
+  investigation: knowing the baseline is what separates the ordinary radio noise of a
+  neighborhood from a device that does not belong.</p>
+  <p><b>Subject property:</b> {{ address }}</p>
+  <ul class="terms">
+    {% for t in terms %}<li>{{ t }}</li>{% endfor %}
+  </ul>
+  <p class="disc">This document is confidential and prepared for the client only. It contains
+  no findings — findings are delivered in the post-engagement report.</p>
+
+  <h2><span class="secnum">2.</span>YOUR STATED CONCERNS</h2>
+  <p>{{ concerns }}</p>
+  {% if named_pois %}
+  <div class="callout">
+    <p>The persons you have identified in connection with these concerns —
+    <span class="named">{{ named_pois | join(", ") }}</span> — are assessed under
+    {{ company_short }}'s separate, confidential deconfliction process. The purpose of that
+    assessment is to formally rule persons out as threat vectors; its working contents are
+    maintained in our internal files and are not part of this document.</p>
+  </div>
+  {% endif %}
+
+  <h2><span class="secnum">3.</span>EXPECTED RF ENVIRONMENT AT THE PROPERTY</h2>
+  <p class="small">Data sources consulted: {{ sources | join(" · ") }}.</p>
+
+  <div class="tcap">Table 1 — Expected signal groups</div>
+  <table>
+    <tr><th>Signal group</th><th>Expected at this address</th><th class="num">Nearest</th></tr>
+    {% for g in groups %}
+    <tr><td>{{ g.name }}</td><td>{{ g.expected }}</td><td class="num">{{ g.nearest }}</td></tr>
+    {% endfor %}
+  </table>
+
+  {% for g in station_tables %}
+  <div class="tcap">Table {{ loop.index + 1 }} — {{ g.title }}</div>
+  <table>
+    <tr><th>Callsign</th><th>Frequency</th><th class="num">Distance (mi)</th></tr>
+    {% for r in g.rows %}
+    <tr><td>{{ r.callsign }}</td><td>{{ r.freq }}</td><td class="num">{{ r.dist }}</td></tr>
+    {% endfor %}
+  </table>
+  {% endfor %}
+
+  <h3>Cellular carriers</h3>
+  {% if carrier_rows %}
+  <div class="tcap">Table {{ station_tables | length + 2 }} — Observed cellular infrastructure</div>
+  <table>
+    <tr><th>Carrier</th><th class="num">Towers observed nearby</th><th class="num">Nearest (mi)</th></tr>
+    {% for c in carrier_rows %}
+    <tr><td>{{ c.name }}</td><td class="num">{{ c.towers }}</td><td class="num">{{ c.nearest }}</td></tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p>All national carriers — Verizon, AT&amp;T (including FirstNet), T-Mobile, US Cellular,
+  and DISH/Boost — hold licensed spectrum covering this area, and every band they operate is
+  in the sweep baseline, with particular attention to the uplink blocks where a cellular-based
+  device would transmit. Tower-by-tower mapping for this address is added to the engagement
+  file as area survey data is loaded.</p>
+  {% endif %}
+  <p class="small">The complete {{ baseline_total }}-entry baseline (every licensed record and
+  national allocation considered) is retained in {{ company_short }}'s survey records for this
+  engagement.</p>
+
+  {% if shielding %}
+  <h2><span class="secnum">{{ sec.shield }}.</span>RF ENVIRONMENT &amp; SHIELDING ASSESSMENT</h2>
+  {% for para in shielding.paras %}<p>{{ para }}</p>{% endfor %}
+  <p class="disc">Disclosure: {{ company }} provides shielding assessment and installation
+  services and therefore has a commercial interest in this recommendation. It is offered as
+  security guidance, and any decision to proceed is entirely the client's.</p>
+  {% endif %}
+
+  <h2><span class="secnum">{{ sec.method }}.</span>METHODOLOGY — WHAT THE SWEEP WILL DO</h2>
+  <p>The premises are swept across the full frequency range the analyzer supports, with extra
+  dwell time on the bands where surveillance devices commonly operate. An exterior reference
+  reading lets us tell a signal that originates inside the premises from the ordinary signals
+  present everywhere in the area.</p>
+  <p>Every detected signal is matched against the expected environment above and classified.
+  Signals that cannot be accounted for are localized room-by-room and, where warranted, hunted
+  with a directional antenna. The engagement includes Wi-Fi network hardening and cell-phone
+  hardening. You receive a final report mirroring exactly what is found on site. This survey
+  is receive-only; nothing is transmitted.</p>
+
+  <h3>Equipment deployed on this engagement</h3>
+  <ul class="terms">
+    <li><b>Wideband RF spectrum analysis</b> — dual-module analyzer covering 50&nbsp;kHz to
+    6.1&nbsp;GHz, driven by the {{ company }} proprietary TSCM suite (baseline correlation,
+    anomaly classification, and room-by-room localization).</li>
+    <li><b>Thermal-imaging camera</b> — powered electronics dissipate heat; thermal
+    inspection reveals active devices concealed behind walls, fixtures, and furnishings that
+    emit no detectable RF.</li>
+    <li><b>Fiber-optic borescope</b> — direct visual inspection inside wall voids, outlets,
+    vents, fixtures, and vehicle cavities where devices are physically concealed.</li>
+    <li><b>Wi-Fi &amp; Bluetooth enumeration</b> — every wireless device on or near the
+    premises is inventoried and reconciled against what you actually own.</li>
+  </ul>
+
+  <h2><span class="secnum">{{ sec.why }}.</span>WHY SHIELD IS DIFFERENT</h2>
+  <div style="display:flex;gap:18px;align-items:flex-start;page-break-inside:avoid;">
+    {% if tony_b64 %}
+    <img src="data:image/jpeg;base64,{{ tony_b64 }}"
+         style="width:1.6in;border:1px solid var(--line);display:block;">
+    {% endif %}
+    <div>
+      <p>Shield's technical practice is led by <b>Tony Thurman</b>, President of Shield
+      Security Systems of Kansas City. A Purdue-trained engineer (M.S.), Tony began his
+      career at <b>AT&amp;T Bell Laboratories</b> and rose through its successors
+      <b>Lucent Technologies</b> and <b>Alcatel-Lucent</b>, serving as chief executive of
+      the <b>Alcatel-Lucent Australia</b> operation before bringing SHIELD to the Kansas
+      City market in 2009.</p>
+      <p>Shield technicians are experts in the <b>applied sciences</b>. They don't just
+      know how to operate the technology — they understand the physics and engineering
+      behind it: what a signal must look like, why a device has to radiate the way it
+      does, and where the laws of physics say it can and cannot hide. That is the
+      difference between running a gadget and conducting a counterintelligence
+      examination.</p>
+    </div>
+  </div>
+
+  <h2><span class="secnum">{{ sec.next }}.</span>NEXT STEPS &amp; SCHEDULING</h2>
+  {% if offsite_location %}
+  <p><b>Initial meeting (offsite):</b> consistent with counter-surveillance practice, the
+  intake conversation is held away from the subject property at a neutral public venue:
+  {{ offsite_location }}.</p>
+  {% endif %}
+  {% if scheduling_note %}
+  <p><b>Availability:</b> {{ scheduling_note }}</p>
+  {% endif %}
+  <p>To confirm a date or ask anything about this briefing, reply by phone or email — no
+  detail of this engagement is discussed with anyone but you.</p>
+  <div class="callout">
+    <p>Pleased with your result? Ask <b>Tony Thurman</b> about our <b>attorney referral
+    process</b> — for matters that call for legal follow-through, we can introduce you to
+    counsel we work with.</p>
+  </div>
+
+  <div class="pagebreak"></div>
+
+  <h2><span class="secnum">A.</span>APPENDIX A — ALLOCATED-SPECTRUM MAP</h2>
+  <p>The chart below is the frequency map the sweep is checked against: each colored band is a
+  portion of the radio spectrum allocated to a known service at your location (0&nbsp;Hz on the
+  left to 6.1&nbsp;GHz on the right). During the sweep, every detected emission is compared to
+  this map — energy inside an expected band is attributed to its service and verified; energy
+  that matches nothing here is treated as an anomaly and physically investigated.</p>
+  {{ strip_svg }}
+  <div class="legend">
+    {% for l in legend %}<span><span class="chip" style="background:{{ l.color }}"></span>{{ l.label }}</span>{% endfor %}
+  </div>
+
+  {% if showcase %}
+  <h2><span class="secnum">B.</span>APPENDIX B — WHERE COVERT DEVICES HIDE</h2>
+  <p>De-identified reference captures from the {{ company_short }} signal library, recorded
+  with the same instrumentation used on your engagement. Each chart is a high-resolution
+  spectrograph of one slice of spectrum: the <b style="color:#9a7b00">yellow</b> trace holds
+  the strongest energy seen on each frequency (catching brief bursts), the
+  <b style="color:#006c8a">blue</b> trace is the steady average. This is exactly what your
+  technician reads during the sweep — and what a covert transmitter looks like when one is
+  present.</p>
+  <div class="figrow">
+    {% for f in showcase %}
+    <div class="fig">
+      <div class="figtitle">{{ f.label }}</div>
+      {{ f.svg }}
+      <div class="figcap">{{ f.caption }}</div>
+    </div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  <p class="disc" style="margin-top:26px">© {{ year }} {{ company }}. All rights reserved.
+  This document, the {{ company }} proprietary TSCM suite, and the methods, baselines, and
+  analytical processes described or embodied herein are the confidential intellectual
+  property of {{ company }}. Unauthorized reproduction, distribution, disclosure, or
+  <b>reverse engineering</b> of this document or of any {{ company_short }} tool, software,
+  or methodology is prohibited.</p>
+
+  <div class="docfoot">
+    <span><b>{{ company }}</b> · {{ report_id }}</span>
+    <span>CONFIDENTIAL — PREPARED FOR CLIENT</span>
+  </div>
+
+</div>
+</body>
+</html>

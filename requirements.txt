@@ -1,0 +1,15 @@
+flask>=3.0
+pyserial>=3.5
+requests>=2.31
+PyYAML>=6.0
+reportlab>=4.0
+# Official RF Explorer python library (https://github.com/RFExplorer/RFExplorer-for-Python)
+# If this lags the 6G Combo PLUS, the app falls back to its raw UART driver automatically.
+RFExplorer>=1.0
+# Bluetooth LE inventory scanning (optional — inventory degrades gracefully without it)
+bleak>=0.21
+# ADALM-Pluto / AD936x SDR source (optional — only needed when device.source=pluto).
+# On Windows the native libiio runtime + ADI USB drivers must also be installed;
+# see SDR_SETUP.md. numpy is required by the SDR PSD/stitch math.
+pyadi-iio==0.0.21
+numpy>=1.20
