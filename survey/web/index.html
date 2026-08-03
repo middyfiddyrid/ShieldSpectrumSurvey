@@ -291,6 +291,12 @@ body:not(.single-rx) nav .step.single-only { display:none; }
 .op-marked { margin-left:6px; padding:1px 5px; font-size:9.5px; letter-spacing:.4px;
   border:1px solid #d9a441; color:#d9a441; border-radius:2px; vertical-align:middle;
   white-space:nowrap; }
+/* what the demodulator is tuned to — stated, not inferred */
+#insp-tuned { display:flex; align-items:baseline; gap:8px; margin:6px 0 2px;
+  padding:5px 9px; background:#04070c; border:1px solid #26303d; border-radius:3px; }
+#insp-tuned .it-lab { font-size:10px; letter-spacing:.6px; color:var(--dim); }
+#insp-tuned b { font-size:17px; color:var(--green); font-variant-numeric:tabular-nums; }
+#insp-tuned .it-band { font-size:11px; color:var(--muted); }
 /* verification rundown — the ordered "how we know what this is" checklist */
 #sl-rundown { display:flex; flex-direction:column; gap:1px; border:1px solid var(--line);
   border-radius:3px; overflow:hidden; }
@@ -823,7 +829,12 @@ body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid va
       </select>
       <span class="note" id="insp-ibw-hint">USB 2.0: use 5–10 MHz if audio stutters at 20 MHz</span>
     </div>
-    <div class="note">LIVE ANALYZER — click to tune the demodulator. Yellow dot = peak in the filter passband; trace uses hang-and-decay smoothing (SDR Console style).</div>
+    <!-- What the demodulator is ACTUALLY tuned to, stated outright. The panel
+         used to show this nowhere, so the tech could listen without ever being
+         told the frequency. -->
+    <div id="insp-tuned"><span class="it-lab">LISTENING TO</span>
+      <b id="insp-tuned-f">—</b><span class="it-band" id="insp-tuned-band"></span></div>
+    <div class="note">LIVE ANALYZER — hover to read a frequency, click to tune the demodulator there. Yellow dot = peak in the filter passband; trace uses hang-and-decay smoothing (SDR Console style).</div>
     <canvas id="insp-analyzer" width="660" height="170" style="width:100%;height:170px;display:block;background:#04070c;border:1px solid #26303d"></canvas>
     <div class="note" style="margin-top:6px">SIGNAL HISTORY <span class="tag">peak strength · last 60 s while listening</span></div>
     <canvas id="insp-history" width="660" height="56"></canvas>

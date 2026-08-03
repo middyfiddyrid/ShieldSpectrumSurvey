@@ -374,7 +374,18 @@ class SweepController:
                     # handle must reach the probe so _evict_dead_monitor can
                     # drop it and the reopen happens hands-free (the probe
                     # early-returns cheaply when a LIVE Pluto is connected).
-                    if (self.concurrent_enabled()
+                    # NEVER probe for the Pluto while live audio is running. The
+                    # probe spawns a worker PROCESS and enumerates USB, which
+                    # takes seconds; doing that underneath a real-time demod
+                    # stream starves the audio thread and the operator hears it
+                    # as a chop every retry cycle. With no Pluto attached this
+                    # fired forever, so listening was chopped roughly once a
+                    # minute for the whole session. The seek resumes the moment
+                    # the stream stops — plugging in mid-listen is still picked
+                    # up, just after the audio ends rather than through it.
+                    if self.listening:
+                        pass
+                    elif (self.concurrent_enabled()
                             and self.active_source not in (None, "pluto")):
                         self.autoseek_monitor()
                 except Exception:  # noqa: BLE001

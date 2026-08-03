@@ -3504,12 +3504,28 @@ function smoothSpectrumTrace(p) {
   return App._specSmooth;
 }
 
+// Keep the "LISTENING TO" line honest on every analyzer frame — the demod tuner
+// moves by click, by wheel and by re-tune, and the operator must never have to
+// guess which frequency they are actually hearing.
+function updateTunedReadout() {
+  const f = $("insp-tuned-f");
+  if (!f) return;
+  const mhz = (App.demodMhz != null) ? App.demodMhz : App.inspCenter;
+  f.textContent = (mhz == null) ? "—" : fmtF(mhz);
+  const band = $("insp-tuned-band");
+  if (band) {
+    band.textContent = (App.bandLo == null || App.bandHi == null) ? ""
+      : `in band ${fmtF(App.bandLo)} – ${fmtF(App.bandHi)}`;
+  }
+}
+
 function drawAnalyzer(cv, a, meter) {
   const { ctx, W, H } = fitCanvas(cv);
   ctx.clearRect(0, 0, W, H);
   const p = a.power_dbm, fr = a.freqs_mhz, n = p.length;
   if (!n) return;
   App.bandLo = fr[0]; App.bandHi = fr[n - 1];
+  updateTunedReadout();
   const smooth = smoothSpectrumTrace(p);
   let lo = Math.min(...smooth), hi = Math.max(...smooth);
   if (hi - lo < 10) hi = lo + 10;
@@ -3615,8 +3631,48 @@ function tuneDemodFromClick(e, cv) {
   App.demodMhz = freq;
   api("/api/listen/offset", { offset_hz: (freq - App.inspCenter) * 1e6 }).catch(() => {});
   $("insp-msg").textContent = "● tuned " + fmtF(freq);
+  updateTunedReadout();          // say it immediately, not on the next frame
   App._meterPeakHold = null;
 }
+
+/* The monitor panel's own canvases carry the demod band, NOT the sweep trace, so
+   they need their own x->frequency mapping (App.bandLo..bandHi, the same one
+   tuneDemodFromClick uses). Without this the operator could click to tune here
+   and never be told which frequency they landed on. */
+function inspFreqAtX(cv, clientX) {
+  if (App.bandLo == null || App.bandHi == null) return null;
+  const r = cv.getBoundingClientRect();
+  if (!r.width) return null;
+  const frac = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+  return App.bandLo + frac * (App.bandHi - App.bandLo);
+}
+
+function inspHover(ev, cv) {
+  const mhz = inspFreqAtX(cv, ev.clientX);
+  const el = $("xhair-readout");
+  if (mhz == null || !el) { if (el) el.classList.remove("show"); return; }
+  const tuned = (App.demodMhz != null)
+    ? `<br><span class="xr-hint">now hearing ${esc(fmtF(App.demodMhz))} — click to move here</span>`
+    : `<br><span class="xr-hint">click to tune here</span>`;
+  el.innerHTML = `<b>${esc(fmtF(mhz))}</b>${tuned}`;
+  el.classList.add("show");
+  const pad = 14, w = el.offsetWidth, h = el.offsetHeight;
+  let x = ev.clientX + pad, y = ev.clientY + pad;
+  if (x + w > window.innerWidth - 4) x = ev.clientX - pad - w;
+  if (y + h > window.innerHeight - 4) y = ev.clientY - pad - h;
+  el.style.left = Math.max(4, x) + "px";
+  el.style.top = Math.max(4, y) + "px";
+}
+
+["insp-analyzer", "insp-waterfall"].forEach(id => {
+  const cv = $(id);
+  if (!cv) return;
+  cv.style.cursor = "crosshair";
+  cv.addEventListener("mousemove", (e) => inspHover(e, cv));
+  cv.addEventListener("mouseleave", () => {
+    const el = $("xhair-readout"); if (el) el.classList.remove("show");
+  });
+});
 if ($("insp-analyzer")) $("insp-analyzer").addEventListener("click", (e) => tuneDemodFromClick(e, $("insp-analyzer")));
 if ($("insp-waterfall")) $("insp-waterfall").addEventListener("click", (e) => tuneDemodFromClick(e, $("insp-waterfall")));
 if ($("insp-bw")) $("insp-bw").addEventListener("change", () => {
