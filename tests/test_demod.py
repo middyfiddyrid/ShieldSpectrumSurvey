@@ -270,5 +270,58 @@ class TestDemodStrengthening(unittest.TestCase):
         self.assertIsNotNone(g1)
 
 
+class TestChannelWidthConvention(unittest.TestCase):
+    """chan_bw_hz is the TOTAL occupied passband in every mode, so the channel
+    filter keeps ±chan_bw/2. Regression for the FM branch having passed the full
+    width as a one-sided cutoff: a 16 kHz pick let ±16 kHz through, so the band
+    the operator saw shaded was half the band actually demodulated and the
+    adjacent channel came in on both sides of the signal being isolated.
+    Parametrized over am/nfm — the two branches silently drifted apart once."""
+
+    fs = 2_400_000.0
+    n = 240_000
+    bw = 16_000.0        # total width -> passband edge at ±8 kHz
+    adj_hz = 13_000.0    # neighbour: clear of ±8 kHz, well inside the old ±16 kHz
+
+    def _wanted_plus_neighbour(self, mode):
+        """Wanted signal at band center, plus a 4x stronger narrow neighbour
+        parked where only the over-wide filter would have admitted it."""
+        t = np.arange(self.n) / self.fs
+        if mode == "nfm":
+            wanted = fm_iq(self.fs, self.n, audio_hz=1000.0, deviation=3000.0)
+            neigh = fm_iq(self.fs, self.n, audio_hz=2000.0, deviation=500.0)
+        else:
+            wanted = am_iq(self.fs, self.n, audio_hz=1000.0)
+            neigh = am_iq(self.fs, self.n, audio_hz=2000.0)
+        neigh = neigh * np.exp(1j * 2 * np.pi * self.adj_hz * t)
+        return (wanted + 4.0 * neigh).astype(np.complex64)
+
+    def test_adjacent_channel_rejected(self):
+        for mode in ("am", "nfm"):
+            with self.subTest(mode=mode):
+                pcm, rate = demodulate(self._wanted_plus_neighbour(mode), self.fs,
+                                       mode, chan_bw_hz=self.bw)
+                self.assertLess(
+                    abs(peak_hz(pcm, rate) - 1000.0), 300.0,
+                    f"{mode}: the {self.adj_hz/1e3:.0f} kHz neighbour leaked into a "
+                    f"{self.bw/1e3:.0f} kHz channel — chan_bw_hz is the TOTAL width "
+                    f"(±{self.bw/2e3:.0f} kHz), not the one-sided cutoff")
+
+    def test_same_total_width_in_am_and_fm(self):
+        """A tone just inside the half-width survives in both modes, and the
+        surviving band is the same width in both — the parity the bug broke."""
+        t = np.arange(self.n) / self.fs
+        for mode in ("am", "nfm"):
+            with self.subTest(mode=mode):
+                inband = 3_000.0                      # inside ±8 kHz for both modes
+                if mode == "nfm":
+                    iq = fm_iq(self.fs, self.n, audio_hz=inband, deviation=2000.0)
+                else:
+                    iq = am_iq(self.fs, self.n, audio_hz=inband)
+                pcm, rate = demodulate(iq, self.fs, mode, chan_bw_hz=self.bw)
+                self.assertLess(abs(peak_hz(pcm, rate) - inband), 300.0,
+                                f"{mode}: an in-channel tone must survive")
+
+
 if __name__ == "__main__":
     unittest.main()

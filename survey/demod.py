@@ -29,8 +29,20 @@ AUDIO_RATE = 24000
 SSB_BW = 3000.0      # SSB audio passband (~3 kHz, communications voice)
 CW_BFO = 700.0       # CW beat-frequency oscillator offset -> audible tone (Hz)
 CW_BW = 1200.0       # narrow filter around the CW carrier before the beat
-NFM_CHAN_BW = 16_000.0    # narrowband-FM channel filter cutoff (voice / bug / LMR)
-WFM_CHAN_BW = 150_000.0   # broadcast-FM channel filter cutoff
+# Channel widths are TOTAL occupied passband (what the UI shades), not one-sided
+# cutoffs — the demodulator halves them. Size them by Carson's rule,
+# BW = 2 x (peak deviation + highest baseband frequency):
+#   NFM  2 x (5 + 3)   = 16 kHz   — fits 12.5/25 kHz LMR/bug channels.
+#   WFM  2 x (75 + 57) = 264 kHz  — broadcast deviation is +/-75 kHz and the
+#        composite runs to ~57 kHz (38 kHz stereo subcarrier + RDS). Anything
+#        narrower clips the deviation peaks and the audio comes out fuzzy on
+#        loud passages. Measured on a synthetic broadcast signal (1 kHz tone +
+#        38 kHz subcarrier + 57 kHz RDS at full deviation), tone-to-distortion
+#        was +29.9 dB at 150 kHz, +26.6 dB at 250 kHz and +57.1 dB at 300 kHz —
+#        a 30 dB cliff exactly at the Carson bound. 300 kHz it is; US co-market
+#        stations sit >=400 kHz apart, so +/-150 kHz still rejects the neighbour.
+NFM_CHAN_BW = 16_000.0    # narrowband-FM total channel width (voice / bug / LMR)
+WFM_CHAN_BW = 300_000.0   # broadcast-FM total channel width
 FIR_MAX_TAPS = 401        # cap on the windowed-sinc channel filter length (compute bound)
 
 
@@ -296,9 +308,20 @@ def demodulate(iq, fs: float, mode: str = "nfm", offset_hz: float = 0.0,
         # replaces leaked neighbours straight through its -13 dB sidelobes.
         default_bw = NFM_CHAN_BW if mode == "nfm" else WFM_CHAN_BW
         chan_bw = float(chan_bw_hz) if chan_bw_hz else default_bw
-        chan_bw = max(2000.0, min(chan_bw, fs * 0.45))   # adjustable channel width (the on-screen band)
-        dec = max(1, int(fs / (chan_bw * 2.0)))
-        fir = _design_fir(_auto_taps(fs, chan_bw), chan_bw, fs)
+        chan_bw = max(2000.0, min(chan_bw, fs * 0.9))    # TOTAL passband width (the on-screen band)
+        # _design_fir builds a REAL lowpass; convolved with COMPLEX baseband it
+        # keeps ±cutoff, so the one-sided cutoff is HALF the on-screen band.
+        # Passing the full width made every FM selection twice as wide as the
+        # shaded band (a 16 kHz pick let ±16 kHz through) and admitted the
+        # adjacent channel on both sides of the signal being isolated.
+        cutoff = chan_bw / 2.0
+        # Decimate so the passband edge still lands on the decimated Nyquist
+        # (cutoff == arate/2), exactly as it did when cutoff was the full width.
+        # Halving the cutoff without halving `dec` would leave the top half of
+        # the decimated band empty, and the max-minus-median squelch SNR reads
+        # those stopband bins as headroom — the squelch stops closing on noise.
+        dec = max(1, int(fs / chan_bw))
+        fir = _design_fir(_auto_taps(fs, cutoff), cutoff, fs)
         x = _fir_decimate(iq, fir, dec)
         arate = fs / dec
         if x.size < 4:

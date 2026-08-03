@@ -32,7 +32,15 @@ log = logging.getLogger("survey.identify")
 # ---------------------------------------------------------------------------
 
 def _occupied_bw_hz(freqs_hz: np.ndarray, psd_db: np.ndarray, down_db: float = 10.0,
-                    floor_margin_db: float = 6.0) -> float:
+                    floor_margin_db: float = 6.0, gap_bins: int = 4) -> float:
+    """Width of the occupied band around the tuned signal. See _occupied_band_hz."""
+    lo_hz, hi_hz = _occupied_band_hz(freqs_hz, psd_db, down_db, floor_margin_db, gap_bins)
+    return max(0.0, hi_hz - lo_hz)
+
+
+def _occupied_band_hz(freqs_hz: np.ndarray, psd_db: np.ndarray, down_db: float = 10.0,
+                      floor_margin_db: float = 6.0,
+                      gap_bins: int = 4) -> "tuple[float, float]":
     """Occupied bandwidth — bins both within `down_db` of the peak AND clearly
     above the noise floor. The noise-floor gate is what stops a WEAK signal from
     reading as full-capture-width: at low SNR the peak is barely above the floor,
@@ -44,9 +52,58 @@ def _occupied_bw_hz(freqs_hz: np.ndarray, psd_db: np.ndarray, down_db: float = 1
     thr = max(peak - down_db, floor + floor_margin_db)
     above = psd_db >= thr
     if not np.any(above):
-        return 0.0
-    idx = np.where(above)[0]
-    return float(freqs_hz[idx[-1]] - freqs_hz[idx[0]])
+        return 0.0, 0.0
+
+    # Measure the run CONTAINING the tuned signal — not the span from the lowest
+    # to the highest above-threshold bin anywhere in the capture. The old
+    # first-to-last span assumed the window held ONE emitter: point a 20 MHz
+    # capture at 101 MHz and it spans ~91-111 MHz, so it returned the distance
+    # from the lowest FM station to the highest and called a 200 kHz broadcast
+    # channel 9.26 MHz wide. Every downstream feature inherited that error, so
+    # nothing could be classified correctly whenever a neighbour shared the
+    # window — which, in a real RF environment, is nearly always.
+    n = above.size
+    filled = above.copy()
+    i = 0
+    while i < n:                        # bridge nulls INSIDE one signal (FM has
+        if filled[i]:                   # them) without merging separate signals
+            i += 1
+            continue
+        j = i
+        while j < n and not filled[j]:
+            j += 1
+        if 0 < i and j < n and (j - i) <= gap_bins:
+            filled[i:j] = True
+        i = j
+
+    anchor = int(np.argmin(np.abs(freqs_hz)))     # band center = what was tuned
+    if not filled[anchor]:
+        anchor = int(np.argmax(psd_db))           # tuned off-centre: use the peak
+    lo = hi = anchor
+    while lo > 0 and filled[lo - 1]:
+        lo -= 1
+    while hi < n - 1 and filled[hi + 1]:
+        hi += 1
+    return float(freqs_hz[lo]), float(freqs_hz[hi])
+
+
+def _isolate_channel(iq: np.ndarray, fs: float, center_hz: float, bw_hz: float,
+                     guard: float = 1.6) -> np.ndarray:
+    """Down-convert the occupied band to DC and low-pass to it, so the features
+    below describe THE tuned emitter rather than everything else sharing the
+    capture. Without this, a 20 MHz window on the FM band measured duty cycle,
+    continuity, tone count and flatness across a dozen stations at once — which
+    is how a 24/7 broadcast carrier came back as 'intermittent' with 34 tones.
+    Reuses demod's windowed-sinc filter so isolation means the same thing here
+    as it does on the listen path."""
+    from .demod import _lowpass
+    if center_hz:
+        t = np.arange(iq.size, dtype=np.float64) / fs
+        iq = (iq * np.exp(-1j * 2 * np.pi * center_hz * t)).astype(np.complex64)
+    # guard band keeps the signal's own skirts; floor keeps the filter sane for
+    # a very narrow carrier measured with coarse bins.
+    cutoff = min(max(bw_hz * guard / 2.0, 4.0 * fs / max(iq.size, 1)), fs * 0.45)
+    return _lowpass(iq, fs, cutoff).astype(np.complex64)
 
 
 def _spectral_flatness(psd_lin: np.ndarray) -> float:
@@ -140,11 +197,47 @@ def iq_features(iq, fs: float) -> dict:
     iq = np.asarray(iq, dtype=np.complex64)
     if iq.size < 256:
         raise ValueError("need >= 256 IQ samples")
-    # Duty / activity by ENVELOPE DYNAMIC RANGE. A constant-envelope signal
-    # (CW/FM/FSK/PSK) has no quiet reference inside the capture, so a
-    # median-relative threshold is meaningless; instead compare the low (5th
-    # pct = "off"/noise) and high (95th pct = "on") levels. A clear on/off gap =>
-    # bursty/OOK, measure the on-fraction; otherwise it's a continuous emission.
+    nperseg = min(1024, iq.size // 4 or 256)
+    freqs, psd_db = welch_psd(iq, fs, nperseg=nperseg)
+    # SNR of the strongest bin over the median (noise) level, measured on the
+    # RAW capture — the wide window is what holds a true noise reference. A real
+    # emitter stands proud of the floor; an empty channel is flat (low SNR) and
+    # must NOT be classified as a wideband signal just because noise is flat.
+    snr_db = float(np.max(psd_db) - np.median(psd_db))
+    signal_present = snr_db >= 8.0
+    band_lo_hz, band_hi_hz = _occupied_band_hz(freqs, psd_db, down_db=10.0)
+    occ_bw = max(0.0, band_hi_hz - band_lo_hz)
+
+    # Isolate the tuned channel BEFORE measuring anything else. Every feature
+    # past this point (duty, continuity, flatness, tones, FSK, symbol rate) is
+    # meaningless when a neighbour shares the capture, and in a real RF
+    # environment one nearly always does.
+    # ...but only when something ELSE is actually in the window. Filtering is
+    # not free: it rounds the keying edges of a bursty signal (OOK's sharp
+    # transitions live in the skirts, outside the -10 dB occupied band), which
+    # would cost us the very burst structure the classifier reads. So isolate
+    # only when a meaningful share of the captured power sits outside the tuned
+    # channel — i.e. when a neighbour is there to contaminate the measurement.
+    if signal_present and 0.0 < occ_bw < fs * 0.8:
+        # A NEIGHBOUR is a distinct peak well clear of the tuned channel — not
+        # merely power outside it, which a bursty signal's own sinc skirts also
+        # produce. Measured: an isolated OOK burst's far peak sits ~21 dB below
+        # its carrier, while a co-resident FM station is within ~0 dB. Skip the
+        # guard band adjacent to the channel so those skirts are not mistaken
+        # for company.
+        bin_hz = float(freqs[1] - freqs[0]) if freqs.size > 1 else 0.0
+        guard_hz = max(occ_bw * 2.0, 4.0 * bin_hz)
+        far = (freqs < band_lo_hz - guard_hz) | (freqs > band_hi_hz + guard_hz)
+        if np.any(far) and float(np.max(psd_db[far])) > float(np.max(psd_db)) - 15.0:
+            iq = _isolate_channel(iq, fs, 0.5 * (band_lo_hz + band_hi_hz), occ_bw)
+            freqs, psd_db = welch_psd(iq, fs, nperseg=nperseg)
+    psd_lin = 10.0 ** (psd_db / 10.0)
+
+    # Duty / activity by ENVELOPE DYNAMIC RANGE, on the isolated channel. A
+    # constant-envelope signal (CW/FM/FSK/PSK) has no quiet reference inside the
+    # capture, so a median-relative threshold is meaningless; instead compare the
+    # low (5th pct = "off"/noise) and high (95th pct = "on") levels. A clear
+    # on/off gap => bursty/OOK, measure the on-fraction; otherwise continuous.
     mag = np.abs(iq)
     lo = float(np.percentile(mag, 5))
     hi = float(np.percentile(mag, 95))
@@ -156,14 +249,6 @@ def iq_features(iq, fs: float) -> dict:
         active = np.ones(mag.size, dtype=bool)
         duty = 1.0
 
-    freqs, psd_db = welch_psd(iq, fs, nperseg=min(1024, iq.size // 4 or 256))
-    psd_lin = 10.0 ** (psd_db / 10.0)
-    # SNR of the strongest bin over the median (noise) level. A real emitter
-    # stands proud of the floor; an empty channel is flat (low SNR) and must NOT
-    # be classified as a wideband signal just because noise is flat and wide.
-    snr_db = float(np.max(psd_db) - np.median(psd_db))
-    signal_present = snr_db >= 8.0
-    occ_bw = _occupied_bw_hz(freqs, psd_db, down_db=10.0)
     flatness = _spectral_flatness(psd_lin)
     tones = _count_tones(psd_db)
     fsk = _fsk_analysis(iq, fs, active)
