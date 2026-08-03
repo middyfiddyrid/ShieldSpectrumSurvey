@@ -95,12 +95,21 @@ def interpret(feats, decoded_protocol=None):
     bw = feats.get("occupied_bw_khz", 0)
     rate = feats.get("symbol_rate_kbd")
     if cls == "analog_voice":
-        return {"summary": "Narrowband analog voice — classic audio-bug signature. "
-                "PRESS LISTEN: if it's a room bug you'll hear the room.",
+        # Bandwidth + continuity only. An unmodulated carrier, an LO leak and a
+        # narrowband telemetry link all land here too (tests/test_identify.py
+        # feeds a pure CW tone and gets this class), so this must not read as a
+        # finding — it is persisted to signals.analysis_summary and replayed in
+        # the ledger and the client report long after the panel is gone.
+        return {"summary": "Continuous narrowband signal — compatible with analog "
+                "FM/AM voice, but a dead carrier or telemetry link measures the "
+                "same. PRESS LISTEN to validate: room audio confirms it, silence "
+                "does not clear it.",
                 "readable": "listen"}
     if cls == "analog_video":
-        return {"summary": "Wideband continuous FM — possible analog video / "
-                "baby-monitor-style camera. Listen and watch the waterfall.",
+        # No video demodulation or frame recovery exists — do not imply one.
+        return {"summary": "Wideband continuous FM — compatible with analog video "
+                "or a baby-monitor-style camera; not confirmed. Check the "
+                "waterfall shape and listen for an audio subcarrier.",
                 "readable": "listen"}
     if cls == "fsk":
         r = f" (~{rate} kBd)" if rate else ""

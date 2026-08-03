@@ -155,11 +155,14 @@ def next_step_for(sig: dict) -> dict:
     # 8 — narrowband: one LISTEN answers it. Clear room audio = analog bug.
     if bw_khz is not None and bw_khz <= 25.0:
         in_ism = any(a.band_tag in ("ism_433", "ism_915") for a in allocs)
+        # Width alone, on the sweep row, before any ANALYZE has run — so this
+        # prompts the check, it does not report a result.
         return _step("listen", "🎧 LISTEN",
                      "Narrowband"
-                     + (" in a classic analog-bug band (ISM)" if in_ism else "")
-                     + " — LISTEN in NFM: clear room audio = audio bug; "
-                       "steady dead carrier = investigate.", mode="nfm")
+                     + (" in a band commonly used by analog bugs (ISM)" if in_ism else "")
+                     + " — LISTEN in NFM to tell them apart: room audio would "
+                       "confirm an audio bug; a steady dead carrier looks "
+                       "identical on the sweep until you listen.", mode="nfm")
 
     # 9 — bursty/intermittent: audio won't help; the signature matcher will.
     if persistence is not None and persistence < 0.25:
