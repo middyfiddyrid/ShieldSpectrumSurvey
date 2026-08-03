@@ -1319,19 +1319,43 @@ def looks_like_p25(feats: dict) -> bool:
     FSK, 4800 symbols/s, +/-1.8 kHz outer deviation (3.6 kHz peak-to-peak shift),
     in a 12.5 kHz channel, and continuous while someone is keyed up.
 
-    Deliberately loose on `fsk_states` (a noisy 4-level eye often measures as 2)
-    and tight on symbol rate, because 4.8 kBd in a 12.5 kHz channel is the
-    signature that separates P25/DMR-class traffic from paging and telemetry.
     Feature gates only pick which decoder to TRY — the sync + BCH gates inside
-    decode_p25_dibits decide what is reported."""
+    decode_p25_dibits decide what is reported.
+
+    MEASURED, 2026-08-03: iq_features CANNOT see C4FM as FSK. C4FM is
+    continuous-phase and RRC pulse-shaped, so the instantaneous-frequency
+    histogram is smeared rather than four discrete rails, and the extractor
+    returns modulation_class='analog_voice', fsk_states=0, fsk_shift_khz=0.0 on a
+    known-good synthetic P25 call at every sample rate tried (48k/96k/240k).
+    Requiring those, as this gate originally did, meant P25 could NEVER be tried
+    — decode_p25 worked perfectly on the same signal the gate rejected.
+
+    So FSK evidence is now treated as CONFIRMING, never as required. The gate
+    keeps only what actually holds for C4FM: a real signal, in a channel-width
+    band. That costs a C4FM demod on some signals that turn out not to be P25,
+    which is the right trade — decode_p25_dibits' own sync + BCH gates are far
+    stronger than any feature test (measured: 3 million random dibits produce
+    ZERO frames), so a loose pre-gate cannot manufacture a false call.
+    """
     if not feats:
         return False
-    is_fsk = feats.get("modulation_class") == "fsk" or feats.get("fsk_states", 0) >= 2
-    shift = feats.get("fsk_shift_khz", 0.0) or 0.0
-    rate = feats.get("symbol_rate_kbd", 0.0) or 0.0
+    # Explicit False rejects (iq_features sets it, and an empty channel must not
+    # reach the decoder); a MISSING key is "not stated", not "no signal" — a
+    # caller hand-building a feature dict should not be silently vetoed.
+    if feats.get("signal_present") is False:
+        return False
     bw = feats.get("occupied_bw_khz", 0.0) or 0.0
-    near_rate = abs(rate - 4.8) <= 0.35 * 4.8 or rate == 0.0
-    return bool(is_fsk and 0.5 <= shift <= 8.0 and near_rate and 2.0 <= bw <= 25.0)
+    # 12.5 kHz channel; allow for a mis-tuned capture and for the wider
+    # measurement a noisy environment gives. An unmodulated carrier measures far
+    # below this, and a wideband/OFDM signal far above, so both still fall out.
+    if not (2.0 <= bw <= 25.0):
+        return False
+    rate = feats.get("symbol_rate_kbd", 0.0) or 0.0
+    # 0.0 means "could not measure", which is the NORMAL reading for C4FM — treat
+    # it as no information rather than as a mismatch.
+    if rate and abs(rate - 4.8) > 0.35 * 4.8:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------- synth / encoder
