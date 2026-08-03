@@ -219,6 +219,27 @@ CREATE TABLE IF NOT EXISTS decode_overrides (
     reason TEXT DEFAULT '',
     created_utc REAL
 );
+-- Signed engagement authorization — the sign gate. Receiving, analyzing,
+-- decoding or recording CONTENT requires an active (unrevoked) row for the
+-- session; passive spectrum view never does, so the operator can eyeball the
+-- band before committing. Scope is the whole engagement, not per signal: it is
+-- signed once at the start rather than interrupting a sweep on a client site.
+-- Immutable — never UPDATE except to set revoked_utc (soft revoke).
+CREATE TABLE IF NOT EXISTS session_authorizations (
+    id INTEGER PRIMARY KEY,
+    session_id INTEGER NOT NULL,
+    operator TEXT DEFAULT '',
+    client_name TEXT DEFAULT '',
+    scope_text TEXT DEFAULT '',
+    authorized_area TEXT DEFAULT '',
+    attestations_json TEXT DEFAULT '{}',   -- all four must be true to insert
+    signature_name TEXT NOT NULL,
+    signature_kind TEXT DEFAULT 'typed',
+    signature_blob TEXT DEFAULT '',
+    signature_utc REAL NOT NULL,
+    revoked_utc REAL,                      -- NULL = active
+    created_utc REAL
+);
 -- LAN device access-control audit. Blocking a device is an ACTIVE change to the
 -- client's network, so every block/unblock is operator-confirmed and recorded
 -- here with who/when/why. Append-only artifact; never automatic.
@@ -674,6 +695,47 @@ class Database:
         return self.query(
             "SELECT * FROM decode_overrides WHERE session_id=? ORDER BY created_utc DESC",
             (session_id,))
+
+    def add_session_authorization(self, session_id, signature_name, operator="",
+                                  client_name="", scope_text="", authorized_area="",
+                                  attestations=None, signature_kind="typed",
+                                  signature_blob=""):
+        """Record the signed engagement authorization. Immutable once written —
+        the caller validates the attestations; this only stores them."""
+        now = time.time()
+        rid = self.execute(
+            "INSERT INTO session_authorizations (session_id, operator, client_name, "
+            "scope_text, authorized_area, attestations_json, signature_name, "
+            "signature_kind, signature_blob, signature_utc, created_utc) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (session_id, operator, client_name, scope_text, authorized_area,
+             json.dumps(attestations or {}), signature_name, signature_kind,
+             signature_blob, now, now))
+        return self.query_one("SELECT * FROM session_authorizations WHERE id=?", (rid,))
+
+    def active_authorization(self, session_id):
+        """Newest unrevoked authorization for the session, or None. This is THE
+        predicate the receive/decode gate reads — never infer authorization from
+        attribution, session kind, or anything else."""
+        return self.query_one(
+            "SELECT * FROM session_authorizations WHERE session_id=? "
+            "AND revoked_utc IS NULL ORDER BY signature_utc DESC, id DESC LIMIT 1",
+            (session_id,))
+
+    def revoke_authorization(self, auth_id, session_id):
+        """Soft revoke — the row itself is the legal artifact and never leaves."""
+        self.execute(
+            "UPDATE session_authorizations SET revoked_utc=? WHERE id=? "
+            "AND session_id=? AND revoked_utc IS NULL",
+            (time.time(), auth_id, session_id))
+        return self.query_one(
+            "SELECT * FROM session_authorizations WHERE id=? AND session_id=?",
+            (auth_id, session_id))
+
+    def list_session_authorizations(self, session_id):
+        return self.query(
+            "SELECT * FROM session_authorizations WHERE session_id=? "
+            "ORDER BY created_utc DESC", (session_id,))
 
     def bulk_set_signal_triage(self, signal_ids, session_id, status, notes=""):
         """Apply the same triage decision to many signals in one session."""
