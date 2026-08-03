@@ -4022,7 +4022,16 @@ function dissemRow(j) {
     return "<div class='note' style='margin-top:6px'>DISSEMINATE: nothing here — empty channel " +
            "(no audio played; fuzz would only mean amplified noise). Re-ANALYZE while the emitter is active.</div>";
   }
-  if (App.inspAttribution === "unassessed" || !App.inspAttribution) {
+  // Only point at the attribution control when it EXISTS. renderInspAttribution()
+  // hides itself when there is no signal id, and a baseline row has none — so
+  // this used to tell the operator to set something they could not see anywhere
+  // on the page. Attribution attaches to a DETECTION, not to a reference row.
+  if (App.inspSignalId == null) {
+    notes.push("this is a BASELINE reference frequency, not a detection from your "
+      + "sweep — there is nothing to attribute yet. Attribution attaches to a "
+      + "signal the sweep actually found; open one from the hit ledger or results "
+      + "to set it.");
+  } else if (App.inspAttribution === "unassessed" || !App.inspAttribution) {
     notes.push("set the ATTRIBUTION above first — it is the legal line for listening to / decoding content");
   }
   if (r === "listen" || mode) {
@@ -4862,7 +4871,19 @@ async function maybeLoadCatalog(cs) {
       el.innerHTML = `<p class="note" style="padding:6px 9px">no catalogued covert-device class uses ${cs.low_mhz.toFixed(1)}–${cs.high_mhz.toFixed(1)} MHz.</p>`;
       return;
     }
-    el.innerHTML = r.classes.map(c =>
+    // BAND intel, not a verdict on any one signal. Without this header the list
+    // reads as "the thing you just clicked is a covert body transmitter" — which
+    // is how it read to an operator who had ANALYZEd a licensed public-safety
+    // record and scrolled to the bottom of the page. These classes are selected
+    // by BAND OVERLAP alone; nothing here has looked at the selected signal.
+    el.innerHTML =
+      `<p class="note" style="padding:7px 9px;border-bottom:1px solid #16202b">` +
+      `<b>Covert-device classes whose bands overlap ` +
+      `${cs.low_mhz.toFixed(1)}–${cs.high_mhz.toFixed(1)} MHz.</b> This is about the ` +
+      `BAND, not about any signal you have selected — these bands are shared with ` +
+      `licensed land-mobile, wireless mics, ISM and cordless devices. Presence here ` +
+      `is not evidence about a particular emitter.</p>` +
+      r.classes.map(c =>
       `<div class="cat-item"><b>${esc(c.device_class)}</b>` +
       `<div class="note">${c.signatures.map(s =>
         `${fmtF(s.freq_min_mhz)}–${fmtF(s.freq_max_mhz)}` +
