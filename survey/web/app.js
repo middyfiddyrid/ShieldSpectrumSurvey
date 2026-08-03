@@ -3445,8 +3445,11 @@ function toggleAuto() {
 }
 
 function specPollMs() {
+  // 50 ms meant 20 spectrum requests a SECOND competing with the live PCM audio
+  // on the dev server, which the operator heard as chop. 100 ms is still 10 fps
+  // — smooth to the eye — for half the traffic.
   const blockS = parseFloat(($("insp-block-s") || {}).value) || 0.5;
-  return blockS <= 0.2 ? 50 : blockS <= 0.25 ? 80 : 100;
+  return blockS <= 0.2 ? 100 : blockS <= 0.25 ? 120 : 150;
 }
 
 function startSpectrumPoll() {
