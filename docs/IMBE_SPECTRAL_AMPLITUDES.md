@@ -437,6 +437,42 @@ no exceptions. It is a strong, cheap guard against off-by-one table indexing.
 
 ## 5. What I could NOT establish
 
+> **ADDENDUM, 2026-08-03 — items 2 and the L=42/43/44 gap were subsequently closed.**
+>
+> The original implementation could not source `hoba` rows for L = 42, 43, 44: two
+> reads disagreed and both failed the bit-budget checksum, so those rows were left
+> ABSENT and those frames returned `magnitudes=None`. **They are now recovered and
+> all 48 values of L are supported.**
+>
+> The earlier failures were an artifact of the retrieval method, not of the source.
+> Both went through a summarising fetch — a model read the numbers. The fix was to
+> download the raw file and parse it with a regex tokenizer, so no model reads a
+> value. That also **re-verified all 1161 previously-fetched integers, which matched
+> exactly** — they were right, but that had never been proven.
+>
+> Verification now in place, replacing the per-row sum checksums that were blind to
+> ordering by construction:
+> - all 1272 higher-order integers parsed per-entry from a hashed file
+>   (sha256 `62982451…24737`), fetched from four origins byte-identically —
+>   raw.githubusercontent, jsDelivr, the codeload tarball, and **Software Heritage**,
+>   which crawled the content separately in 2023 and is therefore an independent
+>   *origin*, not merely independent transport
+> - `HIGHER_ORDER_FINGERPRINT`, a sha256 over the integers, which unlike a sum is
+>   sensitive to order
+> - a within-block bit-monotonicity invariant, **measured rather than assumed**: it
+>   catches 86% of distinct-valued intra-row transpositions and 93% of adjacent
+>   swaps, with a test that mutates every row and asserts the guard fires
+> - a second candidate invariant (bits non-increasing *across* blocks) was tested and
+>   **rejected** — 13 genuine violations; asserting it would have been a false
+>   constraint
+>
+> **Still open, and unchanged by the above:** these values are provably what *mbelib*
+> says. Whether mbelib faithfully reflects TIA-102.BABA Annex G is independently
+> corroborated only for L = 9–13, 15, 16, 17 plus the L=16 worked example — see
+> item 2 below. That residual is not theoretical: the L=23 gain typo proves mbelib
+> contains at least one real error. Purchasing ANSI/TIA-102.BABA-A (~$271) is what
+> would close it. Item 2's assessment of the scan therefore still stands as written.
+
 Stated plainly, since the point of this exercise was to stop guessing.
 
 1. **The generating rule behind the bit allocation tables.** Confirmed absent from

@@ -19,6 +19,7 @@ separately pin the pieces that a round-trip CANNOT prove:
 All headless, no hardware, no audio fixtures.
 """
 
+import hashlib
 import math
 import unittest
 
@@ -561,22 +562,33 @@ class TestP25Stream(unittest.TestCase):
         self.assertTrue(reports[0]["fec_ok"])
         self.assertEqual(reports[0]["b0"], 64)
 
-    def test_synthetic_envelope_still_serves_unsupported_frames(self):
-        # The placeholder now only applies where the real dequantizer cannot go
-        # (L = 42/43/44). There it still answers "is a human talking on this
-        # channel?", and it is still labelled intelligible=False.
-        b0 = next(b for b in range(208)
-                  if imbe_pitch(b)[2] in T.UNVERIFIED_L)
-        _, f0, _ = imbe_pitch(b0)
-        frames = [self._frame(b0=b0, gain=20)] * 40
-        pcm, reports = decode_p25_voice(frames, envelope="synthetic")
-        self.assertGreater(float(np.sqrt(np.mean(pcm ** 2))), 0.01)
-        self.assertLess(abs(_peak_hz(pcm) - f0), 8.0)
-        for r in reports:
-            self.assertTrue(r["magnitudes_available"])
-            self.assertFalse(r["intelligible"])
-            self.assertEqual(r["envelope"], "synthetic")
-            self.assertIn("NOT speech", r["note"])
+    def test_synthetic_envelope_has_no_frame_left_to_serve(self):
+        # The placeholder used to cover L = 42/43/44. Those rows are now sourced,
+        # so EVERY legal harmonic count decodes for real and opting into the
+        # placeholder must change nothing. Asserted rather than assumed, because
+        # a fallback that silently started winning would be exactly the kind of
+        # "confident garbage" this module exists to refuse.
+        self.assertEqual(tuple(T.UNVERIFIED_L), (),
+                         "a gap was reinstated — restore the fallback coverage test")
+        for b0 in (40, 100, 180):
+            frames = [self._frame(b0=b0, gain=20)] * 4
+            plain, r_plain = decode_p25_voice(frames)
+            synth, r_synth = decode_p25_voice(frames, envelope="synthetic")
+            np.testing.assert_allclose(plain, synth, atol=0.0)
+            for r in r_synth:
+                self.assertTrue(r["intelligible"], f"b0={b0} fell back")
+                self.assertIn("decoded", r["note"])
+
+    def test_placeholder_envelope_is_still_reachable_and_still_honest(self):
+        # It is dead code on the IMBE path now, but it is retained as the
+        # documented fallback if a gap is ever reinstated. Keep it exercised so
+        # it cannot rot into something that would emit unlabelled audio.
+        env = ambe.synthetic_envelope(20, 40)
+        self.assertEqual(env.size, 21)
+        self.assertEqual(float(env[0]), 0.0)
+        self.assertTrue(np.all(env[1:] > 0.0))
+        self.assertLess(float(np.sum(env[1:])), 0.5)   # can never be what clips
+        self.assertTrue(np.all(np.diff(env[1:]) < 0.0))  # 1/l roll-off
 
     def test_bad_envelope_rejected(self):
         with self.assertRaises(ValueError):
@@ -728,10 +740,11 @@ class TestSourcedTables(unittest.TestCase):
             self.assertEqual(len(row), 5, f"L={L}")       # G_2..G_6
         for L, row in T.HIGHER_ORDER_BITS.items():
             self.assertEqual(len(row), L - 6, f"L={L}")
-        # 1272 integers is the full Annex G; we have all but the three bad rows.
+        # 1272 integers is the full Annex G, and we now have every one of them.
+        self.assertEqual(sorted(T.HIGHER_ORDER_BITS), list(range(9, 57)))
         have = sum(len(r) for r in T.HIGHER_ORDER_BITS.values())
-        missing = sum(L - 6 for L in T.UNVERIFIED_L)
-        self.assertEqual(have + missing, 1272)
+        self.assertEqual(have, 1272)
+        self.assertEqual(tuple(T.UNVERIFIED_L), ())
 
     def test_every_gain_bit_count_is_confirmed_by_its_own_step_size(self):
         # mbelib stores (bits, step) pairs. The step must equal
@@ -824,6 +837,133 @@ class TestSourcedTables(unittest.TestCase):
         self.assertIn("third-party notices", doc)
         self.assertIn("GPL-2.0", doc)          # the mbelib-neo trap
         self.assertIn("mbelib-neo", doc)
+
+
+def _table_fingerprint(table):
+    """Canonical serialization of an {L: row} bit table -> sha256 hex.
+
+    Defined here rather than in the module so the constant in imbe_tables.py is
+    checked against an INDEPENDENT re-derivation of the digest, not against a
+    helper the table module could itself get wrong.
+    """
+    h = hashlib.sha256()
+    for L in range(9, 57):
+        h.update(("%d:%s;" % (L, ",".join(str(int(v)) for v in table[L]))).encode())
+    return h.hexdigest()
+
+
+class TestSourcedTableIntegrity(unittest.TestCase):
+    """Shortfall 2: the higher-order table used to have only per-ROW checksums,
+    so an intra-row swap in any row but L=16 would have gone unnoticed.
+
+    These are the checks that close that hole and keep it closed. The tables
+    were parsed deterministically out of a hash-pinned copy of mbelib's
+    imbe7200x4400_const.h; the suite cannot re-download it (tests are offline
+    and must stay that way), so what it pins is that the tables still hold
+    exactly the values that parse produced, plus the structural invariants that
+    a transposition breaks."""
+
+    def test_fingerprint_locks_every_higher_order_integer(self):
+        # The load-bearing test. A sum checksum is blind to ordering by
+        # construction; this is not. Any edit to any of the 1272 integers —
+        # including swapping two of them within one row — changes the digest.
+        self.assertEqual(_table_fingerprint(T.HIGHER_ORDER_BITS),
+                         T.HIGHER_ORDER_FINGERPRINT,
+                         "HIGHER_ORDER_BITS no longer matches the values parsed "
+                         "from mbelib (sha256 " + T.MBELIB_SHA256[:16] + "...)")
+
+    def test_fingerprint_locks_every_gain_bit_count(self):
+        self.assertEqual(_table_fingerprint(T.GAIN_BITS),
+                         T.GAIN_BITS_FINGERPRINT)
+
+    def test_the_fingerprint_actually_detects_an_intra_row_swap(self):
+        # A guard nobody has ever seen fire is not a guard. Prove this one
+        # catches the exact failure mode Shortfall 2 named, in every row that
+        # can express it.
+        caught = 0
+        for L in range(9, 57):
+            row = list(T.HIGHER_ORDER_BITS[L])
+            pair = next(((a, b) for a in range(len(row))
+                         for b in range(a + 1, len(row)) if row[a] != row[b]), None)
+            if pair is None:
+                continue                      # a uniform row cannot be swapped
+            a, b = pair
+            mutated = dict(T.HIGHER_ORDER_BITS)
+            row[a], row[b] = row[b], row[a]
+            mutated[L] = tuple(row)
+            self.assertEqual(sum(mutated[L]), sum(T.HIGHER_ORDER_BITS[L]),
+                             "the swap must be checksum-invisible, else it "
+                             "proves nothing about the fingerprint")
+            self.assertNotEqual(_table_fingerprint(mutated),
+                                T.HIGHER_ORDER_FINGERPRINT, f"L={L} swap missed")
+            caught += 1
+        self.assertGreater(caught, 40, "too few rows exercised")
+
+    def test_within_block_bit_allocation_is_non_increasing_in_k(self):
+        # Structural invariant, verified to hold for all 48 rows of mbelib's
+        # hoba[]: inside one DCT block, higher coefficient indices never get
+        # MORE bits than lower ones. Independent of the fingerprint — it would
+        # catch a bad row introduced together with a recomputed digest.
+        for L in ALL_L:
+            per_block = {}
+            for bits, (i, k) in zip(T.HIGHER_ORDER_BITS[L],
+                                    imbe_ho_coefficient_map(L)):
+                per_block.setdefault(i, []).append((k, bits))
+            for i, seq in per_block.items():
+                vals = [b for _k, b in sorted(seq)]
+                self.assertEqual(vals, sorted(vals, reverse=True),
+                                 f"L={L} block {i} allocation rises with k: {vals}")
+
+    def test_the_monotonicity_invariant_is_not_vacuous(self):
+        # It IS vacuous for L=9..12, where every block holds at most one
+        # higher-order coefficient. Stated honestly here so nobody reads the
+        # test above as covering the whole table. Those low-L rows lean on the
+        # TIA Annex G corroboration instead.
+        def constrained(L):
+            return sum(1 for J in imbe_amplitude_blocks(L) for _ in range(2, J)
+                       if J > 2)
+        self.assertEqual([L for L in ALL_L if constrained(L) == 0],
+                         [9, 10, 11, 12])
+        self.assertEqual(tuple(T.TIA_CORROBORATED_L[:4]), (9, 10, 11, 12),
+                         "the rows the invariant cannot constrain must be "
+                         "exactly the ones the TIA scan does")
+
+    def test_bit_budget_now_holds_for_all_48_rows_not_45(self):
+        for L in ALL_L:
+            self.assertEqual(sum(T.GAIN_BITS[L]) + sum(T.HIGHER_ORDER_BITS[L]),
+                             73 - imbe_band_count(L), f"L={L}")
+
+    def test_recovered_rows_satisfy_every_guard(self):
+        # L = 42/43/44 in particular: budget, length, invariant, value range.
+        for L in (42, 43, 44):
+            row = T.HIGHER_ORDER_BITS[L]
+            self.assertEqual(len(row), L - 6)
+            self.assertEqual(imbe_band_count(L), 12)
+            self.assertEqual(sum(T.GAIN_BITS[L]), 14)
+            self.assertEqual(sum(row), 47)
+            self.assertEqual(sum(T.GAIN_BITS[L]) + sum(row), 61)
+            self.assertTrue(all(0 <= b <= 10 for b in row), f"L={L}")
+
+    def test_provenance_constants_are_present_and_plausible(self):
+        # The provenance claim has to be checkable, not just asserted in prose.
+        self.assertEqual(len(T.MBELIB_SHA256), 64)
+        self.assertTrue(all(c in "0123456789abcdef" for c in T.MBELIB_SHA256))
+        self.assertEqual(T.MBELIB_BYTES, 41049)
+        self.assertGreaterEqual(len(T.MBELIB_ORIGINS), 2)
+        # every origin must be szechyjs/mbelib or a hash-addressed archive —
+        # never mbelib-neo, op25, jmbe or dsdcc, which would relicense the product
+        joined = " ".join(T.MBELIB_ORIGINS)
+        for forbidden in ("mbelib-neo", "arancormonk", "op25", "jmbe", "dsdcc"):
+            self.assertNotIn(forbidden, joined)
+
+    def test_all_48_rows_are_within_the_frame_budget(self):
+        # A row that allocates more bits than the frame carries would
+        # desynchronize the bit reader; assert the slack is never negative.
+        for L in ALL_L:
+            alloc = ambe.imbe_amplitude_allocation(L)
+            self.assertEqual(len(alloc), L - 1, f"L={L}")
+            self.assertLessEqual(sum(alloc), imbe_amplitude_bit_budget(L)["bits"],
+                                 f"L={L}")
 
 
 class TestAmplitudeBlockStructure(unittest.TestCase):
@@ -1306,8 +1446,21 @@ class TestDequantizer(unittest.TestCase):
                                    plain[1:], rtol=1e-9)
         self.assertGreater(float(np.max(np.abs(enh[1:] - plain[1:]))), 0.0)
 
-    def test_unsupported_L_refuses_instead_of_guessing(self):
-        for L in T.UNVERIFIED_L:
+    def test_no_L_is_unsupported_any_more(self):
+        self.assertEqual(tuple(T.UNVERIFIED_L), ())
+        for L in ALL_L:
+            ok, why = ambe.imbe_amplitude_available(L)
+            self.assertTrue(ok, f"L={L}: {why}")
+            self.assertEqual(len(ambe.imbe_amplitude_allocation(L)), L - 1)
+
+    def test_the_refusal_path_still_works_if_a_gap_is_reinstated(self):
+        # UNVERIFIED_L is empty, so the guard is currently a no-op. It is kept
+        # deliberately, and "kept" is worthless unless it still functions —
+        # otherwise a future gap would be added and silently decode garbage.
+        L = 30
+        original = T.UNVERIFIED_L
+        try:
+            T.UNVERIFIED_L = (L,)
             ok, why = ambe.imbe_amplitude_available(L)
             self.assertFalse(ok)
             self.assertIn(str(L), why)
@@ -1319,6 +1472,9 @@ class TestDequantizer(unittest.TestCase):
             self.assertIn("bit allocation", note)
             with self.assertRaises(ValueError):
                 ambe.imbe_amplitude_allocation(L)
+        finally:
+            T.UNVERIFIED_L = original
+        self.assertTrue(ambe.imbe_amplitude_available(L)[0])
 
     def test_output_is_scaled_into_the_float_contract(self):
         # The codec's amplitudes are 16-bit referenced; this module's contract is
@@ -1428,10 +1584,31 @@ class TestHonestyAfterImplementation(unittest.TestCase):
         sa = cap["spectral_amplitudes"]
         self.assertTrue(cap["protocols"]["p25_phase1_imbe"]["magnitudes"])
         self.assertTrue(sa["implemented"])
-        self.assertEqual(sa["supported_L"], 45)
+        # all 48 legal harmonic counts now decode — the gap is closed
+        self.assertEqual(sa["supported_L"], 48)
         self.assertEqual(sa["total_L"], 48)
-        self.assertEqual(tuple(sa["unsupported_L"]), (42, 43, 44))
+        self.assertEqual(tuple(sa["unsupported_L"]), ())
         self.assertIn("mbelib", sa["sourced_tables"])
+
+    def test_capability_states_the_verification_each_table_actually_has(self):
+        # The two sourced tables do NOT have identical evidence, and capability()
+        # is what the report layer renders, so it must not flatten them into one
+        # reassuring sentence.
+        tv = ambe.capability()["spectral_amplitudes"]["table_verification"]
+        self.assertEqual(tv["source_sha256"], T.MBELIB_SHA256)
+        self.assertGreaterEqual(tv["independent_origins"], 2)
+        self.assertIn("240/240", tv["gain_bits"])
+        self.assertIn("1272/1272", tv["higher_order_bits"])
+        self.assertIn("48/48", tv["row_checks"])
+        self.assertEqual(tuple(tv["tia_corroborated_L"]), T.TIA_CORROBORATED_L)
+
+    def test_capability_still_admits_mbelib_is_its_own_authority_above_L17(self):
+        # The honest residual: transcription risk is closed, source risk is not.
+        # If this ever disappears, someone has overclaimed.
+        assumptions = " ".join(
+            ambe.capability()["spectral_amplitudes"]["unverified_assumptions"])
+        self.assertIn("mbelib alone", assumptions)
+        self.assertIn("L=23", assumptions)          # the proof mbelib has errors
 
     def test_capability_still_says_no_off_air_validation(self):
         cap = ambe.capability()
@@ -1450,20 +1627,40 @@ class TestHonestyAfterImplementation(unittest.TestCase):
         self.assertIn("mbelib", note)
         self.assertIn("THIRD_PARTY_NOTICES.md", note)
 
-    def test_unsupported_L_frames_report_no_magnitudes(self):
-        made = 0
-        for b0 in range(208):
+    def test_every_pitch_index_now_decodes_to_real_magnitudes(self):
+        # The inverse of the test this replaces. Previously some pitch indices
+        # landed on L = 42/43/44 and had to refuse; now EVERY one of the 208
+        # legal pitch indices must produce a real envelope. Sweeping all 208
+        # (not a sample) is what proves no harmonic count was left behind.
+        for b0 in range(ambe.IMBE_PITCH_RESERVED):
             _, _, L = imbe_pitch(b0)
-            if L not in T.UNVERIFIED_L:
-                continue
-            made += 1
             bits = pack_imbe_params(b0, [True] * imbe_band_count(L), 30)
             _pcm, reports = decode_p25_voice([pack_imbe_frame(bits)])
-            self.assertFalse(reports[0]["magnitudes_available"])
-            self.assertFalse(reports[0]["intelligible"])
-            self.assertTrue(reports[0]["silent"])
-            self.assertIn("bit allocation", reports[0]["note"])
-        self.assertGreater(made, 0, "no pitch index maps to an unsupported L")
+            r = reports[0]
+            self.assertTrue(r["magnitudes_available"], f"b0={b0} (L={L})")
+            self.assertTrue(r["intelligible"], f"b0={b0} (L={L})")
+            self.assertFalse(r["silent"], f"b0={b0} (L={L})")
+
+    def test_the_three_recovered_harmonic_counts_decode(self):
+        # L = 42, 43, 44 specifically — the rows that were absent. Named
+        # explicitly so a regression that drops them again is unmistakable.
+        for L in (42, 43, 44):
+            ok, why = ambe.imbe_amplitude_available(L)
+            self.assertTrue(ok, f"L={L} unavailable: {why}")
+            self.assertEqual(len(T.HIGHER_ORDER_BITS[L]), L - 6)
+            b0 = next(b for b in range(ambe.IMBE_PITCH_RESERVED)
+                      if imbe_pitch(b)[2] == L)
+            _, f0, _ = imbe_pitch(b0)
+            rng = np.random.default_rng(L)
+            amp = rng.integers(
+                0, 2, imbe_amplitude_bit_budget(L)["bits"]).astype(np.uint8)
+            bits = pack_imbe_params(b0, [True] * imbe_band_count(L), 32,
+                                    amplitude_bits=amp)
+            pcm, reports = decode_p25_voice([pack_imbe_frame(bits)] * 40)
+            self.assertTrue(reports[0]["intelligible"], f"L={L}")
+            # and the audio really is harmonic at the transmitted fundamental
+            self.assertGreater(_harmonic_energy_fraction(pcm, f0, L), 0.9,
+                               f"L={L} audio is not harmonic at f0")
 
     def test_synthetic_envelope_never_overrides_a_real_decode(self):
         # Opting into the placeholder must not downgrade frames that really
@@ -1476,16 +1673,33 @@ class TestHonestyAfterImplementation(unittest.TestCase):
         self.assertTrue(reports[0]["intelligible"])
         self.assertIn("decoded", reports[0]["note"])
 
-    def test_synthetic_envelope_is_labelled_when_it_is_actually_used(self):
-        b0 = next(b for b in range(208) if imbe_pitch(b)[2] in T.UNVERIFIED_L)
-        _, _, L = imbe_pitch(b0)
+    def test_synthetic_envelope_would_still_be_labelled_if_a_gap_returned(self):
+        # No real frame reaches the placeholder any more, so drive the labelling
+        # path directly with a simulated gap. This keeps the "never emit
+        # unlabelled placeholder audio" contract under test even though the
+        # condition that triggered it no longer occurs.
+        L = 42
+        b0 = next(b for b in range(ambe.IMBE_PITCH_RESERVED)
+                  if imbe_pitch(b)[2] == L)
         bits = pack_imbe_params(b0, [True] * imbe_band_count(L), 30)
-        _pcm, reports = decode_p25_voice([pack_imbe_frame(bits)] * 4,
-                                         envelope="synthetic")
-        for r in reports:
-            self.assertTrue(r["magnitudes_available"])
-            self.assertFalse(r["intelligible"])
-            self.assertIn("NOT speech", r["note"])
+        frame = pack_imbe_frame(bits)
+        original = T.UNVERIFIED_L
+        try:
+            T.UNVERIFIED_L = (L,)              # reinstate the gap for this test
+            _pcm, reports = decode_p25_voice([frame] * 4, envelope="synthetic")
+            for r in reports:
+                self.assertTrue(r["magnitudes_available"])
+                self.assertFalse(r["intelligible"])
+                self.assertEqual(r["envelope"], "synthetic")
+                self.assertIn("NOT speech", r["note"])
+            # and without opting in, a gapped frame is silence, never a guess
+            _pcm2, plain = decode_p25_voice([frame])
+            self.assertFalse(plain[0]["magnitudes_available"])
+            self.assertTrue(plain[0]["silent"])
+        finally:
+            T.UNVERIFIED_L = original
+        # the gap really is gone once the patch is undone
+        self.assertTrue(ambe.imbe_amplitude_available(L)[0])
 
     def test_failed_fec_still_produces_no_audio(self):
         info = np.zeros(IMBE_INFO_BITS, dtype=np.uint8)
@@ -1507,13 +1721,21 @@ class TestHonestyAfterImplementation(unittest.TestCase):
 
     def test_module_docstring_states_the_remaining_limits(self):
         doc = ambe.__doc__ or ""
-        self.assertIn("off-air", doc)
-        self.assertIn("NO OFF-AIR FRAME HAS EVER BEEN DECODED", doc)
-        self.assertIn("FREQUENCY WARPING", doc)
-        self.assertIn("FIELD ORDER", doc)
-        self.assertIn("L = 42, 43 and 44", doc)
-        self.assertIn("ISC", doc)
-        self.assertIn("CONSEQUENCE, STATED PLAINLY", doc)
+        # collapse the hard line wrapping so these assertions pin the CLAIMS
+        # rather than the current paragraph layout
+        flat = " ".join(doc.split())
+        self.assertIn("off-air", flat)
+        self.assertIn("NO OFF-AIR FRAME HAS EVER BEEN DECODED", flat)
+        self.assertIn("FREQUENCY WARPING", flat)
+        self.assertIn("FIELD ORDER", flat)
+        self.assertIn("ISC", flat)
+        self.assertIn("CONSEQUENCE, STATED PLAINLY", flat)
+        # the gap is recorded as CLOSED, not silently dropped
+        self.assertIn("(CLOSED)", flat)
+        self.assertIn("ALL 48 legal harmonic counts", flat)
+        # and the residual source-risk is still stated, not quietly retired
+        self.assertIn("mbelib is its own authority", flat)
+        self.assertIn("per-entry", flat.lower())
 
 
 class TestBitHelpers(unittest.TestCase):

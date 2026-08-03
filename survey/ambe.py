@@ -58,15 +58,26 @@ WHAT IS IMPLEMENTED AND SYNTHETICALLY VERIFIED
     two bit-allocation tables) live in survey/imbe_tables.py, taken from mbelib
     under its ISC licence. See the ATTRIBUTION block in that file: shipping this
     product requires carrying mbelib's copyright and permission notice, and that
-    obligation is NOT yet discharged anywhere in the repo.
+    obligation is discharged in THIRD_PARTY_NOTICES.md at the repo root.
+  * Both bit-allocation tables now have PER-ENTRY verification. They were parsed
+    deterministically out of a hash-pinned copy of mbelib's
+    imbe7200x4400_const.h (sha256 62982451...24737, confirmed byte-identical
+    from two independent origins), rather than read back by a summarising fetch.
+    All 1272 higher-order integers and all 240 gain bit counts are checked
+    against the actual file, row indexing is cross-checked against the file's
+    own `// L=NN` labels, and both tables are locked by fingerprints the test
+    suite recomputes on every run — so an intra-row swap, which a sum checksum
+    physically cannot see, now fails the suite.
 
 WHAT IS **NOT** IMPLEMENTED — THE GAPS THAT REMAIN
-  * Three rows of the higher-order bit allocation: L = 42, 43 and 44. They could
-    not be read out of the source reliably (repeated reads disagreed and every
-    candidate failed the bit-budget checksum), so they are ABSENT rather than
-    guessed, and those three harmonic counts decode to magnitudes=None with a
-    reason instead of to audio built on a fabricated allocation. That is roughly
-    a 6% slice of the pitch range; see survey/imbe_tables.py to close it.
+  * (CLOSED) The L = 42, 43, 44 higher-order allocation gap is gone. Those three
+    rows were recovered from mbelib's hoba[] and each satisfies the bit-budget
+    checksum (14 + 47 == 61 == 73 - K). All 48 legal harmonic counts decode.
+  * Whether MBELIB ITSELF is faithful to TIA-102.BABA Annex G is corroborated
+    independently only for L = 9, 10, 11, 12, 13, 15, 16, 17. For L = 18..56 the
+    higher-order allocation is provably what mbelib says, but mbelib is its own
+    authority there. That is not paranoia: mbelib demonstrably contains at least
+    one real error (the L=23 gain step typo). Buying the standard would close it.
   * The 88-bit FIELD ORDER remains this module's own convention (b0, then b1,
     then b2, then the amplitude quantizers, then b_{L+2}). The field WIDTHS and
     the quantizer arithmetic are sourced; which physical bit index each field
@@ -82,7 +93,7 @@ WHAT IS **NOT** IMPLEMENTED — THE GAPS THAT REMAIN
   * Transport-layer de-interleaving. Callers pass vector-ordered frame bits.
 
 CONSEQUENCE, STATED PLAINLY: this module now decodes the full IMBE parameter
-set — pitch, voicing AND the spectral envelope — for 45 of the 48 legal harmonic
+set — pitch, voicing AND the spectral envelope — for ALL 48 legal harmonic
 counts, so a P25 Phase 1 frame that FEC-cleans comes out as speech-shaped audio
 with the transmitted formant structure rather than as a buzz. That is a real
 change: `intelligible` can now be True in a report, where before it never could.
@@ -97,11 +108,12 @@ transport de-interleaving (absent). Until someone decodes a real capture and
 listens to it, "intelligible=True" means "the dequantizer ran and believes it
 produced an envelope", NOT "a human heard words". Say that to the operator.
 
-L = 42, 43 and 44 still return magnitudes=None with a reason, and an operator
-can opt in explicitly (envelope="synthetic") to the documented placeholder
-envelope for those frames, which sonifies pitch and voicing activity only and is
-labelled intelligible=False everywhere it appears. It is never enabled
-implicitly and never overrides a real decode.
+No legal harmonic count returns magnitudes=None any more. The placeholder
+envelope (envelope="synthetic") therefore has no frame left to serve on the IMBE
+path and is now effectively dead code kept for one reason: it is the documented
+fallback if a future gap is ever reinstated in survey/imbe_tables.py. It is
+never enabled implicitly, never overrides a real decode, and every frame using
+it is labelled intelligible=False.
 
 Failed FEC returns silence plus fec_ok=False. This module never invents audio to
 cover a bad frame.
@@ -817,14 +829,18 @@ def imbe_enhance_amplitudes(mags, w0: float, L: int) -> np.ndarray:
 
 # ------------------------------------------------ sourced: bits -> coefficients
 def imbe_amplitude_available(L: int):
-    """(ok, reason). False only for the L values whose allocation is unsourced."""
+    """(ok, reason). True for every legal L now that the tables are complete.
+
+    The L = 42/43/44 gap that used to live here is CLOSED — those rows were
+    recovered by parsing mbelib's hoba[] out of a hash-pinned copy of the
+    upstream header, and all three satisfy the bit-budget checksum. The guard
+    itself is deliberately kept rather than deleted: _T.UNVERIFIED_L is now
+    empty, so this is a no-op, but reinstating a gap is a one-line change and
+    every caller already handles magnitudes=None correctly."""
     L = int(L)
     if L in _T.UNVERIFIED_L:
         return False, (f"spectral amplitude dequantizer: no verified bit "
-                       f"allocation for L={L} (mbelib hoba rows "
-                       f"{', '.join(str(x) for x in _T.UNVERIFIED_L)} could not be "
-                       f"read reliably and failed the bit-budget checksum) — "
-                       f"see survey/imbe_tables.py")
+                       f"allocation for L={L} — see survey/imbe_tables.py")
     if L not in _T.HIGHER_ORDER_BITS or L not in _T.GAIN_BITS:
         return False, f"spectral amplitude dequantizer: no bit allocation for L={L}"
     return True, ""
@@ -1397,15 +1413,53 @@ def capability() -> dict:
             "total_L": total_L,
             "unsupported_L": unverified,
             "unsupported_reason": (
+                "none — the former L=42/43/44 gap is closed" if not unverified else
                 "higher-order bit allocation for these harmonic counts could not "
                 "be sourced reliably; those frames decode to magnitudes=None"),
+            # What each sourced table has actually been checked against, stated
+            # separately because the two tables do NOT have equal evidence.
+            "table_verification": {
+                "source_artifact": "szechyjs/mbelib imbe7200x4400_const.h",
+                "source_sha256": _T.MBELIB_SHA256,
+                "method": ("downloaded verbatim and parsed deterministically; no "
+                           "summarising fetch in the loop"),
+                "independent_origins": 2,   # GitHub and Software Heritage
+                "gain_bits": ("240/240 per-entry — each bit count is confirmed by "
+                              "the step size mbelib stores beside it "
+                              "(239 exact + the known L=23 typo we generate around)"),
+                "higher_order_bits": (
+                    "1272/1272 per-entry against the hashed file, row indexing "
+                    "cross-checked against the file's own L= labels, locked "
+                    "forever by HIGHER_ORDER_FINGERPRINT"),
+                "row_checks": ("bit-budget identity 48/48; within-block bit "
+                               "monotonicity 48/48, which catches 86% of intra-row "
+                               "transpositions where a sum checksum catches 0%"),
+                "tia_corroborated_L": _T.TIA_CORROBORATED_L,
+            },
             "unverified_assumptions": [
                 "88-bit field ORDER is this module's convention, not sourced",
                 "no off-air frame has ever been decoded",
+                # The honest residual on the tables themselves.
+                "for L=18..56 the higher-order allocation rests on mbelib alone; "
+                "it is provably what mbelib says, but whether mbelib faithfully "
+                "reflects TIA-102.BABA Annex G is corroborated only for "
+                "L=9,10,11,12,13,15,16,17 (mbelib is known to contain at least "
+                "one real error — the L=23 gain step typo)",
             ],
         },
         "validated_against": "synthetic vectors only — no off-air audio, ever",
         "caveat": (
+            "The IMBE spectral amplitude dequantizer is implemented and this "
+            "module now decodes a full envelope for ALL {tot} legal harmonic "
+            "counts (L=9..56) — the former L=42/43/44 gap is closed. Both "
+            "sourced tables now have per-entry verification against a "
+            "hash-pinned copy of mbelib. What remains unproven is NOT the "
+            "transcription: it is that NO OFF-AIR FRAME HAS EVER BEEN DECODED. "
+            "The 88-bit field order is this module's own convention and "
+            "transport de-interleaving is absent, so 'intelligible' means the "
+            "dequantizer ran, not that a human heard words. Label any audio "
+            "shown to an operator accordingly."
+        ).format(tot=total_L) if not unverified else (
             "The IMBE spectral amplitude dequantizer is implemented and this "
             "module decodes a full envelope for {ok} of {tot} harmonic counts "
             "(L={bad} are unsupported and return no magnitudes). NO OFF-AIR "
