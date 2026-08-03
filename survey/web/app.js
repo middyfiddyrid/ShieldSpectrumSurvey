@@ -1253,6 +1253,13 @@ function renderLiveLedger() {
       // It has to be obvious at a glance in the ledger, not just in the database.
       (s.operator_marked ? `<span class="op-marked" title="The operator marked this ` +
         `frequency on the live display — it is NOT an automatic detection">MARKED BY EYE</span>` : "") +
+      // A near-floor lead did not clear the detection threshold. It has to be
+      // as visible here as it is in the report, or the operator works from a
+      // ledger that quietly disagrees with the deliverable.
+      (s.near_floor ? `<span class="near-floor" title="Close to the noise floor — ` +
+        `it did not clear the detection threshold. A lead worth checking, not a ` +
+        `measured finding: at this level noise and a weak transmitter look alike."` +
+        `>NEAR FLOOR</span>` : "") +
       `</td>` +
       `<td>${s.peak_dbm} dBm</td>` +
       `<td>${s.snr_db != null ? s.snr_db + " dB" : "—"}</td>` +

@@ -25,15 +25,58 @@ import unittest
 import numpy as np
 
 from survey import ambe
+from survey import imbe_tables as T
 from survey.ambe import (AMBE_ERR_LIMIT, AMBE_FRAME_BITS, AMBE_INFO_BITS,
                          FRAME_SAMPLES, IMBE_ERR_LIMIT, IMBE_FRAME_BITS,
                          IMBE_INFO_BITS, MbeState, SAMPLE_RATE, bits_to_int,
                          decode_dmr_voice, decode_imbe_params, decode_p25_voice,
-                         golay23_decode, golay23_encode, golay24_decode,
-                         golay24_encode, hamming15_decode, hamming15_encode,
-                         imbe_band_count, imbe_pitch, int_to_bits,
+                         dequantize_imbe_amplitudes, golay23_decode,
+                         golay23_encode, golay24_decode, golay24_encode,
+                         hamming15_decode, hamming15_encode,
+                         imbe_amplitude_bit_budget, imbe_amplitude_blocks,
+                         imbe_amplitude_forward, imbe_amplitude_indices,
+                         imbe_amplitude_inverse, imbe_band_count, imbe_dct,
+                         imbe_dct_matrix, imbe_gain_step,
+                         imbe_ho_coefficient_map, imbe_ho_step, imbe_idct,
+                         imbe_pitch, imbe_prediction_coefficient,
+                         imbe_prediction_residual, imbe_undo_prediction,
+                         imbe_warp_previous, int_to_bits,
                          pack_ambe_frame, pack_imbe_frame, pack_imbe_params,
                          unpack_ambe_frame, unpack_imbe_frame, voice_params)
+
+ALL_L = list(range(9, 57))          # the full IMBE harmonic range
+
+
+def _plumbing_tables():
+    """NOT the IMBE tables. Arbitrary numbers whose ONLY job is to prove that the
+    bits -> indices -> coefficients -> magnitudes path runs and is shaped right.
+
+    They are deliberately implausible (a flat allocation, one step size, a linear
+    gain map, rho=0.5) so that nobody can mistake them for sourced constants, and
+    they are never installed into ambe.IMBE_AMPLITUDE_TABLES — a test below
+    asserts the module-level tables stay None even after these are used."""
+    def alloc(L):
+        b = imbe_amplitude_bit_budget(L)
+        w = max(1, min(4, b["bits"] // b["quantizers"]))
+        return [w] * b["quantizers"]
+
+    return ImbeAmplitudeTables(
+        bit_allocation=alloc,
+        step_size=lambda L, i, bits: 0.05,
+        gain_level=lambda idx: (float(idx) - 31.5) * 0.05,
+        prediction_coeff=lambda L: 0.5,
+        source="ARBITRARY TEST VALUES - not IMBE, not sourced, plumbing only")
+
+
+def _log_envelope(hz):
+    """A smooth log2-magnitude envelope: two formant-ish bumps over frequency.
+
+    Used to build 'the same voice at a different pitch' so the frequency warping
+    can be measured against a ground truth that exists independently of the code
+    under test."""
+    hz = np.asarray(hz, dtype=np.float64)
+    return (2.0 * np.exp(-((hz - 500.0) / 400.0) ** 2)
+            + 1.2 * np.exp(-((hz - 1600.0) / 550.0) ** 2) - 0.5)
 
 
 def _spectrum(pcm, rate=SAMPLE_RATE):
@@ -55,6 +98,21 @@ def _band_energy_fraction(pcm, center_hz, half_width_hz=8.0, rate=SAMPLE_RATE):
     sel = np.abs(f - center_hz) <= half_width_hz
     total = float(np.sum(p))
     return float(np.sum(p[sel]) / total) if total > 0 else 0.0
+
+
+def _harmonic_energy_fraction(pcm, f0, L, half_width_hz=12.0, rate=SAMPLE_RATE):
+    """Fraction of spectral power sitting on the harmonic comb of f0.
+
+    The right measure for a decoded frame: the envelope decides WHICH harmonic
+    is loudest, but a voiced frame must put essentially all of its energy on
+    integer multiples of the fundamental regardless."""
+    f, mag = _spectrum(pcm, rate)
+    power = mag ** 2
+    near = np.zeros(f.size, dtype=bool)
+    for l in range(1, int(L) + 1):
+        near |= np.abs(f - l * f0) <= half_width_hz
+    total = float(np.sum(power))
+    return float(np.sum(power[near]) / total) if total > 0 else 0.0
 
 
 def _synth_run(params, frames=32, seed=0):
@@ -306,7 +364,8 @@ class TestParameterUnpack(unittest.TestCase):
         #   b0 = 00000000        -> index 0  -> 405.06 Hz, L=9, K=3
         #   b1 = 1 0 1           -> bands voiced / unvoiced / voiced
         #   b2 = 101010          -> gain index 42
-        #   remaining 71 bits    -> undecoded amplitude bits
+        #   next 70 bits         -> the amplitude quantizers b3..b10 (73 - K)
+        #   final 1 bit          -> b_{L+2}
         bits = np.array([0] * 8 + [1, 0, 1] + [1, 0, 1, 0, 1, 0] + [0] * 71,
                         dtype=np.uint8)
         self.assertEqual(bits.size, IMBE_INFO_BITS)
@@ -317,9 +376,10 @@ class TestParameterUnpack(unittest.TestCase):
         self.assertEqual(p["K"], 3)
         self.assertEqual(p["voiced_bands"], [True, False, True])
         self.assertEqual(p["gain_index"], 42)
-        self.assertEqual(p["amplitude_bits"].size, 71)
-        self.assertIsNone(p["magnitudes"])
-        self.assertFalse(p["magnitudes_available"])
+        self.assertEqual(p["amplitude_bits"].size, 70)   # 73 - K, not 74 - K
+        self.assertIsNotNone(p["magnitudes"])            # the envelope decodes now
+        self.assertTrue(p["magnitudes_available"])
+        self.assertEqual(p["magnitudes"].size, 10)
         # 3 harmonics per band: 1-3 voiced, 4-6 unvoiced, 7-9 voiced
         self.assertEqual([bool(x) for x in p["voiced"][1:]],
                          [True] * 3 + [False] * 3 + [True] * 3)
@@ -363,11 +423,11 @@ class TestParameterUnpack(unittest.TestCase):
         self.assertIn("reserved", p["note"])
 
     def test_amplitude_bits_are_returned_verbatim(self):
-        # the missing dequantizer's input must survive intact so it can be bolted on
+        # the dequantizer's input must survive intact for analysis and replay
         rng = np.random.default_rng(5)
         _, _, L = imbe_pitch(64)
         K = imbe_band_count(L)
-        n_amp = IMBE_INFO_BITS - 8 - K - 6
+        n_amp = imbe_amplitude_bit_budget(L)["bits"]
         amp = rng.integers(0, 2, n_amp).astype(np.uint8)
         bits = pack_imbe_params(64, [True] * K, 9, amplitude_bits=amp)
         p = decode_imbe_params(bits)
@@ -478,19 +538,21 @@ class TestP25Stream(unittest.TestCase):
         bits = pack_imbe_params(b0, [voiced] * K, gain)
         return pack_imbe_frame(bits)
 
-    def test_clean_frames_report_pitch_but_stay_silent_by_default(self):
+    def test_clean_frames_decode_to_audio_by_default(self):
+        # This used to assert SILENCE, because the dequantizer did not exist.
+        # It now asserts the opposite, which is the whole point of the change.
         frames = [self._frame(b0=100)] * 5
         pcm, reports = decode_p25_voice(frames)
         self.assertEqual(pcm.size, 5 * FRAME_SAMPLES)
-        np.testing.assert_array_equal(pcm, np.zeros(pcm.size, dtype=np.float32))
+        self.assertGreater(float(np.max(np.abs(pcm))), 0.0)
         for r in reports:
             self.assertTrue(r["fec_ok"])
             self.assertTrue(r["params_available"])
-            self.assertFalse(r["magnitudes_available"])
-            self.assertFalse(r["intelligible"])
-            self.assertTrue(r["silent"])
+            self.assertTrue(r["magnitudes_available"])
+            self.assertTrue(r["intelligible"])
+            self.assertFalse(r["silent"])
             self.assertAlmostEqual(r["f0_hz"], 16000.0 / 139.5, places=3)
-            self.assertIn("dequantizer", r["note"])
+            self.assertIn("decoded", r["note"])
 
     def test_pre_decoded_information_bits_accepted(self):
         bits = pack_imbe_params(64, [True] * imbe_band_count(imbe_pitch(64)[2]), 5)
@@ -499,8 +561,12 @@ class TestP25Stream(unittest.TestCase):
         self.assertTrue(reports[0]["fec_ok"])
         self.assertEqual(reports[0]["b0"], 64)
 
-    def test_synthetic_envelope_is_opt_in_and_labelled(self):
-        b0 = 100
+    def test_synthetic_envelope_still_serves_unsupported_frames(self):
+        # The placeholder now only applies where the real dequantizer cannot go
+        # (L = 42/43/44). There it still answers "is a human talking on this
+        # channel?", and it is still labelled intelligible=False.
+        b0 = next(b for b in range(208)
+                  if imbe_pitch(b)[2] in T.UNVERIFIED_L)
         _, f0, _ = imbe_pitch(b0)
         frames = [self._frame(b0=b0, gain=20)] * 40
         pcm, reports = decode_p25_voice(frames, envelope="synthetic")
@@ -508,7 +574,7 @@ class TestP25Stream(unittest.TestCase):
         self.assertLess(abs(_peak_hz(pcm) - f0), 8.0)
         for r in reports:
             self.assertTrue(r["magnitudes_available"])
-            self.assertFalse(r["intelligible"])     # never, until the tables exist
+            self.assertFalse(r["intelligible"])
             self.assertEqual(r["envelope"], "synthetic")
             self.assertIn("NOT speech", r["note"])
 
@@ -585,13 +651,17 @@ class TestHonesty(unittest.TestCase):
         for (a, _b) in ambe.IMBE_VECTOR_SPANS[:4]:
             for k in range(4):
                 bad[a + k] ^= 1
-        pcm, reports = decode_p25_voice([good, good, bad, bad], envelope="synthetic")
+        pcm, reports = decode_p25_voice([good, good, bad, bad])
         self.assertTrue(reports[1]["fec_ok"])
         self.assertFalse(reports[2]["fec_ok"])
         seg = [float(np.sum(pcm[i * FRAME_SAMPLES:(i + 1) * FRAME_SAMPLES] ** 2))
                for i in range(4)]
         self.assertGreater(seg[1], 0.0)
-        self.assertLess(seg[2], 0.6 * seg[1])          # ramping down, not sustaining
+        # The cross-fade ramps each harmonic's amplitude linearly to zero across
+        # the muted frame, so its energy is ~1/3 a^2 N against ~1/2 a^2 N for a
+        # sustained frame — about two thirds. Anything near 1.0 would mean the
+        # mute is sustaining the previous frame rather than decaying it.
+        self.assertLess(seg[2], 0.75 * seg[1])
         self.assertEqual(seg[3], 0.0)                  # the decay is finite
         np.testing.assert_array_equal(pcm[3 * FRAME_SAMPLES:],
                                       np.zeros(FRAME_SAMPLES, dtype=np.float32))
@@ -624,24 +694,825 @@ class TestHonesty(unittest.TestCase):
         accepted = sum(1 for r in reports if r["fec_ok"])
         self.assertLess(accepted, 30, f"{accepted}/200 noise frames passed the gate")
 
-    def test_capability_statement_admits_the_gap(self):
+    def test_capability_statement_still_admits_the_dmr_gap(self):
+        # The IMBE side of capability() is asserted in
+        # TestHonestyAfterImplementation; this pins the parts that did NOT change.
         cap = ambe.capability()
         self.assertEqual(cap["sample_rate"], 8000)
         self.assertIn("synthetic", cap["validated_against"])
-        self.assertFalse(cap["protocols"]["p25_phase1_imbe"]["magnitudes"])
         self.assertFalse(cap["protocols"]["dmr_ambe2"]["audio"])
-        self.assertIn("not implemented", cap["caveat"])
+        self.assertFalse(cap["protocols"]["dmr_ambe2"]["magnitudes"])
 
-    def test_module_docstring_states_the_limits(self):
-        # The docstring is the contract other engineers read before wiring this
-        # into anything an operator hears. Pin the disclosures so a future edit
-        # cannot quietly delete them.
+
+class TestSourcedTables(unittest.TestCase):
+    """The tables in survey/imbe_tables.py are the only numbers in this decoder
+    that were copied rather than computed, so they get the hardest tests. Each
+    check below is an EXTERNAL anchor from docs/IMBE_SPECTRAL_AMPLITUDES.md — a
+    corrupted or mis-transcribed table fails at least one of them."""
+
+    def test_bit_budget_checksum_holds_for_every_tabulated_L(self):
+        # sum(gain bits) + sum(higher-order bits) == 73 - K, which ties the two
+        # independent tables to the frame arithmetic. This is the single
+        # strongest guard against a mis-copied row.
+        for L in sorted(T.HIGHER_ORDER_BITS):
+            budget = imbe_amplitude_bit_budget(L)
+            total = sum(T.GAIN_BITS[L]) + sum(T.HIGHER_ORDER_BITS[L])
+            self.assertEqual(total, budget["bits"],
+                             f"L={L}: {total} allocated, budget {budget['bits']}")
+            self.assertEqual(budget["bits"], 73 - imbe_band_count(L))
+
+    def test_table_shapes(self):
+        self.assertEqual(len(T.GAIN_LEVELS), 64)          # 6-bit gain index
+        self.assertEqual(sorted(T.GAIN_BITS), list(range(9, 57)))
+        for L, row in T.GAIN_BITS.items():
+            self.assertEqual(len(row), 5, f"L={L}")       # G_2..G_6
+        for L, row in T.HIGHER_ORDER_BITS.items():
+            self.assertEqual(len(row), L - 6, f"L={L}")
+        # 1272 integers is the full Annex G; we have all but the three bad rows.
+        have = sum(len(r) for r in T.HIGHER_ORDER_BITS.values())
+        missing = sum(L - 6 for L in T.UNVERIFIED_L)
+        self.assertEqual(have + missing, 1272)
+
+    def test_every_gain_bit_count_is_confirmed_by_its_own_step_size(self):
+        # mbelib stores (bits, step) pairs. The step must equal
+        # QUANT_STEP[bits] * GAIN_STD_DEV[j] -- a per-entry checksum on all 240
+        # bit counts. This is what makes the gain allocation trustworthy rather
+        # than merely plausible.
+        stored = {  # (L, element) -> step size as stored in mbelib's ba[]
+            (9, 0): 0.003100, (9, 1): 0.004020, (9, 2): 0.003360,
+            (9, 3): 0.002900, (9, 4): 0.002640,
+            (16, 0): 0.046500, (16, 1): 0.030150, (16, 2): 0.025200,
+            (16, 3): 0.040600, (16, 4): 0.036960,
+            (56, 0): 0.201500, (56, 1): 0.130650, (56, 2): 0.142800,
+            (56, 3): 0.123250, (56, 4): 0.112200,
+        }
+        for (L, j), step in stored.items():
+            self.assertAlmostEqual(imbe_gain_step(T.GAIN_BITS[L][j], j), step,
+                                   places=6, msg=f"L={L} G{j + 2}")
+
+    def test_we_are_immune_to_the_known_mbelib_typo(self):
+        # mbelib's stored step at L=23, G_5 is 0.068000; the standard says
+        # 0.058000. We take only the BIT COUNT from mbelib and generate the step
+        # from the rule, so we get the correct value and the typo cannot reach
+        # audio. Asserting it explicitly so a future "optimisation" that
+        # hardcodes mbelib's steps fails loudly.
+        typo = T.GAIN_STEP_TYPO
+        bits = T.GAIN_BITS[typo["L"]][typo["element"] - 2]
+        self.assertEqual(bits, 4)
+        self.assertAlmostEqual(imbe_gain_step(bits, typo["element"] - 2),
+                               typo["correct"], places=6)
+        self.assertNotAlmostEqual(imbe_gain_step(bits, typo["element"] - 2),
+                                  typo["mbelib"], places=6)
+
+    def test_tia_worked_example_L16(self):
+        # The standard's own clause-10 example. It pins the gain allocation, the
+        # higher-order allocation, the m->(block,coefficient) mapping and both
+        # step-size rules simultaneously -- if any one of them is wrong, the ten
+        # higher-order step sizes below cannot all come out right.
+        self.assertEqual(imbe_amplitude_bit_budget(16)["bits"], 67)
+        self.assertEqual(list(T.GAIN_BITS[16]), [6, 6, 6, 5, 5])
+        self.assertEqual(list(T.HIGHER_ORDER_BITS[16]),
+                         [6, 6, 5, 4, 4, 3, 3, 3, 3, 2])
+        self.assertEqual(sum(T.GAIN_BITS[16]), 28)
+        self.assertEqual(sum(T.HIGHER_ORDER_BITS[16]), 39)
+
+        np.testing.assert_allclose(
+            [imbe_gain_step(b, j) for j, b in enumerate(T.GAIN_BITS[16])],
+            [0.04650, 0.03015, 0.02520, 0.04060, 0.03696], atol=5e-7)
+
+        self.assertEqual(imbe_amplitude_blocks(16), (2, 2, 3, 3, 3, 3))
+        self.assertEqual(imbe_ho_coefficient_map(16),
+                         ((0, 2), (1, 2), (2, 2), (2, 3), (3, 2),
+                          (3, 3), (4, 2), (4, 3), (5, 2), (5, 3)))
+        steps = [imbe_ho_step(b, k) for b, (_i, k)
+                 in zip(T.HIGHER_ORDER_BITS[16], imbe_ho_coefficient_map(16))]
+        np.testing.assert_allclose(
+            steps, [0.04605, 0.04605, 0.08596, 0.09640, 0.12280,
+                    0.15665, 0.19955, 0.15665, 0.19955, 0.20485], atol=5e-6)
+
+    def test_L9_spot_values(self):
+        self.assertEqual(list(T.GAIN_BITS[9]), [10, 9, 9, 9, 9])
+        self.assertEqual(list(T.HIGHER_ORDER_BITS[9]), [9, 8, 7])
+        self.assertEqual(imbe_amplitude_bit_budget(9)["bits"], 70)
+
+    def test_gain_quantizer_is_a_monotonic_scalar_quantizer(self):
+        # Reconstruction levels of a scalar quantizer must be strictly
+        # increasing; a transposed or duplicated entry would break this.
+        lv = list(T.GAIN_LEVELS)
+        self.assertTrue(all(lv[i] < lv[i + 1] for i in range(63)))
+        self.assertAlmostEqual(lv[0], -2.842205, places=6)
+        self.assertAlmostEqual(lv[63], 8.695827, places=6)
+
+    def test_standdev_tail_is_not_monotonic_and_that_is_correct(self):
+        # sigma dips at k=8 (0.165) then rises to 0.170, 0.170. It looks like a
+        # transcription error and is not -- confirmed in both sources. Pinned so
+        # nobody "corrects" it.
+        self.assertEqual(T.HO_STD_DEV[7], 0.173)
+        self.assertEqual(T.HO_STD_DEV[8], 0.165)
+        self.assertEqual(T.HO_STD_DEV[9], 0.170)
+        self.assertEqual(T.HO_STD_DEV[10], 0.170)
+        self.assertLess(T.HO_STD_DEV[8], T.HO_STD_DEV[9])
+
+    def test_isc_attribution_is_present_in_the_tables_module(self):
+        # ISC permits commercial closed-source use only if the notice travels
+        # with the code. Losing this docstring would be a licence breach, so the
+        # test suite guards it.
+        doc = T.__doc__ or ""
+        self.assertIn("ISC", doc)
+        self.assertIn("Copyright (C) 2010 mbelib Author", doc)
+        self.assertIn("Permission to use, copy, modify", doc)
+        self.assertIn("third-party notices", doc)
+        self.assertIn("GPL-2.0", doc)          # the mbelib-neo trap
+        self.assertIn("mbelib-neo", doc)
+
+
+class TestAmplitudeBlockStructure(unittest.TestCase):
+    """The 6-block split of the prediction residual — pure arithmetic, and the
+    foundation every later stage indexes against."""
+
+    def test_blocks_partition_L_exactly(self):
+        for L in ALL_L:
+            J = imbe_amplitude_blocks(L)
+            self.assertEqual(len(J), ambe.IMBE_AMPLITUDE_BLOCKS, f"L={L}")
+            self.assertEqual(sum(J), L, f"L={L} blocks {J}")
+            self.assertTrue(all(j >= 1 for j in J), f"L={L} has an empty block")
+
+    def test_blocks_are_within_one_of_each_other(self):
+        for L in ALL_L:
+            J = imbe_amplitude_blocks(L)
+            self.assertLessEqual(max(J) - min(J), 1, f"L={L} blocks {J}")
+            self.assertEqual(list(J), sorted(J), f"L={L}: extras ride high")
+
+    def test_block_extremes(self):
+        self.assertEqual(imbe_amplitude_blocks(9), (1, 1, 1, 2, 2, 2))
+        self.assertEqual(imbe_amplitude_blocks(34), (5, 5, 6, 6, 6, 6))  # TIA Fig 17
+        self.assertEqual(imbe_amplitude_blocks(36), (6, 6, 6, 6, 6, 6))
+        self.assertEqual(imbe_amplitude_blocks(56), (9, 9, 9, 9, 10, 10))
+
+    def test_too_few_harmonics_rejected(self):
+        with self.assertRaises(ValueError):
+            imbe_amplitude_blocks(5)
+
+    def test_higher_order_map_covers_every_coefficient_once(self):
+        for L in ALL_L:
+            J = imbe_amplitude_blocks(L)
+            m = imbe_ho_coefficient_map(L)
+            self.assertEqual(len(m), L - 6, f"L={L}")
+            self.assertEqual(len(set(m)), len(m), f"L={L} duplicate coefficient")
+            for i, k in m:
+                self.assertTrue(2 <= k <= J[i], f"L={L} block {i} k={k}")
+            # length-1 blocks contribute nothing
+            for i, Ji in enumerate(J):
+                got = sorted(k for bi, k in m if bi == i)
+                self.assertEqual(got, list(range(2, Ji + 1)), f"L={L} block {i}")
+
+
+class TestAmplitudeDct(unittest.TestCase):
+    """The DCT is proved against its DEFINING PROPERTIES, not against itself."""
+
+    def test_basis_is_orthogonal_with_the_expected_norms(self):
+        for J in (1, 2, 3, 5, 8, 10):
+            basis = imbe_dct_matrix(J) * float(J)
+            gram = basis @ basis.T
+            expected = np.full(J, J / 2.0)
+            expected[0] = float(J)
+            np.testing.assert_allclose(np.diag(gram), expected, atol=1e-10)
+            off = gram - np.diag(np.diag(gram))
+            self.assertLess(float(np.max(np.abs(off))), 1e-10, f"J={J}")
+
+    def test_zeroth_coefficient_is_exactly_the_mean(self):
+        rng = np.random.default_rng(21)
+        for J in range(1, 15):
+            x = rng.normal(size=J)
+            self.assertAlmostEqual(float(imbe_dct(x)[0]), float(np.mean(x)),
+                                   places=12, msg=f"J={J}")
+
+    def test_constant_block_has_no_higher_coefficients(self):
+        for J in range(1, 12):
+            c = imbe_dct(np.full(J, -1.75))
+            self.assertAlmostEqual(float(c[0]), -1.75, places=12)
+            np.testing.assert_allclose(c[1:], 0.0, atol=1e-12)
+
+    def test_pure_basis_vector_gives_an_impulse(self):
+        J = 9
+        for k in range(J):
+            j = np.arange(J, dtype=np.float64)
+            c = imbe_dct(np.cos(math.pi * k * (j + 0.5) / J))
+            want = np.zeros(J)
+            want[k] = 1.0 if k == 0 else 0.5
+            np.testing.assert_allclose(c, want, atol=1e-10, err_msg=f"k={k}")
+
+    def test_parseval_energy_identity(self):
+        rng = np.random.default_rng(22)
+        for J in range(1, 16):
+            x = rng.normal(size=J)
+            c = imbe_dct(x)
+            self.assertAlmostEqual(float(np.mean(x ** 2)),
+                                   float(c[0] ** 2 + 2.0 * np.sum(c[1:] ** 2)),
+                                   places=10, msg=f"J={J}")
+
+    def test_idct_matches_the_standards_written_form(self):
+        # TIA eqs. (69)/(73): x_j = sum_k a(k) c_k cos(pi (k-1)(j-0.5)/J),
+        # a(1)=1, a(k>=2)=2. Written out longhand here so the implementation is
+        # checked against the equation rather than against itself.
+        rng = np.random.default_rng(25)
+        for J in (1, 2, 3, 6, 9):
+            c = rng.normal(size=J)
+            want = np.zeros(J)
+            for j in range(1, J + 1):
+                acc = 0.0
+                for k in range(1, J + 1):
+                    a = 1.0 if k == 1 else 2.0
+                    acc += a * c[k - 1] * math.cos(math.pi * (k - 1)
+                                                   * (j - 0.5) / J)
+                want[j - 1] = acc
+            np.testing.assert_allclose(imbe_idct(c), want, atol=1e-10,
+                                       err_msg=f"J={J}")
+
+    def test_inverse_reconstructs(self):
+        rng = np.random.default_rng(24)
+        for J in range(1, 20):
+            x = rng.normal(size=J) * 4.0
+            np.testing.assert_allclose(imbe_idct(imbe_dct(x)), x, atol=1e-10,
+                                       err_msg=f"J={J}")
+
+
+class TestFrequencyWarping(unittest.TestCase):
+    """The step that exists ONLY because L changes frame to frame. TIA eqs.
+    (75)-(79). Tested against ground truth the module never sees."""
+
+    def _grid(self, b0):
+        w0, f0, L = imbe_pitch(b0)
+        logm = np.zeros(L + 1)
+        logm[1:] = _log_envelope(np.arange(1, L + 1) * f0)
+        return w0, f0, L, logm
+
+    def test_identity_when_L_does_not_change(self):
+        _, _, L, logm = self._grid(80)
+        np.testing.assert_allclose(imbe_warp_previous(logm, L)[1:], logm[1:],
+                                   atol=1e-10)
+
+    def test_warping_is_driven_by_harmonic_count_not_frequency(self):
+        # TIA eq. (75) uses L(-1)/L(0). Doubling L must map current harmonic 2l
+        # onto previous harmonic l exactly, with odd harmonics halfway between.
+        prev = np.concatenate([[0.0], np.arange(1.0, 21.0)])   # prev[l] = l
+        warped = imbe_warp_previous(prev, 40)                  # L_prev=20 -> L=40
+        for l in range(1, 21):
+            self.assertAlmostEqual(float(warped[2 * l]), float(l), places=10,
+                                   msg=f"harmonic {2 * l}")
+        for l in range(1, 20):
+            self.assertAlmostEqual(float(warped[2 * l + 1]), l + 0.5, places=10)
+
+    def test_index_zero_is_unity_not_the_first_harmonic(self):
+        # TIA eq. (78): M_0(-1) = 1.0, i.e. log2 = 0. It is really read whenever
+        # L grows, because then f_1 < 1 and k_1 = 0. Clamping to harmonic 1
+        # instead (the intuitive choice) gives a different answer, so pin it.
+        prev = np.array([0.0, 4.0, 4.0])           # L_prev = 2, both harmonics 4.0
+        warped = imbe_warp_previous(prev, 4)       # f_1 = 0.5 -> between P0 and P1
+        self.assertAlmostEqual(float(warped[1]), 0.5 * 0.0 + 0.5 * 4.0, places=10)
+        self.assertAlmostEqual(float(warped[2]), 4.0, places=10)
+
+    def test_top_end_holds_the_last_value(self):
+        # TIA eq. (79). f_L = L_prev exactly, so k_L + 1 runs one past the end.
+        prev = np.concatenate([[0.0], np.arange(1.0, 11.0)])   # L_prev = 10
+        warped = imbe_warp_previous(prev, 10)
+        np.testing.assert_allclose(warped[1:], np.arange(1.0, 11.0), atol=1e-10)
+        self.assertTrue(np.all(np.isfinite(imbe_warp_previous(prev, 56))))
+
+    def test_warping_never_extrapolates(self):
+        for b_prev, b_cur in ((0, 207), (207, 0), (30, 150), (150, 30), (100, 101)):
+            _, _, _, prev = self._grid(b_prev)
+            _, _, Lc, _ = self._grid(b_cur)
+            warped = imbe_warp_previous(prev, Lc)
+            self.assertEqual(warped.size, Lc + 1)
+            self.assertTrue(np.all(np.isfinite(warped)))
+            lo = min(0.0, float(np.min(prev[1:])))     # 0.0 is the eq.(78) anchor
+            hi = max(0.0, float(np.max(prev[1:])))
+            self.assertGreaterEqual(float(np.min(warped[1:])), lo - 1e-9)
+            self.assertLessEqual(float(np.max(warped[1:])), hi + 1e-9)
+
+    def test_warping_preserves_order(self):
+        prev = np.concatenate([[0.0], np.linspace(3.0, 0.1, 40)])
+        warped = imbe_warp_previous(prev, 20)
+        self.assertTrue(np.all(np.diff(warped[1:]) <= 1e-12))
+
+    def test_no_history_is_a_no_op_not_a_guess(self):
+        np.testing.assert_array_equal(imbe_warp_previous(None, 12), np.zeros(13))
+        np.testing.assert_array_equal(imbe_warp_previous(np.zeros(1), 12),
+                                      np.zeros(13))
+
+    def test_warping_beats_naive_prediction_when_L_changes(self):
+        # THE point of the stage. Same speaker, same envelope, new pitch: with
+        # warping the residual nearly vanishes; index-for-index it does not.
+        for b_prev, b_cur in ((150, 60), (60, 150), (20, 190), (190, 20), (100, 90)):
+            _, _, Lp, prev = self._grid(b_prev)
+            _, _, Lc, cur = self._grid(b_cur)
+            warped = imbe_warp_previous(prev, Lc)
+            e_warp = float(np.sum((cur[1:] - warped[1:]) ** 2))
+
+            naive = np.zeros(Lc + 1)
+            k = min(Lp, Lc)
+            naive[1:k + 1] = prev[1:k + 1]
+            if Lc > Lp:
+                naive[Lp + 1:] = prev[Lp]
+            e_naive = float(np.sum((cur[1:] - naive[1:]) ** 2))
+            self.assertLess(e_warp, 0.25 * e_naive,
+                            f"b0 {b_prev}->{b_cur}: {e_warp:.4f} vs {e_naive:.4f}")
+
+    def test_extremes_of_the_harmonic_range_both_directions(self):
+        for b_prev, b_cur in ((0, 207), (207, 0)):
+            _, _, Lp, prev = self._grid(b_prev)
+            _, _, Lc, _ = self._grid(b_cur)
+            self.assertEqual((Lp, Lc), (9, 56) if b_prev == 0 else (56, 9))
+            warped = imbe_warp_previous(prev, Lc)
+            self.assertEqual(warped.size, Lc + 1)
+            self.assertTrue(np.all(np.isfinite(warped)))
+
+
+class TestInterFramePrediction(unittest.TestCase):
+    def test_prediction_coefficient_matches_the_standard(self):
+        # TIA eq. (55), piecewise in L.
+        self.assertEqual(imbe_prediction_coefficient(9), 0.4)
+        self.assertEqual(imbe_prediction_coefficient(15), 0.4)
+        self.assertAlmostEqual(imbe_prediction_coefficient(20), 0.55, places=12)
+        self.assertAlmostEqual(imbe_prediction_coefficient(24), 0.67, places=12)
+        self.assertEqual(imbe_prediction_coefficient(25), 0.7)
+        self.assertEqual(imbe_prediction_coefficient(56), 0.7)
+
+    def test_prediction_coefficient_is_continuous(self):
+        # Continuity at both breakpoints is why the strict-vs-inclusive reading
+        # of the inequalities cannot change any value. Assert it, because it is
+        # the argument that retires an ambiguity in the source.
+        self.assertAlmostEqual(0.03 * 15 - 0.05, 0.40, places=12)
+        self.assertAlmostEqual(0.03 * 25 - 0.05, 0.70, places=12)
+        for L in ALL_L:
+            self.assertTrue(0.4 <= imbe_prediction_coefficient(L) <= 0.7)
+
+    def test_prediction_subtracts_a_frame_mean_scalar(self):
+        # TIA eq. (77): the correction is (rho/L)*sum(pred), one number for the
+        # whole frame. If it were applied per-harmonic, adding a constant to the
+        # whole warped prediction would change the OUTPUT; it must not, because
+        # the frame's level is carried by the gain index instead.
+        rng = np.random.default_rng(33)
+        res = np.concatenate([[0.0], rng.normal(size=24)])
+        pred = np.concatenate([[0.0], rng.normal(size=24)])
+        a = imbe_undo_prediction(res, pred, 0.7)
+        shifted = pred.copy()
+        shifted[1:] += 3.5
+        b = imbe_undo_prediction(res, shifted, 0.7)
+        np.testing.assert_allclose(a[1:], b[1:], atol=1e-12)
+
+    def test_undo_prediction_inverts_the_residual(self):
+        rng = np.random.default_rng(32)
+        logm = np.concatenate([[0.0], rng.normal(size=33)])
+        warped = np.concatenate([[0.0], rng.normal(size=33)])
+        for rho in (0.0, 0.4, 0.55, 0.7):
+            res = imbe_prediction_residual(logm, warped, rho)
+            np.testing.assert_allclose(imbe_undo_prediction(res, warped, rho)[1:],
+                                       logm[1:], atol=1e-12)
+
+    def test_prediction_removes_energy_from_a_stationary_spectrum(self):
+        _, f0, L = imbe_pitch(90)
+        logm = np.zeros(L + 1)
+        logm[1:] = _log_envelope(np.arange(1, L + 1) * f0)
+        warped = imbe_warp_previous(logm, L)
+        centred = float(np.sum((logm[1:] - np.mean(logm[1:])) ** 2))
+        for rho in (0.4, 0.55, 0.7):
+            res = imbe_prediction_residual(logm, warped, rho)
+            got = float(np.sum((res[1:] - np.mean(res[1:])) ** 2))
+            self.assertAlmostEqual(got, (1.0 - rho) ** 2 * centred, places=9)
+            self.assertLess(got, centred)
+
+    def test_length_mismatch_is_rejected(self):
+        with self.assertRaises(ValueError):
+            imbe_prediction_residual(np.zeros(6), np.zeros(5), 0.7)
+
+
+class TestEnhancement(unittest.TestCase):
+    """Clause 8, eqs. (105)-(110). Muffled speech without it."""
+
+    def _mags(self, L, seed=0):
+        rng = np.random.default_rng(seed)
+        m = np.zeros(L + 1)
+        m[1:] = np.exp2(rng.normal(size=L) * 1.5 + 2.0)
+        return m
+
+    def test_energy_is_preserved_exactly(self):
+        # eqs. (109)/(110) renormalize to the original RM0, so enhancement
+        # reshapes the envelope without changing the frame's loudness.
+        for L in (9, 20, 34, 56):
+            w0 = 2.0 * math.pi * (0.9254 * math.pi / L) / (2.0 * math.pi)
+            m = self._mags(L, seed=L)
+            e = ambe.imbe_enhance_amplitudes(m, 0.9254 * math.pi / L, L)
+            self.assertAlmostEqual(float(np.sum(e[1:] ** 2)),
+                                   float(np.sum(m[1:] ** 2)), places=6,
+                                   msg=f"L={L}")
+
+    def test_low_harmonics_are_scaled_uniformly(self):
+        # The 8*l <= L guard leaves the lowest harmonics unweighted, so after the
+        # global renormalization their ratio to the input must be one constant.
+        L = 40
+        w0 = 0.9254 * math.pi / L
+        m = self._mags(L, seed=5)
+        e = ambe.imbe_enhance_amplitudes(m, w0, L)
+        low = e[1:6] / m[1:6]                   # 8*l <= 40 for l = 1..5
+        np.testing.assert_allclose(low, low[0], rtol=1e-9)
+
+    def test_weights_are_clamped(self):
+        # The [0.5, 1.2] clamp means enhancement can never invent a peak; the
+        # per-harmonic gain relative to the uniform part stays inside that band.
+        L = 34
+        w0 = 0.9254 * math.pi / L
+        m = self._mags(L, seed=9)
+        e = ambe.imbe_enhance_amplitudes(m, w0, L)
+        ratio = e[1:L + 1] / m[1:L + 1]
+        gamma = float(ratio[0])                 # l=1 is in the untouched band
+        self.assertGreaterEqual(float(np.min(ratio)), 0.5 * gamma - 1e-9)
+        self.assertLessEqual(float(np.max(ratio)), 1.2 * gamma + 1e-9)
+
+    def test_it_actually_sharpens(self):
+        # A spectrum with a peak must come out with MORE contrast than it went
+        # in with, or the stage is doing nothing.
+        L = 30
+        w0 = 0.9254 * math.pi / L
+        m = np.zeros(L + 1)
+        l = np.arange(1, L + 1)
+        m[1:] = 1.0 + 4.0 * np.exp(-((l - 8.0) / 2.5) ** 2)
+        e = ambe.imbe_enhance_amplitudes(m, w0, L)
+        before = float(np.max(m[1:]) / np.min(m[1:]))
+        after = float(np.max(e[1:]) / np.min(e[1:]))
+        self.assertGreater(after, before)
+
+    def test_degenerate_frames_are_left_alone(self):
+        m = np.zeros(10)
+        np.testing.assert_array_equal(ambe.imbe_enhance_amplitudes(m, 0.3, 9), m)
+        m2 = np.ones(10)
+        np.testing.assert_array_equal(ambe.imbe_enhance_amplitudes(m2, 0.0, 9), m2)
+
+
+class TestAmplitudeTransformChain(unittest.TestCase):
+    def _residual(self, L, seed=0):
+        rng = np.random.default_rng(seed)
+        r = np.zeros(L + 1)
+        r[1:] = rng.normal(size=L) * 2.0
+        return r
+
+    def test_coefficient_count_is_exactly_L(self):
+        for L in ALL_L:
+            gv, higher = imbe_amplitude_forward(self._residual(L), L)
+            self.assertEqual(gv.size, ambe.IMBE_AMPLITUDE_BLOCKS)
+            total = gv.size + sum(h.size for h in higher)
+            self.assertEqual(total, L, f"L={L}")
+            self.assertEqual(total - 1, imbe_amplitude_bit_budget(L)["quantizers"])
+
+    def test_forward_and_inverse_are_exact(self):
+        for L in ALL_L:
+            r = self._residual(L, seed=L)
+            gv, higher = imbe_amplitude_forward(r, L)
+            np.testing.assert_allclose(imbe_amplitude_inverse(gv, higher, L), r,
+                                       atol=1e-9, err_msg=f"L={L}")
+
+    def test_a_flat_residual_lives_entirely_in_the_gain_term(self):
+        for L in (9, 30, 56):
+            r = np.zeros(L + 1)
+            r[1:] = 1.25
+            gv, higher = imbe_amplitude_forward(r, L)
+            self.assertAlmostEqual(float(gv[0]), 1.25, places=10)
+            np.testing.assert_allclose(gv[1:], 0.0, atol=1e-10)
+            for h in higher:
+                np.testing.assert_allclose(h, 0.0, atol=1e-10)
+
+    def test_wrong_shapes_are_rejected(self):
+        gv, higher = imbe_amplitude_forward(self._residual(20), 20)
+        with self.assertRaises(ValueError):
+            imbe_amplitude_inverse(gv, higher[:5], 20)
+        with self.assertRaises(ValueError):
+            imbe_amplitude_inverse(gv, higher, 21)
+        with self.assertRaises(ValueError):
+            imbe_amplitude_forward(np.zeros(10), 20)
+
+
+class TestDequantizer(unittest.TestCase):
+    """Bits in, spectral envelope out — the stage that was missing."""
+
+    def _amp(self, L, seed=0):
+        rng = np.random.default_rng(seed)
+        return rng.integers(0, 2,
+                            imbe_amplitude_bit_budget(L)["bits"]).astype(np.uint8)
+
+    def test_decodes_across_the_whole_supported_pitch_range(self):
+        for b0 in range(0, 208, 7):
+            w0, _, L = imbe_pitch(b0)
+            ok, _why = ambe.imbe_amplitude_available(L)
+            mags, logm, note = dequantize_imbe_amplitudes(
+                self._amp(L, seed=b0), L, 32, w0=w0)
+            if not ok:
+                self.assertIsNone(mags)
+                continue
+            self.assertIsNotNone(mags, f"b0={b0}")
+            self.assertEqual(mags.size, L + 1)
+            self.assertEqual(logm.size, L + 1)
+            self.assertEqual(float(mags[0]), 0.0)
+            self.assertTrue(np.all(mags[1:] > 0.0))
+            self.assertTrue(np.all(np.isfinite(mags)))
+            self.assertIn("decoded", note)
+
+    def test_indices_are_sliced_msb_first(self):
+        L = 20
+        alloc = [3] * (L - 1)
+        want = [(i * 5) % 8 for i in range(L - 1)]
+        bits = np.concatenate([int_to_bits(v, 3) for v in want]).astype(np.uint8)
+        pad = np.zeros(imbe_amplitude_bit_budget(L)["bits"] - bits.size,
+                       dtype=np.uint8)
+        got, used = imbe_amplitude_indices(np.concatenate([bits, pad]), L, alloc)
+        self.assertEqual(got, want)
+        self.assertEqual(used, alloc)
+
+    def test_real_allocation_is_used_by_default(self):
+        L = 16
+        _, alloc = imbe_amplitude_indices(self._amp(L), L)
+        self.assertEqual(alloc, list(T.GAIN_BITS[16]) + list(T.HIGHER_ORDER_BITS[16]))
+        self.assertEqual(sum(alloc), imbe_amplitude_bit_budget(L)["bits"])
+
+    def test_a_bad_allocation_fails_loudly(self):
+        L = 20
+        bits = np.zeros(imbe_amplitude_bit_budget(L)["bits"], dtype=np.uint8)
+        with self.assertRaises(ValueError):
+            imbe_amplitude_indices(bits, L, [2] * (L - 2))       # wrong count
+        with self.assertRaises(ValueError):
+            imbe_amplitude_indices(bits, L, [9] * (L - 1))       # over budget
+        with self.assertRaises(ValueError):
+            imbe_amplitude_indices(bits, L, [-1] + [1] * (L - 2))
+
+    def test_every_amplitude_bit_changes_the_envelope(self):
+        # If the bit reader desynchronized, or a quantizer were given the wrong
+        # width, some bits would fall in a gap and have no effect. Flip each one
+        # and require the decoded envelope to move.
+        L = 16
+        w0, _, _ = imbe_pitch(next(b for b in range(208) if imbe_pitch(b)[2] == L))
+        base_bits = self._amp(L, seed=1)
+        base, _, _ = dequantize_imbe_amplitudes(base_bits, L, 32, w0=w0)
+        alloc = list(T.GAIN_BITS[L]) + list(T.HIGHER_ORDER_BITS[L])
+        for i in range(sum(alloc)):
+            flipped = base_bits.copy()
+            flipped[i] ^= 1
+            other, _, _ = dequantize_imbe_amplitudes(flipped, L, 32, w0=w0)
+            self.assertGreater(float(np.max(np.abs(other[1:] - base[1:]))), 0.0,
+                               f"amplitude bit {i} had no effect")
+
+    def test_gain_index_moves_the_whole_envelope_together(self):
+        # G_1 is the frame gain, so changing only b2 must scale every harmonic by
+        # the same factor. Enhancement is off here because it renormalizes energy
+        # and would mask exactly this.
+        L = 16
+        w0, _, _ = imbe_pitch(next(b for b in range(208) if imbe_pitch(b)[2] == L))
+        amp = self._amp(L, seed=2)
+        a, _, _ = dequantize_imbe_amplitudes(amp, L, 10, w0=w0, enhance=False)
+        b, _, _ = dequantize_imbe_amplitudes(amp, L, 50, w0=w0, enhance=False)
+        ratio = b[1:] / a[1:]
+        np.testing.assert_allclose(ratio, ratio[0], rtol=1e-9)
+        self.assertGreater(float(ratio[0]), 1.0)      # index 50 is louder than 10
+        self.assertAlmostEqual(float(np.log2(ratio[0])),
+                               T.GAIN_LEVELS[50] - T.GAIN_LEVELS[10], places=6)
+
+    def test_history_changes_the_result_and_is_deterministic(self):
+        L = 16
+        w0, f0, _ = imbe_pitch(next(b for b in range(208) if imbe_pitch(b)[2] == L))
+        amp = self._amp(L, seed=3)
+        prev = np.zeros(31)
+        prev[1:] = _log_envelope(np.arange(1, 31) * 120.0)
+        cold, _, _ = dequantize_imbe_amplitudes(amp, L, 32, w0=w0)
+        warm, c1, _ = dequantize_imbe_amplitudes(amp, L, 32, prev_log_mags=prev,
+                                                 w0=w0)
+        self.assertGreater(float(np.max(np.abs(warm[1:] - cold[1:]))), 1e-9)
+        again, c2, _ = dequantize_imbe_amplitudes(amp, L, 32, prev_log_mags=prev,
+                                                  w0=w0)
+        np.testing.assert_allclose(warm, again, atol=0.0)
+        np.testing.assert_allclose(c1, c2, atol=0.0)
+
+    def test_predictor_state_is_unenhanced(self):
+        # TIA clause 8 requires the NEXT frame to predict against the unenhanced
+        # amplitudes. If log_magnitudes came back enhanced (or output-scaled),
+        # exponentiating it would not reproduce the pre-enhancement envelope.
+        L = 16
+        w0, _, _ = imbe_pitch(next(b for b in range(208) if imbe_pitch(b)[2] == L))
+        amp = self._amp(L, seed=4)
+        plain, log_plain, _ = dequantize_imbe_amplitudes(amp, L, 32, w0=w0,
+                                                         enhance=False)
+        enh, log_enh, _ = dequantize_imbe_amplitudes(amp, L, 32, w0=w0,
+                                                     enhance=True)
+        np.testing.assert_allclose(log_plain, log_enh, atol=0.0)
+        np.testing.assert_allclose(np.exp2(log_plain[1:]) * ambe.IMBE_OUTPUT_SCALE,
+                                   plain[1:], rtol=1e-9)
+        self.assertGreater(float(np.max(np.abs(enh[1:] - plain[1:]))), 0.0)
+
+    def test_unsupported_L_refuses_instead_of_guessing(self):
+        for L in T.UNVERIFIED_L:
+            ok, why = ambe.imbe_amplitude_available(L)
+            self.assertFalse(ok)
+            self.assertIn(str(L), why)
+            mags, logm, note = dequantize_imbe_amplitudes(
+                np.ones(imbe_amplitude_bit_budget(L)["bits"], dtype=np.uint8),
+                L, 32, w0=0.1)
+            self.assertIsNone(mags)
+            self.assertIsNone(logm)
+            self.assertIn("bit allocation", note)
+            with self.assertRaises(ValueError):
+                ambe.imbe_amplitude_allocation(L)
+
+    def test_output_is_scaled_into_the_float_contract(self):
+        # The codec's amplitudes are 16-bit referenced; this module's contract is
+        # -1..1 floats. Pin the conversion so a future change cannot silently
+        # alter every operator's listening level.
+        self.assertAlmostEqual(ambe.IMBE_OUTPUT_SCALE, 1.0 / 32768.0, places=12)
+
+
+class TestDecodedSpeechSpectrum(unittest.TestCase):
+    """The end-to-end claim: coded bits become audio with harmonic structure at
+    the transmitted fundamental and a NON-FLAT envelope. Proved spectrally."""
+
+    def _stream(self, b0, gain=32, seed=0, frames=40, voiced=True):
+        _, f0, L = imbe_pitch(b0)
+        K = imbe_band_count(L)
+        rng = np.random.default_rng(seed)
+        amp = rng.integers(0, 2,
+                           imbe_amplitude_bit_budget(L)["bits"]).astype(np.uint8)
+        bits = pack_imbe_params(b0, [voiced] * K, gain, amplitude_bits=amp)
+        return f0, L, decode_p25_voice([pack_imbe_frame(bits)] * frames)
+
+    def test_voiced_audio_is_harmonic_at_the_decoded_fundamental(self):
+        for b0 in (40, 100, 180):        # all map to a supported L
+            f0, L, (pcm, reports) = self._stream(b0, seed=b0)
+            self.assertTrue(reports[0]["intelligible"])
+            self.assertGreater(float(np.sqrt(np.mean(pcm ** 2))), 1e-4)
+            frac = _harmonic_energy_fraction(pcm, f0, L)
+            self.assertGreater(frac, 0.9,
+                               f"b0={b0}: only {frac:.2f} of energy on harmonics")
+
+    def test_the_decoded_envelope_is_not_flat(self):
+        # A flat or 1/l envelope would mean the amplitude bits were ignored. Real
+        # decoded envelopes have formant structure, so harmonic magnitudes must
+        # span a wide dynamic range and not follow a fixed shape.
+        for b0 in (30, 90, 170):
+            _, f0, L = imbe_pitch(b0)
+            rng = np.random.default_rng(b0)
+            amp = rng.integers(0, 2, imbe_amplitude_bit_budget(L)["bits"]).astype(np.uint8)
+            bits = pack_imbe_params(b0, [True] * imbe_band_count(L), 34,
+                                    amplitude_bits=amp)
+            p = decode_imbe_params(bits)
+            m = p["magnitudes"][1:]
+            self.assertGreater(float(np.max(m) / np.min(m)), 3.0, f"b0={b0}")
+            # and it is not the synthetic 1/l placeholder
+            placeholder = ambe.synthetic_envelope(L, 34)[1:]
+            corr = float(np.corrcoef(m / np.max(m),
+                                     placeholder / np.max(placeholder))[0, 1])
+            self.assertLess(corr, 0.95, f"b0={b0} envelope looks like 1/l")
+
+    def test_different_amplitude_bits_give_different_audio(self):
+        _, _, (a, _) = self._stream(100, seed=1, frames=8)
+        _, _, (b, _) = self._stream(100, seed=2, frames=8)
+        self.assertGreater(float(np.max(np.abs(a - b))), 1e-5)
+
+    def test_unvoiced_frames_are_noise_not_harmonics(self):
+        # Compared on the whole harmonic comb rather than on f0 alone: with a
+        # decoded (non-flat) envelope the fundamental is not necessarily the
+        # loudest harmonic, so a single-band test would be measuring the
+        # envelope's shape rather than the voicing decision.
+        f0, L, (v_pcm, _) = self._stream(100, seed=7, voiced=True)
+        _, _, (u_pcm, _) = self._stream(100, seed=7, voiced=False)
+        self.assertGreater(_harmonic_energy_fraction(v_pcm, f0, L),
+                           1.5 * _harmonic_energy_fraction(u_pcm, f0, L))
+        self.assertGreater(_harmonic_energy_fraction(v_pcm, f0, L), 0.9)
+
+    def test_audio_stays_inside_the_float_contract(self):
+        for b0 in (20, 80, 140, 200):
+            _, _, (pcm, reports) = self._stream(b0, gain=32, seed=b0, frames=10)
+            self.assertLessEqual(float(np.max(np.abs(pcm))), 1.0)
+            self.assertEqual(pcm.dtype, np.float32)
+            for r in reports:
+                self.assertEqual(r["clipped"], 0, f"b0={b0} clipped")
+
+    def test_the_predictor_chains_across_frames(self):
+        # Frame 2 of a stream must differ from frame 1 given identical bits,
+        # because the first frame's amplitudes are now the second's prediction.
+        # Identical frames would mean the history is not being carried.
+        b0 = 100
+        _, f0, L = imbe_pitch(b0)
+        rng = np.random.default_rng(11)
+        amp = rng.integers(0, 2, imbe_amplitude_bit_budget(L)["bits"]).astype(np.uint8)
+        bits = pack_imbe_params(b0, [True] * imbe_band_count(L), 32,
+                                amplitude_bits=amp)
+        st = MbeState()
+        p1 = decode_imbe_params(bits, prev_log_mags=st.prev_log_mags)
+        p2 = decode_imbe_params(bits, prev_log_mags=p1["log_magnitudes"])
+        self.assertGreater(float(np.max(np.abs(p2["magnitudes"]
+                                               - p1["magnitudes"]))), 1e-9)
+
+    def test_a_fresh_state_starts_from_the_specified_history(self):
+        # TIA initialises M_l(-1) = 1.0 with L(-1) = 30, so a new stream is
+        # reproducible rather than dependent on whatever ran before it.
+        st = MbeState()
+        self.assertEqual(st.prev_log_mags.size, ambe.IMBE_INIT_PREV_L + 1)
+        np.testing.assert_array_equal(st.prev_log_mags,
+                                      np.zeros(ambe.IMBE_INIT_PREV_L + 1))
+        _, _, (a, _) = self._stream(100, seed=5, frames=6)
+        _, _, (b, _) = self._stream(100, seed=5, frames=6)
+        np.testing.assert_allclose(a, b, atol=0.0)
+
+
+class TestHonestyAfterImplementation(unittest.TestCase):
+    """The claims got stronger, so the honesty tests have to get stronger too."""
+
+    def test_capability_reports_what_is_and_is_not_supported(self):
+        cap = ambe.capability()
+        sa = cap["spectral_amplitudes"]
+        self.assertTrue(cap["protocols"]["p25_phase1_imbe"]["magnitudes"])
+        self.assertTrue(sa["implemented"])
+        self.assertEqual(sa["supported_L"], 45)
+        self.assertEqual(sa["total_L"], 48)
+        self.assertEqual(tuple(sa["unsupported_L"]), (42, 43, 44))
+        self.assertIn("mbelib", sa["sourced_tables"])
+
+    def test_capability_still_says_no_off_air_validation(self):
+        cap = ambe.capability()
+        self.assertIn("synthetic", cap["validated_against"])
+        self.assertIn("NO OFF-AIR FRAME HAS EVER BEEN DECODED", cap["caveat"])
+        self.assertIn("field order", cap["caveat"])
+
+    def test_capability_surfaces_the_attribution_duty(self):
+        # ISC compliance is a shipping precondition, so it has to stay visible to
+        # the report layer rather than being buried in a source comment. The duty
+        # has since been DISCHARGED in THIRD_PARTY_NOTICES.md, so this now pins
+        # that capability() points at the notice — and tests/test_third_party_
+        # notices.py pins that the notice itself, and the licence text in it,
+        # still exist. Together those make the obligation hard to lose.
+        note = ambe.capability()["spectral_amplitudes"]["attribution_required"]
+        self.assertIn("mbelib", note)
+        self.assertIn("THIRD_PARTY_NOTICES.md", note)
+
+    def test_unsupported_L_frames_report_no_magnitudes(self):
+        made = 0
+        for b0 in range(208):
+            _, _, L = imbe_pitch(b0)
+            if L not in T.UNVERIFIED_L:
+                continue
+            made += 1
+            bits = pack_imbe_params(b0, [True] * imbe_band_count(L), 30)
+            _pcm, reports = decode_p25_voice([pack_imbe_frame(bits)])
+            self.assertFalse(reports[0]["magnitudes_available"])
+            self.assertFalse(reports[0]["intelligible"])
+            self.assertTrue(reports[0]["silent"])
+            self.assertIn("bit allocation", reports[0]["note"])
+        self.assertGreater(made, 0, "no pitch index maps to an unsupported L")
+
+    def test_synthetic_envelope_never_overrides_a_real_decode(self):
+        # Opting into the placeholder must not downgrade frames that really
+        # decoded — it is a fallback for the unsupported ones, not a mode.
+        b0 = 100
+        _, _, L = imbe_pitch(b0)
+        bits = pack_imbe_params(b0, [True] * imbe_band_count(L), 30)
+        _pcm, reports = decode_p25_voice([pack_imbe_frame(bits)],
+                                         envelope="synthetic")
+        self.assertTrue(reports[0]["intelligible"])
+        self.assertIn("decoded", reports[0]["note"])
+
+    def test_synthetic_envelope_is_labelled_when_it_is_actually_used(self):
+        b0 = next(b for b in range(208) if imbe_pitch(b)[2] in T.UNVERIFIED_L)
+        _, _, L = imbe_pitch(b0)
+        bits = pack_imbe_params(b0, [True] * imbe_band_count(L), 30)
+        _pcm, reports = decode_p25_voice([pack_imbe_frame(bits)] * 4,
+                                         envelope="synthetic")
+        for r in reports:
+            self.assertTrue(r["magnitudes_available"])
+            self.assertFalse(r["intelligible"])
+            self.assertIn("NOT speech", r["note"])
+
+    def test_failed_fec_still_produces_no_audio(self):
+        info = np.zeros(IMBE_INFO_BITS, dtype=np.uint8)
+        coded = pack_imbe_frame(info).copy()
+        for (a, _b) in ambe.IMBE_VECTOR_SPANS[:4]:
+            for k in range(4):
+                coded[a + k] ^= 1
+        pcm, reports = decode_p25_voice([coded])
+        self.assertFalse(reports[0]["fec_ok"])
+        self.assertFalse(reports[0]["intelligible"])
+        np.testing.assert_array_equal(pcm, np.zeros(FRAME_SAMPLES, dtype=np.float32))
+
+    def test_noise_never_decodes_as_voice(self):
+        rng = np.random.default_rng(2)
+        frames = [rng.integers(0, 2, IMBE_FRAME_BITS).astype(np.uint8)
+                  for _ in range(200)]
+        _pcm, reports = decode_p25_voice(frames)
+        self.assertEqual(sum(1 for r in reports if r["fec_ok"]), 0)
+
+    def test_module_docstring_states_the_remaining_limits(self):
         doc = ambe.__doc__ or ""
         self.assertIn("off-air", doc)
-        self.assertIn("NOT** IMPLEMENTED", doc)
-        self.assertIn("DEQUANTIZER", doc)
-        self.assertIn("cannot produce", doc)
-        self.assertIn("intelligible speech", doc)
+        self.assertIn("NO OFF-AIR FRAME HAS EVER BEEN DECODED", doc)
+        self.assertIn("FREQUENCY WARPING", doc)
+        self.assertIn("FIELD ORDER", doc)
+        self.assertIn("L = 42, 43 and 44", doc)
+        self.assertIn("ISC", doc)
         self.assertIn("CONSEQUENCE, STATED PLAINLY", doc)
 
 
