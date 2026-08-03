@@ -9,6 +9,24 @@ echo    Keep THIS window open while you use the app.
 echo    Close this window to stop it.
 echo ============================================================
 echo.
+rem --- pull newest version from GitHub; NEVER block the demo ---
+rem GIT_TERMINAL_PROMPT=0 so a credential prompt can never hang the launcher.
+set GIT_TERMINAL_PROMPT=0
+where git >nul 2>&1
+if %errorlevel% neq 0 goto NOGIT
+echo  Checking GitHub for updates...
+git pull --ff-only >nul 2>&1
+if %errorlevel%==0 goto UPDATED
+echo  Could not update - offline, or local edits in the way.
+echo  Running the version already on this computer.
+goto AFTERUPDATE
+:UPDATED
+echo  Up to date with GitHub.
+goto AFTERUPDATE
+:NOGIT
+echo  Git not installed - running the version already on this computer.
+:AFTERUPDATE
+echo.
 where py >nul 2>&1
 if %errorlevel%==0 goto RUNPY
 where python >nul 2>&1

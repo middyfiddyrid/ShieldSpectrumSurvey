@@ -13,6 +13,25 @@ echo    B220 first CONNECT can take 20-30s. If it fails: unplug USB 5s, replug.
 echo ============================================================
 echo.
 
+rem --- pull newest version from GitHub; NEVER block the sweep ---
+rem GIT_TERMINAL_PROMPT=0 so a credential prompt can never hang the launcher.
+set GIT_TERMINAL_PROMPT=0
+where git >nul 2>&1
+if %errorlevel% neq 0 goto NOGIT
+echo  Checking GitHub for updates...
+git pull --ff-only >nul 2>&1
+if %errorlevel%==0 goto UPDATED
+echo  Could not update - offline, or local edits in the way.
+echo  Running the version already on this computer.
+goto AFTERUPDATE
+:UPDATED
+echo  Up to date with GitHub.
+goto AFTERUPDATE
+:NOGIT
+echo  Git not installed - running the version already on this computer.
+:AFTERUPDATE
+echo.
+
 rem UHD host library (B220)
 if exist "C:\Program Files\UHD\bin\uhd.dll" set "PATH=C:\Program Files\UHD\bin;%PATH%"
 if exist "C:\Program Files\PothosSDR\bin\uhd.dll" set "PATH=C:\Program Files\PothosSDR\bin;%PATH%"
