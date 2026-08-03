@@ -1,0 +1,17 @@
+CORRECTION: this commit's message describes only the LISTEN classifier, but it
+ALSO contains the analog-video UI layer, which was in survey/web/app.js and
+survey/web/index.html at the moment those files were staged (two agents had them
+open concurrently).
+
+Also included here, not mentioned in the message above:
+  - 'video' demod mode option
+  - the ANALOG-VIDEO line renderer
+  - the recovered-still <img> element
+  - a fix for dissemDecode() silently no-op'ing on protocol labels containing a
+    slash, e.g. OOK/FSK-DEVICE
+
+The analog-video BACKEND (survey/video.py, tests/test_video.py, and the
+decode_router registration) landed separately in df75ed4.
+
+Nothing is missing or broken; the message is simply narrower than the diff.
+History was not rewritten because this commit was already pushed.
