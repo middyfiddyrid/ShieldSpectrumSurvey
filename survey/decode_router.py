@@ -26,7 +26,7 @@ log = logging.getLogger("survey.decode_router")
 # the audio suppression that this list turns on.
 DATA_MODES = ("pocsag", "flex", "ook", "dmr")
 # everything the router/UI understands as an explicit decode preference
-DECODE_MODES = ("pocsag", "flex", "ook", "dmr", "p25", "video", "dtmf", "cw")
+DECODE_MODES = ("pocsag", "flex", "ook", "dmr", "p25", "nxdn", "video", "dtmf", "cw")
 
 
 def _decoders():
@@ -39,6 +39,7 @@ def _decoders():
     from .video import decode_video, looks_like_video
     from .dmr import decode_dmr, looks_like_dmr
     from .p25 import decode_p25, looks_like_p25
+    from .nxdn import decode_nxdn, looks_like_nxdn
     return {
         "pocsag": (lambda iq, fs: pocsag.decode_pocsag(iq, fs), looks_like_pocsag),
         "flex": (lambda iq, fs: decode_flex(iq, fs), looks_like_flex),
@@ -52,6 +53,11 @@ def _decoders():
         # answered "no decodable protocol matched" when P25 had simply never been
         # tried. Same first-class encryption treatment as DMR.
         "p25": (lambda iq, fs: decode_p25(iq, fs), looks_like_p25),
+        # NXDN (NEXEDGE / IDAS) — the third digital LMR mode, and the one most
+        # easily missed: an NXDN48 carrier is only 6.25 kHz wide, so it reads as
+        # narrowband analog to the feature extractor. Same first-class encryption
+        # treatment as DMR and P25.
+        "nxdn": (lambda iq, fs: decode_nxdn(iq, fs), looks_like_nxdn),
         "video": (lambda iq, fs: decode_video(iq, fs), looks_like_video),
         "dtmf": (lambda iq, fs: decode_dtmf(iq, fs), looks_like_dtmf),
         "cw": (lambda iq, fs: decode_cw(iq, fs), looks_like_cw),
@@ -62,7 +68,7 @@ def _decoders():
 # sits after the bit-level decoders and before the tone decoders: its gate wants
 # a WIDE continuous carrier, which is disjoint from the narrowband keyed shapes
 # above it, so the ordering here is about grouping, not contention.
-_ORDER = ("pocsag", "flex", "dmr", "p25", "ook", "video", "dtmf", "cw")
+_ORDER = ("pocsag", "flex", "dmr", "p25", "nxdn", "ook", "video", "dtmf", "cw")
 
 
 def route_decode(iq, fs, feats, prefer=None):
