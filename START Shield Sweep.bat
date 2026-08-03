@@ -18,14 +18,27 @@ rem GIT_TERMINAL_PROMPT=0 so a credential prompt can never hang the launcher.
 set GIT_TERMINAL_PROMPT=0
 where git >nul 2>&1
 if %errorlevel% neq 0 goto NOGIT
-echo  Checking GitHub for updates...
+rem Which branch this machine is on. git pull updates the CURRENT branch, so a
+rem laptop sitting on an old branch pulls THAT one, gets none of the new work,
+rem and still reports success. Show it, and say plainly when it is not main.
+rem Deliberately NOT switched automatically - that could discard local work.
+for /f "delims=" %%B in ('git rev-parse --abbrev-ref HEAD 2^>nul') do set BRANCH=%%B
+echo  Checking GitHub for updates... (branch: %BRANCH%)
 git pull --ff-only >nul 2>&1
 if %errorlevel%==0 goto UPDATED
 echo  Could not update - offline, or local edits in the way.
 echo  Running the version already on this computer.
-goto AFTERUPDATE
+goto BRANCHCHECK
 :UPDATED
 echo  Up to date with GitHub.
+:BRANCHCHECK
+if /i "%BRANCH%"=="main" goto AFTERUPDATE
+echo.
+echo  ************************************************************
+echo  ***  This computer is on branch "%BRANCH%", not "main".
+echo  ***  The newest work is on main - you are NOT getting it.
+echo  ***  To switch:  git checkout main
+echo  ************************************************************
 goto AFTERUPDATE
 :NOGIT
 echo  Git not installed - running the version already on this computer.
