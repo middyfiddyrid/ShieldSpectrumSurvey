@@ -24,9 +24,9 @@ log = logging.getLogger("survey.decode_router")
 # hearing (the audio subcarrier / the FM buzz), and its decoder only needs a
 # fraction of a second of IQ, so it wants neither the longer paging capture nor
 # the audio suppression that this list turns on.
-DATA_MODES = ("pocsag", "flex", "ook")
+DATA_MODES = ("pocsag", "flex", "ook", "dmr")
 # everything the router/UI understands as an explicit decode preference
-DECODE_MODES = ("pocsag", "flex", "ook", "video", "dtmf", "cw")
+DECODE_MODES = ("pocsag", "flex", "ook", "dmr", "video", "dtmf", "cw")
 
 
 def _decoders():
@@ -37,10 +37,15 @@ def _decoders():
     from .tones import decode_dtmf, decode_cw, looks_like_dtmf, looks_like_cw
     from .flex import decode_flex, looks_like_flex
     from .video import decode_video, looks_like_video
+    from .dmr import decode_dmr, looks_like_dmr
     return {
         "pocsag": (lambda iq, fs: pocsag.decode_pocsag(iq, fs), looks_like_pocsag),
         "flex": (lambda iq, fs: decode_flex(iq, fs), looks_like_flex),
         "ook": (lambda iq, fs: decode_ook(iq, fs), looks_like_ook),
+        # DMR reports ENCRYPTED traffic as a first-class message rather than as a
+        # failed decode — "DMR, colour code 1, talkgroup 4021, encrypted" is a
+        # finding, so the router must not treat it as nothing to show.
+        "dmr": (lambda iq, fs: decode_dmr(iq, fs), looks_like_dmr),
         "video": (lambda iq, fs: decode_video(iq, fs), looks_like_video),
         "dtmf": (lambda iq, fs: decode_dtmf(iq, fs), looks_like_dtmf),
         "cw": (lambda iq, fs: decode_cw(iq, fs), looks_like_cw),
@@ -51,7 +56,7 @@ def _decoders():
 # sits after the bit-level decoders and before the tone decoders: its gate wants
 # a WIDE continuous carrier, which is disjoint from the narrowband keyed shapes
 # above it, so the ordering here is about grouping, not contention.
-_ORDER = ("pocsag", "flex", "ook", "video", "dtmf", "cw")
+_ORDER = ("pocsag", "flex", "dmr", "ook", "video", "dtmf", "cw")
 
 
 def route_decode(iq, fs, feats, prefer=None):
