@@ -1417,8 +1417,9 @@ def create_app(db, cfg, demo=False) -> Flask:
         framing wrappers stay trivial and can't deadlock the device."""
         import time as _time
         import numpy as _np
+        from .decode_router import interpret
         from .demod import demodulate
-        from .identify import waterfall_stft
+        from .identify import iq_features, waterfall_stft
         from .sweep.sdr_source import welch_psd
         _mdev, mlock, mstop, msrc = st.controller.monitor_target()
         # live-spectrum tunables (read once; the client owns the scroll history)
@@ -1432,6 +1433,26 @@ def create_app(db, cfg, demo=False) -> Flask:
         span_hi = float(_mcfg(msrc, "listen_wf_span_hi_db", 40.0))
         psd_ema = nf_ema = None
         wf_seq = 0
+        # LIVE SIGNAL CLASS — "what am I actually listening to?". pick_mode()
+        # defaults to NFM outside the broadcast bands, so pressing LISTEN on a
+        # data link serves hash with nothing on screen to say the signal can
+        # never produce audio (a lab session was lost to exactly that). Reuse
+        # the SAME pair /api/analyze/signal uses — identify.iq_features +
+        # decode_router.interpret — so the live verdict and the ANALYZE verdict
+        # can never drift apart; there is no second classifier.
+        #
+        # It is NOT free: identify._symbol_rate_hz is an O(n^2) autocorrelation,
+        # measured here at ~20 ms on 8k samples but ~500 ms on 12k, and this runs
+        # inside the real-time audio loop the operator already heard chop. So it
+        # reads a short HEAD SLICE of the block (listen_classify_samples), runs
+        # at most once per listen_classify_interval_s, and when a pass overruns
+        # listen_classify_budget_s it backs OFF — less often, never more. The
+        # audio comes first: every part of this is best-effort and a failure
+        # costs the verdict, never the stream.
+        cls_every_s = float(_mcfg(msrc, "listen_classify_interval_s", 2.0))
+        cls_n = int(_mcfg(msrc, "listen_classify_samples", 8192))
+        cls_budget_s = float(_mcfg(msrc, "listen_classify_budget_s", 0.05))
+        cls_next_t, cls_pub, cls_errs = 0.0, None, 0
         # live demod strengthening (DEMOD_ANALYZE_DISSEMINATE_DESIGN.md §4a): ONE
         # DemodState per stream so squelch/AGC/de-emphasis carry across blocks.
         from .demod import DemodState
@@ -1476,6 +1497,40 @@ def create_app(db, cfg, demo=False) -> Flask:
                                         msrc, type(e).__name__, e)
                         continue
                     yield pcm, arate
+                    # WHAT IS IT: refresh the live class on its own clock (see
+                    # the cls_* block above), in its OWN try so a classifier
+                    # failure costs only the verdict — not the analyzer, the
+                    # waterfall, or the audio. The last verdict is reused between
+                    # refreshes; it is measured on a few milliseconds of signal,
+                    # so it names the class, not the device — ANALYZE is still
+                    # the full read.
+                    now = _time.time()
+                    if cls_n > 0 and now >= cls_next_t:
+                        # arm the next run BEFORE the work: a slow or throwing
+                        # pass must not be retried on the very next block
+                        cls_next_t = now + cls_every_s
+                        try:
+                            t_cls = _time.perf_counter()
+                            cf = iq_features(iq[:cls_n], fs)
+                            cv = interpret(cf)
+                            cls_pub = {
+                                "modulation_class": cf.get("modulation_class"),
+                                "class_summary": cv.get("summary"),
+                                "readable": cv.get("readable"),
+                                "occupied_bw_khz": cf.get("occupied_bw_khz"),
+                                "symbol_rate_kbd": cf.get("symbol_rate_kbd"),
+                                "class_ts": now}
+                            if _time.perf_counter() - t_cls > cls_budget_s:
+                                # it ate into the block budget -> stretch the
+                                # interval (capped) rather than keep paying it
+                                cls_every_s = min(cls_every_s * 2.0, 30.0)
+                                cls_next_t = now + cls_every_s
+                        except Exception as e:  # noqa: BLE001
+                            cls_errs += 1
+                            if cls_errs == 1:  # first failure per stream, no spam
+                                log.warning("live classify error on %s: %s: %s",
+                                            msrc, type(e).__name__, e)
+                            cls_pub = None     # stale verdicts are worse than none
                     # live analyzer + scrolling waterfall from the WHOLE block.
                     # The client owns the scroll history: we ship the new rows +
                     # a monotonic seq. db == new_rows here so the JSON stays a
@@ -1504,18 +1559,21 @@ def create_app(db, cfg, demo=False) -> Flask:
                         nf_ema = nf if nf_ema is None else (1.0 - fl_ema) * nf_ema + fl_ema * nf
                         wf_seq += 1
                         rows_list = db.round(1).tolist()
+                        dm = {
+                            "snr_db": (round(dstate.last_snr_db, 1)
+                                       if dstate.last_snr_db is not None else None),
+                            "gated": bool(dstate.gated),
+                            "agc_gain_db": round(20.0 * _np.log10(
+                                max(dstate.last_out_gain, 1e-6)), 1),
+                            "squelch_db": getattr(st.controller,
+                                                  "listen_squelch_snr_db", None)}
+                        if cls_pub:
+                            dm.update(cls_pub)     # what the signal IS, if we know
                         st.controller.listen_spectrum = {
                             "center_mhz": center_mhz, "mode": mode,
                             "ts": _time.time(), "seq": wf_seq,
                             "analyzer": {"freqs_mhz": af, "power_dbm": ap},
-                            "demod": {
-                                "snr_db": (round(dstate.last_snr_db, 1)
-                                           if dstate.last_snr_db is not None else None),
-                                "gated": bool(dstate.gated),
-                                "agc_gain_db": round(20.0 * _np.log10(
-                                    max(dstate.last_out_gain, 1e-6)), 1),
-                                "squelch_db": getattr(st.controller,
-                                                      "listen_squelch_snr_db", None)},
+                            "demod": dm,
                             "waterfall": {
                                 "freqs_mhz": [round((center_mhz * 1e6 + f) / 1e6, 4)
                                               for f in wf["freqs_hz"]],

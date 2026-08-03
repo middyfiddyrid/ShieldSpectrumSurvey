@@ -2912,6 +2912,7 @@ function resetMonitorMetrics() {
   App._sigHistoryT0 = 0;
   ["sm-peak", "sm-mean", "sm-snr", "sm-floor"].forEach(id => { if ($(id)) $(id).textContent = "—"; });
   const dm = $("sm-demod"); if (dm) dm.textContent = "";
+  const ic = $("insp-class"); if (ic) ic.style.display = "none";   // last stream's verdict is not this one's
   const fill = $("sm-bar-fill"); if (fill) fill.style.width = "0%";
   const dot = $("sm-peak-dot"); if (dot) dot.style.display = "none";
   const hc = $("insp-history");
@@ -2974,10 +2975,68 @@ function computeMeterStats(analyzer, centerMhz, demodMhz, mode) {
   return { peak: peakHold, mean, floor, snr, peakIdx, peakFreq: fr[peakIdx], rawPeak: peak };
 }
 
+// Internal class enums -> what a client-facing operator is actually told. The
+// raw names (analog_voice / ofdm_wideband / ...) are the sigidwiki class tags and
+// must never be the thing on screen. Each label states the CLASS, not the device.
+const CLASS_LABEL = {
+  analog_voice: "Narrowband analog carrier (voice class)",
+  analog_video: "Wideband analog FM (video / camera class)",
+  fsk: "FSK data link",
+  ook: "On-off keyed / bursty transmitter",
+  ofdm_wideband: "Wideband digital (Wi-Fi / cellular class)",
+  continuous_digital: "Continuous digital carrier",
+  noise_floor: "Noise floor",
+  unknown: "Unidentified modulation",
+};
+// ...and the only question the operator asked by pressing LISTEN: can this
+// signal EVER come out as audio? Anything that can't must say so outright.
+const AUDIO_VERDICT = {
+  listen: "audio is possible — listen and judge by ear",
+  decoded: "audio is possible — listen and judge by ear",
+  maybe_decode: "LISTENING WILL NOT PRODUCE AUDIO — this is data; ANALYZE decodes it",
+  encrypted: "LISTENING WILL NOT PRODUCE AUDIO — digital, content is not readable",
+  identify_only: "LISTENING MAY PRODUCE ONLY HASH — modulation not identified",
+  none: "nothing to hear — no emitter in this channel",
+};
+
+function updateListenClass(d) {
+  // "WHAT AM I LISTENING TO", from the live class the server publishes with the
+  // demod telemetry (identify.iq_features + decode_router.interpret — the same
+  // pair ANALYZE uses, throttled to a couple of seconds). NFM is the default
+  // mode outside broadcast, so without this the operator hears hash off a data
+  // link with nothing on screen to explain it — a whole lab session was spent
+  // that way. Stated in plain words, and never more certainly than measured.
+  const el = $("insp-class");
+  if (!el) return;
+  const cls = d && d.modulation_class;
+  if (!cls) { el.style.display = "none"; return; }
+  const col = READABLE_COLOR[d.readable] || "#8fa0b8";
+  const bits = [];
+  if (d.occupied_bw_khz) bits.push("width ~" + d.occupied_bw_khz + " kHz");
+  if (d.symbol_rate_kbd) bits.push("~" + d.symbol_rate_kbd + " kBd");
+  el.style.display = "block";        // the stylesheet hides it until there IS a class
+  el.style.borderLeftColor = col;
+  const head = $("insp-class-head"), why = $("insp-class-why");
+  if (head) {
+    head.style.color = col;
+    head.textContent = (CLASS_LABEL[cls] || cls) +
+      (AUDIO_VERDICT[d.readable] ? " · " + AUDIO_VERDICT[d.readable] : "");
+  }
+  if (why) {
+    // the summary is interpret()'s own hedged wording — kept verbatim, plus the
+    // standing caveat that this is a short live sample, not the full ANALYZE
+    why.textContent = (d.class_summary || "") +
+      (bits.length ? "  (" + bits.join(" · ") + ")" : "") +
+      "  Live sample — press ANALYZE for the full read.";
+  }
+}
+
 function updateDemodDiag(d) {
   // live demod-chain readout (from the backend `demod` telemetry): the channel-
   // isolated SNR, how hard the AGC is working, and a plain "why is it weak"
-  // verdict — front-end/antenna vs genuinely weak signal vs OK.
+  // verdict — front-end/antenna vs genuinely weak signal vs OK. The same object
+  // carries the live signal class, which leads (it answers a bigger question).
+  updateListenClass(d);
   const el = $("sm-demod");
   if (!el) return;
   if (!d || d.snr_db == null) { el.textContent = ""; return; }
@@ -3573,6 +3632,7 @@ function currentDemodBwHz() {
   if (m === "am") return 10000;
   if (m === "usb" || m === "lsb") return 3000;
   if (m === "cw") return 1000;
+  if (m === "video") return 250000;              // analog video is MHz-wide — never a 16 kHz channel
   return 16000;                                  // nfm + decode modes (pocsag/flex/ook/dtmf)
 }
 
@@ -3830,6 +3890,16 @@ function decodeMsgLine(proto, m) {
     return `${m.encoding || "?"} · ${m.n_bits || 0} bits · 0x${m.hex || ""} · ×${m.repeats || 1}` +
            (m.device_guess ? `  — ${m.device_guess}` : "");
   }
+  if (p.startsWith("ANALOG-VIDEO")) {
+    // A sync verdict, not content: lead with the standard + the timing that proves
+    // it, then the evidence/caveat lines the decoder wrote (never re-word them here).
+    const head = `${m.standard || "raster"} composite video sync · line ${(m.line_rate_hz || 0).toFixed(1)} Hz` +
+      (m.field_rate_hz ? ` · field ${m.field_rate_hz} Hz` : " · field rate unconfirmed") +
+      ` · sync ${m.sync_width_us} µs · confidence ${m.confidence}`;
+    const ev = (m.evidence || []).map(s => "   + " + s);
+    const cv = (m.caveats || []).map(s => "   ! " + s);
+    return [head].concat(ev, cv).join("\n");
+  }
   if (p === "DTMF") return `digits: ${m.digits || ""}`;
   if (p === "CW/MORSE" || p === "CW") return `${m.text || ""}${m.wpm ? `  (${m.wpm} wpm)` : ""}`;
   return JSON.stringify(m);
@@ -3857,6 +3927,17 @@ function renderAnalyze(j) {
               `${d.note ? " · " + esc(d.note) : ""}:</div>`);
     rows.push("<pre style='white-space:pre-wrap;background:#04070c;color:#cfd8e3;border:1px solid #26303d;padding:6px;margin:2px 0'>" +
       d.messages.map(m => esc(decodeMsgLine(d.protocol, m))).join("\n") + "</pre>");
+    // A recovered video still (survey/video.py Phase 2). The src is a data: URL
+    // this app generated, so there is nothing to escape — but keep the honest
+    // caption attached to it: a picture confirms a raster, not whose camera it is.
+    const still = d.messages.find(m => m && m.frame_png);
+    if (still) {
+      rows.push(`<div class="note" style="margin-top:2px">RECOVERED STILL — one field ` +
+        `(${still.frame_cols}×${still.frame_rows}), luminance only, contrast-stretched. ` +
+        `Evidence of a video raster; it does not by itself identify the camera or its owner.</div>`);
+      rows.push(`<img src="${still.frame_png}" alt="recovered video field" ` +
+        `style="max-width:100%;image-rendering:pixelated;border:1px solid #26303d;margin:2px 0">`);
+    }
   } else if (d && d.note) {
     rows.push(`<div class="note">${esc(d.note)}</div>`);
   }
@@ -3942,8 +4023,13 @@ function dissemRow(j) {
               `${mode ? " · " + mode.toUpperCase() : ""}${bwHz ? " · " + (bwHz / 1000) + " kHz" : ""}</button>`);
     btns.push(`<button class="btn" onclick="toggleRecord('audio')">● RECORD AUDIO EVIDENCE</button>`);
   }
-  if (r === "decoded" || r === "maybe_decode") {
-    const proto = (d && d.protocol) || (f.modulation_class === "fsk" ? "pocsag" : "ook");
+  // analog_video is offered a DECODE even though its verdict is "listen": it IS
+  // listenable (the buzz / an audio subcarrier), AND survey/video.py can confirm
+  // or deny NTSC/PAL sync on it. Both actions are real, so offer both.
+  if (r === "decoded" || r === "maybe_decode" || f.modulation_class === "analog_video") {
+    const proto = (d && d.protocol) ||
+      (f.modulation_class === "analog_video" ? "video"
+        : f.modulation_class === "fsk" ? "pocsag" : "ook");
     btns.push(`<button class="btn" onclick="dissemDecode('${esc(proto.toLowerCase())}')">⟲ DECODE · ${esc(proto.toUpperCase())}</button>`);
     btns.push(`<button class="btn" onclick="toggleRecord('iq')">⦿ IQ EVIDENCE</button>`);
   }
@@ -3970,9 +4056,16 @@ function dissemListen() {
   if (f.occupied_bw_khz) setDemodBw(nearestBwStep(f.occupied_bw_khz * 1000));
 }
 
-// Re-run the fused analyze locked to a decode protocol (pocsag/ook/dtmf/cw).
+// Re-run the fused analyze locked to a decode protocol (pocsag/flex/ook/video/
+// dtmf/cw). The router reports PROTOCOL labels ("ANALOG-VIDEO", "OOK/FSK-DEVICE",
+// "CW/MORSE") while the <select> carries MODE keys — map the ones that differ, or
+// the assignment silently no-ops and the re-analyze runs in the old mode.
 function dissemDecode(proto) {
-  if ($("insp-mode")) $("insp-mode").value = proto;
+  const k = String(proto || "").toLowerCase();
+  const mode = k.startsWith("analog-video") ? "video"
+    : k.startsWith("ook") ? "ook"
+      : k.startsWith("cw") ? "cw" : k;
+  if ($("insp-mode")) $("insp-mode").value = mode;
   analyzeSignal();
 }
 

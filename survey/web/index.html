@@ -297,6 +297,12 @@ body:not(.single-rx) nav .step.single-only { display:none; }
 #insp-tuned .it-lab { font-size:10px; letter-spacing:.6px; color:var(--dim); }
 #insp-tuned b { font-size:17px; color:var(--green); font-variant-numeric:tabular-nums; }
 #insp-tuned .it-band { font-size:11px; color:var(--muted); }
+/* what that signal IS — and whether listening can ever produce audio. Hidden
+   until the live stream has actually classified something (JS sets display). */
+#insp-class { display:none; margin:0 0 2px; padding:5px 9px; background:#04070c;
+  border:1px solid #26303d; border-left:3px solid #6b7b90; border-radius:3px; }
+#insp-class .ic-head { font-size:13px; font-weight:bold; }
+#insp-class .ic-why { display:block; margin-top:2px; }
 /* verification rundown — the ordered "how we know what this is" checklist */
 #sl-rundown { display:flex; flex-direction:column; gap:1px; border:1px solid var(--line);
   border-radius:3px; overflow:hidden; }
@@ -764,7 +770,7 @@ body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid va
       <span id="insp-live-badge" class="pill" style="margin-left:4px;color:#6b7b90">○ IDLE</span>
       <label class="note" for="insp-mode">Mode</label>
       <select id="insp-mode">
-        <option value="nfm">NFM</option><option value="wfm">WFM</option><option value="am">AM</option><option value="usb">USB</option><option value="lsb">LSB</option><option value="cw">CW</option><option value="pocsag">POCSAG (decode)</option><option value="flex">FLEX (decode)</option><option value="ook">OOK/FSK device (decode)</option><option value="dtmf">DTMF (decode)</option>
+        <option value="nfm">NFM</option><option value="wfm">WFM</option><option value="am">AM</option><option value="usb">USB</option><option value="lsb">LSB</option><option value="cw">CW</option><option value="pocsag">POCSAG (decode)</option><option value="flex">FLEX (decode)</option><option value="ook">OOK/FSK device (decode)</option><option value="video">Analog video NTSC/PAL (decode)</option><option value="dtmf">DTMF (decode)</option>
       </select>
       <span class="ctl-sep"></span>
       <label class="note" title="step through the hunt list of unknown signals">hunt</label>
@@ -834,6 +840,11 @@ body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid va
          told the frequency. -->
     <div id="insp-tuned"><span class="it-lab">LISTENING TO</span>
       <b id="insp-tuned-f">—</b><span class="it-band" id="insp-tuned-band"></span></div>
+    <!-- ...and WHAT that is. Same classifier as ANALYZE (identify features ->
+         interpret verdict), refreshed off the live stream every couple of
+         seconds, so a data link says so instead of serving unexplained hash. -->
+    <div id="insp-class"><span class="ic-head" id="insp-class-head"></span>
+      <span class="ic-why note" id="insp-class-why"></span></div>
     <div class="note">LIVE ANALYZER — hover to read a frequency, click to tune the demodulator there. Yellow dot = peak in the filter passband; trace uses hang-and-decay smoothing (SDR Console style).</div>
     <canvas id="insp-analyzer" width="660" height="170" style="width:100%;height:170px;display:block;background:#04070c;border:1px solid #26303d"></canvas>
     <div class="note" style="margin-top:6px">SIGNAL HISTORY <span class="tag">peak strength · last 60 s while listening</span></div>

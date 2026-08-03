@@ -119,6 +119,16 @@ DEFAULTS = {
         # fuzz — the sm-demod diagnostic still shows SNR + "why muted". Set null
         # (None) to disable and hear raw noise.
         "listen_squelch_snr_db": 5.0,
+        # LIVE signal class (identify.iq_features + decode_router.interpret run
+        # on the audio stream, so LISTEN says WHAT the signal is and whether it
+        # can ever produce audio). The classifier is O(n^2) in the slice length —
+        # ~20 ms at 8k samples, ~500 ms at 12k — and this runs inside the
+        # real-time audio loop, so keep the slice small and the interval long.
+        # A pass that overruns listen_classify_budget_s doubles its own interval
+        # (capped at 30 s). Set listen_classify_samples 0 to switch it off.
+        "listen_classify_samples": 8192,       # head-of-block IQ slice classified
+        "listen_classify_interval_s": 2.0,     # min wall-clock gap between passes
+        "listen_classify_budget_s": 0.05,      # over this, back the interval off
         # ~approximate~ dBFS -> dBm calibration offset. NOT lab-grade; lean on
         # baseline-delta detection. Tune per-unit in calibration mode.
         "cal_offset_db": -30.0,
