@@ -31,8 +31,10 @@ Chain implemented here
          -> NID: NAC(12) + DUID(4) under BCH(63,16,23) + parity
          -> per-DUID payload:
               HDU    : Golay(18,6,8) hexbits -> RS(36,20,17) -> MI/MFID/ALGID/KID/TGID
-              LDU1   : 9 IMBE voice frames + Hamming(10,6,3) -> RS(24,12,13) -> LCW
-              LDU2   : 9 IMBE voice frames + Hamming(10,6,3) -> RS(24,16,9)  -> ESW
+              LDU1   : 9 IMBE voice frames (de-interleaved per Table 5-1)
+                       + Hamming(10,6,3) -> RS(24,12,13) -> LCW
+              LDU2   : 9 IMBE voice frames (de-interleaved per Table 5-1)
+                       + Hamming(10,6,3) -> RS(24,16,9)  -> ESW
               TDU    : terminator, no payload
               TDULC  : Golay(18,6,8) hexbits -> RS(24,12,13) -> LCW
               TSDU   : 1/2-rate trellis -> TSBK(96) + CRC-16 -> channel grants
@@ -42,39 +44,113 @@ Chain implemented here
 VALIDATION STATUS — read this before quoting a result in a report
 -----------------------------------------------------------------
 NOTHING IN THIS MODULE HAS BEEN VALIDATED AGAINST A REAL OFF-AIR P25 SIGNAL.
-Every claim below is from synthetic frames built by this module's own encoder and
-round-tripped through the decoder (tests/test_p25.py) — including a full
+That has not changed and no test below changes it.
+
+What HAS changed is the kind of evidence behind parts of it. Most of the
+behavioural testing is still synthetic frames built by this module's own encoder
+and round-tripped through the decoder (tests/test_p25.py) — including a full
 synthetic chain (P25 frames -> c4fm.encode_c4fm() IQ -> c4fm symbol recovery ->
 this frame layer, with noise, a carrier offset, status symbols and inverted
 polarity). That is a much longer chain than a bare unit test, but it is still
 OUR waveform decoded by OUR receiver: it proves the layers agree, not that they
-agree with a Motorola or Harris radio. Specifically:
+agree with a Motorola or Harris radio. The frame GEOMETRY, the voice interleave,
+the short block codes and the Reed-Solomon generators, however, are no longer in
+that category: they are pinned directly to the published tables in
+TIA-102.BAAA-A and now fail if this module drifts from the standard, whether or
+not the encoder drifts with it.
+
+Read the two lists below with that distinction in mind. Round-tripping through
+our own encoder is worth NOTHING on its own — a matched pair of bugs round-trips
+perfectly — so anything in the "anchored" list earns its place by agreeing with a
+source OUTSIDE this module, and anything that cannot be checked that way is in
+the "assumed" list no matter how many synthetic tests pass.
+
+PROVENANCE OF THE ANCHORED VALUES (this is a closed-source commercial product).
+Every table cited below was read from TIA-102.BAAA-A "Project 25 FDMA Common Air
+Interface", the published specification this module implements. No GPL source
+was consulted or copied: the interleave schedule and the generator matrices also
+exist in op25, SDRTrunk and DSD, all GPL, and taking them from there would have
+relicensed this product. What is reproduced here are the functional constants an
+implementer needs — bit orderings and generator polynomials — not the standard's
+text; the document itself is TIA copyright and is neither vendored nor
+redistributed with the app. Contrast survey/imbe_tables.py, which ships mbelib's
+ISC-licensed tables and therefore carries an attribution obligation discharged
+in THIRD_PARTY_NOTICES.md. Nothing added here creates such an obligation.
+Specifically:
 
   Independently anchored (correct by construction, not by self-consistency):
     - Frame sync word 0x5575F5FF77FF is the published TIA-102 value.
+    - THE IMBE VOICE-FRAME INTERLEAVE is now implemented and is transcribed from
+      TIA-102.BAAA-A section 5.3.1, Table 5-1 ("Interleaving Schedule for Voice
+      Word"). It is not a round-trip claim: the same permutation is printed a
+      second time, symbol by symbol, in that document's sections 10.3 and 10.4
+      (the transmit-order annex) for all 18 voice frames of a superframe, and
+      the two tables agree entry for entry. The table is also checked to be a
+      true bijection over all 144 code-word bits, and to reproduce the design
+      property the standard states in prose — "the minimum separation between
+      any two bits of the same error correction code is 3 symbols" — which it
+      does, exactly 3 symbols (5 bits) for every one of c_0..c_7. Measured
+      consequence: any burst of 5 adjacent channel bits lands at most ONE error
+      in each code word, and any burst of 17 lands at most 3 in any Golay word
+      (its full correction capacity); un-de-interleaved, a burst of N puts all N
+      errors into a single code word. Voice bits handed to the vocoder are in
+      code-word order c_0..c_7, MSB-first, which is the input layout
+      survey/ambe.py documents.
+    - THE LDU FRAME GEOMETRY is likewise anchored, not invented: LDU_LAYOUT
+      (VC1, VC2, LC 1-4, VC3, LC 5-8, VC4, ... VC8, LSD, VC9) and the
+      status-symbol phase were derived mechanically from the section 10.3/10.4
+      transmit-order annex and match TIA-102.BAAA-A Figure 8-3 / 8-4: 840 data
+      symbols per LDU, a status symbol every 36th transmitted symbol at offset
+      35, 24 sync symbols, 32 NID symbols.
+    - The LC / ES hexbits are NOT bit-interleaved. Checked against the same
+      annex: each (10,6,3) short Hamming word is transmitted as its 6 info bits
+      MSB-first followed by its 4 parity bits, and consecutive words simply run
+      in order. The only "interleaving" the LC gets is being split into six
+      40-bit chunks spaced between the voice frames, which LDU_LAYOUT does.
     - BCH(63,16,23) generator is DERIVED here from the minimal polynomials of
       alpha^1..alpha^21 over GF(2^6) (x^6+x+1) — not copied from a table — and the
       64-entry codebook is checked to have minimum distance exactly 23.
-    - The extended Golay [24,12,8] used to build the shortened (18,6,8) has the
-      textbook weight distribution {0,8,12,16,24}; the shortened code is checked
-      to have minimum distance 8.
-    - RS(36,20,17) / RS(24,12,13) / RS(24,16,9) are standard narrow-sense RS over
-      GF(64) and are proven to correct their full t = 8 / 6 / 4 symbol errors.
+    - THE SHORT BLOCK CODES ARE NOW THE STANDARD'S OWN MATRICES, not merely
+      codes of the same parameters. The extended Golay [24,12,8] generator is
+      TIA-102.BAAA-A Table 5-3 (its first parity row IS g(x) = 6165 octal), the
+      (18,6,8) is derived from it by the section 5.7 rule and then checked
+      against Table 5-3's separately-printed (18,6,8) column, and the (10,6,3)
+      Hamming is Table 5-4. This matters more than it looks: the extended Golay
+      code is unique up to equivalence, so the previous locally-built matrices
+      had the correct weight distribution {0,8,12,16,24} and the correct minimum
+      distances 8 and 3 and passed every self-consistency test — while mapping
+      information onto DIFFERENT codewords than a real transmitter uses. Section
+      5.8 is explicit that the (10,6,3) shortening is deliberately not the
+      obvious one, "not just the left hand columns and top rows... to improve
+      the likelihood of error detection". Weight distribution and minimum
+      distance are still asserted, they are just no longer the only evidence.
+    - RS(36,20,17) / RS(24,12,13) / RS(24,16,9) are proven to correct their full
+      t = 8 / 6 / 4 symbol errors, AND all three generator polynomials now match
+      TIA-102.BAAA-A section 5.9 coefficient for coefficient (the standard prints
+      them outright, in octal). The field is the standard's a^6 + a + 1.
     - The LCW / ESW / HDU octet layouts are the published field orders.
 
-  ASSUMED, and the most likely thing to be wrong off-air:
-    - Reed-Solomon first-consecutive-root convention is taken as narrow-sense
-      (FCR = 1). If TIA uses a different FCR the RS layer will fail on real
-      frames (it will FAIL, not silently mis-report — every RS decode is verified
-      against its own syndromes before the payload is believed).
-    - The (10,6,3) shortened Hamming is built here as a mathematically equivalent
-      (10,6,3) code; the exact TIA parity-column ordering is not reproduced.
-    - The (18,6,8) shortening picks the low 6 information positions of the
-      extended Golay; TIA's choice of shortened coordinates may differ.
+  STILL ASSUMED — what to suspect first when this meets real traffic:
+    - (CLOSED) The Reed-Solomon first-consecutive-root convention used to head
+      this list as the largest open risk. Section 5.9 states it outright:
+      g(x) = (x + a)(x + a^2)...(x + a^R), i.e. narrow-sense, FCR = 1 — which is
+      what this module already used. Pinned by test vectors now, both as
+      generator coefficients and as a root check. Kept here, struck through
+      rather than deleted, so the risk register shows what was retired and why.
     - TDULC is parsed as RS(24,12,13) + Golay(18,6,8) with any trailing null
       padding ignored; the total TDULC frame length is not asserted anywhere.
     - The 1/2-rate trellis state table and the TSBK CRC-16 variant follow the
       widely-used open implementations, not a first-principles derivation.
+    - NOT OURS, BUT IT LANDS HERE: the de-interleaved 144 bits we hand over are
+      correct in ORDER, but what survey/ambe.py then does with the 88 recovered
+      information bits still uses that module's own field convention (it reads
+      b_0 as the first 8 bits of the 88). TIA-102.BABA section 7.1 does not
+      work that way — it puts only the SIX most significant bits of b_0 into
+      u_0(11..6) and scatters the rest by priority, so a real frame decoded
+      through the current convention yields a wrong pitch even when every FEC
+      check passes. Fixing that is survey/ambe.py's job, not this module's; see
+      the hand-off note in the report accompanying this change. Nothing in p25.py
+      depends on it — we stop at the bits.
 
 Consequence: an off-air capture may lock the sync and produce a clean NAC/DUID
 (those legs are anchored) while the LC/ES payload fails FEC. That is the expected
@@ -187,6 +263,149 @@ LDU_LAYOUT = (
     ("C", 40), ("V", 144), ("L", 32), ("V", 144),
 )
 LDU_PAYLOAD_BITS = sum(n for _, n in LDU_LAYOUT)     # 1568
+
+# ------------------------------------------- IMBE voice-frame transport interleave
+# TIA-102.BAAA-A section 5.3 builds each 144-bit voice code word from EIGHT code
+# words c_0..c_7: four (23,12,7) Golay, three (15,11,3) Hamming, and c_7 = u_7
+# riding bare. Section 5.3.1 then INTERLEAVES those 144 bits across the 72
+# transmitted dibit symbols so a fade cannot wipe out one code word — "in order
+# to resist fades". Without undoing that on receive, a real off-air frame hands
+# the vocoder a shuffled bag of bits and every Golay/Hamming decode fails.
+IMBE_CODEWORD_WIDTHS = (23, 23, 23, 23, 15, 15, 15, 7)   # c_0..c_7, sums to 144
+assert sum(IMBE_CODEWORD_WIDTHS) == VOICE_FRAME_BITS
+
+# TIA-102.BAAA-A Table 5-1, "Interleaving Schedule for Voice Word", transcribed
+# as (code word, bit index) for each transmitted symbol's Bit 1 (MSB) then Bit 0.
+# Bit index 22/14/6 is the MSB of its code word, bit 0 the LSB, per the standard's
+# own numbering. This table is INDEPENDENTLY CONFIRMED, entry for entry, by the
+# per-symbol transmit order listed in the same document's sections 10.3 and 10.4
+# for all 18 voice frames of a superframe — two physically separate tables in the
+# standard that agree exactly (tests/test_p25.py, TestVoiceInterleave).
+VOICE_INTERLEAVE_TABLE = (
+    (0, 22), (1, 21),   # symbol  0: c_0(22) c_1(21)
+    (2, 20), (3, 19),   # symbol  1: c_2(20) c_3(19)
+    (4, 10), (5,  1),   # symbol  2: c_4(10) c_5(1)
+    (1, 20), (0, 21),   # symbol  3: c_1(20) c_0(21)
+    (3, 18), (2, 19),   # symbol  4: c_3(18) c_2(19)
+    (5,  0), (4,  9),   # symbol  5: c_5(0) c_4(9)
+    (0, 20), (1, 19),   # symbol  6: c_0(20) c_1(19)
+    (2, 18), (3, 17),   # symbol  7: c_2(18) c_3(17)
+    (4,  8), (6, 14),   # symbol  8: c_4(8) c_6(14)
+    (1, 18), (0, 19),   # symbol  9: c_1(18) c_0(19)
+    (3, 16), (2, 17),   # symbol 10: c_3(16) c_2(17)
+    (6, 13), (4,  7),   # symbol 11: c_6(13) c_4(7)
+    (0, 18), (1, 17),   # symbol 12: c_0(18) c_1(17)
+    (2, 16), (3, 15),   # symbol 13: c_2(16) c_3(15)
+    (4,  6), (6, 12),   # symbol 14: c_4(6) c_6(12)
+    (1, 16), (0, 17),   # symbol 15: c_1(16) c_0(17)
+    (3, 14), (2, 15),   # symbol 16: c_3(14) c_2(15)
+    (6, 11), (4,  5),   # symbol 17: c_6(11) c_4(5)
+    (0, 16), (1, 15),   # symbol 18: c_0(16) c_1(15)
+    (2, 14), (3, 13),   # symbol 19: c_2(14) c_3(13)
+    (4,  4), (6, 10),   # symbol 20: c_4(4) c_6(10)
+    (1, 14), (0, 15),   # symbol 21: c_1(14) c_0(15)
+    (3, 12), (2, 13),   # symbol 22: c_3(12) c_2(13)
+    (6,  9), (4,  3),   # symbol 23: c_6(9) c_4(3)
+    (0, 14), (1, 13),   # symbol 24: c_0(14) c_1(13)
+    (2, 12), (3, 11),   # symbol 25: c_2(12) c_3(11)
+    (4,  2), (6,  8),   # symbol 26: c_4(2) c_6(8)
+    (1, 12), (0, 13),   # symbol 27: c_1(12) c_0(13)
+    (3, 10), (2, 11),   # symbol 28: c_3(10) c_2(11)
+    (6,  7), (4,  1),   # symbol 29: c_6(7) c_4(1)
+    (0, 12), (1, 11),   # symbol 30: c_0(12) c_1(11)
+    (2, 10), (3,  9),   # symbol 31: c_2(10) c_3(9)
+    (4,  0), (6,  6),   # symbol 32: c_4(0) c_6(6)
+    (1, 10), (0, 11),   # symbol 33: c_1(10) c_0(11)
+    (3,  8), (2,  9),   # symbol 34: c_3(8) c_2(9)
+    (6,  5), (5, 14),   # symbol 35: c_6(5) c_5(14)
+    (0, 10), (1,  9),   # symbol 36: c_0(10) c_1(9)
+    (2,  8), (3,  7),   # symbol 37: c_2(8) c_3(7)
+    (5, 13), (6,  4),   # symbol 38: c_5(13) c_6(4)
+    (1,  8), (0,  9),   # symbol 39: c_1(8) c_0(9)
+    (3,  6), (2,  7),   # symbol 40: c_3(6) c_2(7)
+    (6,  3), (5, 12),   # symbol 41: c_6(3) c_5(12)
+    (0,  8), (1,  7),   # symbol 42: c_0(8) c_1(7)
+    (2,  6), (3,  5),   # symbol 43: c_2(6) c_3(5)
+    (5, 11), (6,  2),   # symbol 44: c_5(11) c_6(2)
+    (1,  6), (0,  7),   # symbol 45: c_1(6) c_0(7)
+    (3,  4), (2,  5),   # symbol 46: c_3(4) c_2(5)
+    (6,  1), (5, 10),   # symbol 47: c_6(1) c_5(10)
+    (0,  6), (1,  5),   # symbol 48: c_0(6) c_1(5)
+    (2,  4), (3,  3),   # symbol 49: c_2(4) c_3(3)
+    (5,  9), (6,  0),   # symbol 50: c_5(9) c_6(0)
+    (1,  4), (0,  5),   # symbol 51: c_1(4) c_0(5)
+    (3,  2), (2,  3),   # symbol 52: c_3(2) c_2(3)
+    (7,  6), (5,  8),   # symbol 53: c_7(6) c_5(8)
+    (0,  4), (1,  3),   # symbol 54: c_0(4) c_1(3)
+    (2,  2), (3,  1),   # symbol 55: c_2(2) c_3(1)
+    (5,  7), (7,  5),   # symbol 56: c_5(7) c_7(5)
+    (1,  2), (0,  3),   # symbol 57: c_1(2) c_0(3)
+    (3,  0), (2,  1),   # symbol 58: c_3(0) c_2(1)
+    (7,  4), (5,  6),   # symbol 59: c_7(4) c_5(6)
+    (0,  2), (1,  1),   # symbol 60: c_0(2) c_1(1)
+    (2,  0), (4, 14),   # symbol 61: c_2(0) c_4(14)
+    (5,  5), (7,  3),   # symbol 62: c_5(5) c_7(3)
+    (1,  0), (0,  1),   # symbol 63: c_1(0) c_0(1)
+    (4, 13), (3, 22),   # symbol 64: c_4(13) c_3(22)
+    (7,  2), (5,  4),   # symbol 65: c_7(2) c_5(4)
+    (0,  0), (2, 22),   # symbol 66: c_0(0) c_2(22)
+    (3, 21), (4, 12),   # symbol 67: c_3(21) c_4(12)
+    (5,  3), (7,  1),   # symbol 68: c_5(3) c_7(1)
+    (2, 21), (1, 22),   # symbol 69: c_2(21) c_1(22)
+    (4, 11), (3, 20),   # symbol 70: c_4(11) c_3(20)
+    (7,  0), (5,  2),   # symbol 71: c_7(0) c_5(2)
+)
+
+
+def _build_voice_permutation():
+    """wire bit index -> position in the VECTOR-ORDERED 144-bit frame.
+
+    "Vector order" is c_0 then c_1 ... then c_7, each MSB-first — which is the
+    layout survey/ambe.py's unpack_imbe_frame() documents as its required input
+    ("Callers pass vector-ordered frame bits"). So this permutation IS the
+    contract between the two modules, and it is derived from the standard's
+    table rather than agreed informally between them."""
+    offsets, pos = [], 0
+    for w in IMBE_CODEWORD_WIDTHS:
+        offsets.append(pos)
+        pos += w
+    perm = np.empty(VOICE_FRAME_BITS, dtype=np.int64)
+    for wire, (cw, bit) in enumerate(VOICE_INTERLEAVE_TABLE):
+        # bit index counts DOWN from the code word MSB, per the standard
+        perm[wire] = offsets[cw] + (IMBE_CODEWORD_WIDTHS[cw] - 1 - bit)
+    if sorted(perm.tolist()) != list(range(VOICE_FRAME_BITS)):
+        raise AssertionError("voice interleave table is not a permutation")
+    return perm
+
+
+# VOICE_DEINTERLEAVE[w] = where wire bit w belongs in the vector-ordered frame.
+VOICE_DEINTERLEAVE = _build_voice_permutation()
+VOICE_DEINTERLEAVE.flags.writeable = False
+
+
+def deinterleave_voice_frame(bits144) -> np.ndarray:
+    """Received (wire-order) 144 voice bits -> vector order c_0..c_7, MSB-first.
+
+    This is the step that was missing. Our own encoder and decoder were
+    symmetric without it, so every synthetic round trip passed while a real
+    frame — which IS interleaved — would have failed every Golay and Hamming
+    decode in the vocoder."""
+    b = np.asarray(bits144, dtype=np.uint8).ravel()
+    if b.size != VOICE_FRAME_BITS:
+        raise ValueError(f"voice frame needs {VOICE_FRAME_BITS} bits, got {b.size}")
+    out = np.empty(VOICE_FRAME_BITS, dtype=np.uint8)
+    out[VOICE_DEINTERLEAVE] = b
+    return out
+
+
+def interleave_voice_frame(bits144) -> np.ndarray:
+    """Vector-ordered 144 voice bits -> wire order. Exact inverse of
+    deinterleave_voice_frame(); used by the synth encoder so the bits it puts on
+    the air are laid out the way a real transmitter lays them out."""
+    b = np.asarray(bits144, dtype=np.uint8).ravel()
+    if b.size != VOICE_FRAME_BITS:
+        raise ValueError(f"voice frame needs {VOICE_FRAME_BITS} bits, got {b.size}")
+    return b[VOICE_DEINTERLEAVE]
 
 
 # ---------------------------------------------------------------- dibit helpers
@@ -407,25 +626,40 @@ def decode_nid(nid64: int):
 
 
 # ------------------------------------------------- short block codes (64 words)
+# TIA-102.BAAA-A section 5.7, Table 5-3 "Golay Generator Matrices", the (24,12,8)
+# column. The standard prints each row as two octal groups — the 12-bit identity
+# half then the 12-bit parity half — so only the parity halves are needed here.
+# Row 1 is 6165 octal, which is g(x) = x^11+x^10+x^6+x^5+x^4+x^2+1 itself.
+#
+# This is NOT a "textbook" Golay matrix: the extended Golay code is unique up to
+# equivalence, so ANY correct generator gives weight distribution {0,8,12,16,24}
+# and passes every self-consistency check — while mapping information bits onto
+# DIFFERENT codewords. Only the transmitter's actual matrix decodes a real frame.
+GOLAY24_PARITY_ROWS = (0o6165, 0o3073, 0o7550, 0o3664, 0o1732, 0o6631,
+                       0o3315, 0o1547, 0o6706, 0o5227, 0o4476, 0o4353)
+
+
 def _extended_golay24_parity(data12: int) -> int:
     """12 information bits -> 12 parity bits of the extended binary Golay [24,12,8].
 
-    B is the textbook generator half; tests/test_p25.py pins the resulting weight
-    distribution at {0, 8, 12, 16, 24}, which uniquely identifies this code."""
-    b_rows = (0b110111000101, 0b101110001011, 0b011100010111, 0b111000101101,
-              0b110001011011, 0b100010110111, 0b000101101111, 0b001011011101,
-              0b010110111001, 0b101101110001, 0b011011100011, 0b111111111110)
+    Generator taken from TIA-102.BAAA-A Table 5-3. tests/test_p25.py pins both
+    the matrix itself and the resulting weight distribution {0, 8, 12, 16, 24}."""
     par = 0
     for i in range(12):
         if (data12 >> (11 - i)) & 1:
-            par ^= b_rows[i]
+            par ^= GOLAY24_PARITY_ROWS[i]
     return par
 
 
 def _build_golay18() -> list:
-    """(18,6,8) shortened Golay: the [24,12,8] codewords whose top 6 information
-    bits are zero, with those 6 all-zero coordinates deleted. 64 codewords, min
-    distance 8 (asserted in tests)."""
+    """(18,6,8) shortened Golay, exactly as TIA-102.BAAA-A section 5.7 defines it:
+    "formed by deleting the left most 6 bits from the (24,12,8) extended Golay
+    code" — i.e. the [24,12,8] codewords whose top 6 information bits are zero,
+    with those 6 all-zero coordinates removed. 64 codewords, min distance 8.
+
+    Checked in tests against Table 5-3's own (18,6,8) column, which the standard
+    prints separately: the six rows there are the last six rows of the (24,12,8)
+    matrix truncated to 18 bits, and this construction reproduces them."""
     out = []
     for d6 in range(64):
         full = (d6 << 12) | _extended_golay24_parity(d6)
@@ -433,18 +667,27 @@ def _build_golay18() -> list:
     return out
 
 
+# TIA-102.BAAA-A section 5.8, Table 5-4, the (10,6,3) shortened Hamming column:
+# the 4 parity bits generated by each of the 6 information bits, MSB row first.
+# The standard is explicit that this shortening is NOT the obvious one — "The
+# shortened code is determined by deleting particular rows and columns from the
+# standard Hamming code, not just the left hand columns and top rows. The reason
+# for this is to improve the likelihood of error detection for the shortened
+# code." So a locally-invented (10,6,3) of the same minimum distance is a
+# different code and mis-maps every hexbit off-air.
+HAMMING10_PARITY_ROWS = (0b1110, 0b1101, 0b1011, 0b0111, 0b0011, 0b1100)
+
+
 def _build_hamming10() -> list:
-    """(10,6,3) shortened Hamming, built as H = [P | I4] with six distinct
-    weight->=2 parity columns — which forces every pair of H columns to be
-    distinct and non-zero, hence d = 3. Mathematically a valid (10,6,3) code;
-    TIA's exact column ordering is NOT reproduced (see the module docstring)."""
-    cols = (0b0011, 0b0101, 0b0110, 0b1001, 0b1010, 0b1100)
+    """(10,6,3) shortened Hamming from TIA-102.BAAA-A Table 5-4, systematic:
+    6 information bits MSB-first, then the 4 parity bits — which is also the
+    order the standard's transmit-order annex puts them on the air."""
     out = []
     for d6 in range(64):
         par = 0
         for i in range(6):
             if (d6 >> (5 - i)) & 1:
-                par ^= cols[i]
+                par ^= HAMMING10_PARITY_ROWS[i]
         out.append((d6 << 4) | par)
     return out
 
@@ -847,13 +1090,20 @@ def _data_dibits(dibits, sync_pos: int, count: int, status: bool,
 
 # ---------------------------------------------------------------- payload decode
 def _split_ldu(payload_bits):
-    """LDU payload bits -> (nine 144-bit voice frames, 240 LC/ES bits, 32 LSD bits)."""
+    """LDU payload bits -> (nine 144-bit voice frames, 240 LC/ES bits, 32 LSD bits).
+
+    Voice frames come back DE-INTERLEAVED, i.e. in code-word order c_0..c_7 —
+    the layout the vocoder needs. A frame that is short (truncated capture) is
+    passed through untouched rather than zero-padded, so it stays the wrong
+    length and downstream consumers skip it instead of decoding padding."""
     voice, ctrl, lsd, pos = [], [], [], 0
     for kind, nbits in LDU_LAYOUT:
         chunk = payload_bits[pos:pos + nbits]
         pos += nbits
         if kind == "V":
-            voice.append(np.asarray(chunk, dtype=np.uint8))
+            vf = np.asarray(chunk, dtype=np.uint8)
+            voice.append(deinterleave_voice_frame(vf)
+                         if vf.size == VOICE_FRAME_BITS else vf)
         elif kind == "C":
             ctrl.extend(int(b) for b in chunk)
         else:
@@ -881,7 +1131,9 @@ def _decode_payload(duid: int, payload_bits, keep_voice: bool) -> dict:
         voice, ctrl, lsd = _split_ldu(bits[:LDU_PAYLOAD_BITS])
         if keep_voice:
             # Handover point for the vocoder (survey/ambe.py). We deliberately
-            # stop here: these are FEC-protected IMBE frames, not audio.
+            # stop here: these are FEC-protected IMBE frames, not audio. They
+            # ARE de-interleaved — vector order c_0..c_7, MSB-first, which is
+            # exactly what ambe.unpack_imbe_frame() asks its callers for.
             out["voice_bits"] = voice
         out["voice_frame_count"] = len(voice)
         out["lsd_bits"] = lsd
@@ -1367,7 +1619,14 @@ def encode_frame_dibits(duid: int, nac: int, *, lc_bits=None, es_bits=None,
     Shares every FEC routine with the decoder — Golay/Hamming codebooks, the RS
     generator and the BCH generator — so a wrong polynomial, a wrong field
     ordering or a wrong shortening fails loudly in tests/test_p25.py rather than
-    round-tripping through matched bugs at the top level only."""
+    round-tripping through matched bugs at the top level only.
+
+    `voice` frames are given in VECTOR order (c_0..c_7, MSB-first) and are
+    interleaved onto the wire here, so the dibits this returns are laid out the
+    way a real transmitter lays them out. Note that sharing the permutation with
+    the decoder is exactly the kind of symmetry that proves nothing on its own —
+    the interleave is pinned against the standard's table in tests/test_p25.py,
+    not against this function."""
     bits = _int_to_bits(FRAME_SYNC, FRAME_SYNC_BITS)
     bits += _int_to_bits(nid_encode(nac, duid), NID_BITS)
 
@@ -1392,9 +1651,11 @@ def encode_frame_dibits(duid: int, nac: int, *, lc_bits=None, es_bits=None,
         vi = ci = 0
         for kind, nbits in LDU_LAYOUT:
             if kind == "V":
+                # `voice` is supplied in VECTOR order (c_0..c_7); the transmitter
+                # interleaves it onto the air per TIA-102.BAAA-A Table 5-1.
                 chunk = list(vframes[vi])[:nbits]
                 chunk += [0] * (nbits - len(chunk))
-                bits += chunk
+                bits += [int(b) for b in interleave_voice_frame(chunk)]
                 vi += 1
             elif kind == "C":
                 bits += ctrl[ci:ci + nbits]

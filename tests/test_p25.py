@@ -782,6 +782,543 @@ class TestIQEntryPoint(unittest.TestCase):
         self.assertEqual(r["calls"][0]["tgid"], TGID)
 
 
+# --------------------------------------------------------------------------
+# TIA-102.BAAA-A voice interleave — SECOND SOURCE.
+#
+# survey/p25.py transcribes the permutation from section 5.3.1, Table 5-1
+# ("Interleaving Schedule for Voice Word"). What follows is the SAME permutation
+# taken from a physically different table in the same standard: the transmit-order
+# annex, sections 10.3 and 10.4, which lists every symbol of LDU1 and LDU2 one at
+# a time. All 18 voice frames of a superframe are listed there and all 18 carry
+# this identical schedule. Two independent tables agreeing entry-for-entry is the
+# closest thing to external ground truth available without an off-air capture.
+#
+# Read as: 72 transmitted symbols in order, each "<Bit 1 label> <Bit 0 label>".
+_ANNEX_ROWS = (
+    "c_0(22) c_1(21)  c_2(20) c_3(19)  c_4(10) c_5(1)",
+    "c_1(20) c_0(21)  c_3(18) c_2(19)  c_5(0) c_4(9)",
+    "c_0(20) c_1(19)  c_2(18) c_3(17)  c_4(8) c_6(14)",
+    "c_1(18) c_0(19)  c_3(16) c_2(17)  c_6(13) c_4(7)",
+    "c_0(18) c_1(17)  c_2(16) c_3(15)  c_4(6) c_6(12)",
+    "c_1(16) c_0(17)  c_3(14) c_2(15)  c_6(11) c_4(5)",
+    "c_0(16) c_1(15)  c_2(14) c_3(13)  c_4(4) c_6(10)",
+    "c_1(14) c_0(15)  c_3(12) c_2(13)  c_6(9) c_4(3)",
+    "c_0(14) c_1(13)  c_2(12) c_3(11)  c_4(2) c_6(8)",
+    "c_1(12) c_0(13)  c_3(10) c_2(11)  c_6(7) c_4(1)",
+    "c_0(12) c_1(11)  c_2(10) c_3(9)  c_4(0) c_6(6)",
+    "c_1(10) c_0(11)  c_3(8) c_2(9)  c_6(5) c_5(14)",
+    "c_0(10) c_1(9)  c_2(8) c_3(7)  c_5(13) c_6(4)",
+    "c_1(8) c_0(9)  c_3(6) c_2(7)  c_6(3) c_5(12)",
+    "c_0(8) c_1(7)  c_2(6) c_3(5)  c_5(11) c_6(2)",
+    "c_1(6) c_0(7)  c_3(4) c_2(5)  c_6(1) c_5(10)",
+    "c_0(6) c_1(5)  c_2(4) c_3(3)  c_5(9) c_6(0)",
+    "c_1(4) c_0(5)  c_3(2) c_2(3)  c_7(6) c_5(8)",
+    "c_0(4) c_1(3)  c_2(2) c_3(1)  c_5(7) c_7(5)",
+    "c_1(2) c_0(3)  c_3(0) c_2(1)  c_7(4) c_5(6)",
+    "c_0(2) c_1(1)  c_2(0) c_4(14)  c_5(5) c_7(3)",
+    "c_1(0) c_0(1)  c_4(13) c_3(22)  c_7(2) c_5(4)",
+    "c_0(0) c_2(22)  c_3(21) c_4(12)  c_5(3) c_7(1)",
+    "c_2(21) c_1(22)  c_4(11) c_3(20)  c_7(0) c_5(2)",
+)
+
+
+def _annex_labels():
+    """The annex rows -> 144 (code word, bit index) pairs in transmitted order."""
+    import re
+    out = []
+    for row in _ANNEX_ROWS:
+        for lbl in row.split():
+            m = re.fullmatch(r"c_(\d)\((\d+)\)", lbl)
+            assert m, f"bad label {lbl!r}"
+            out.append((int(m.group(1)), int(m.group(2))))
+    assert len(out) == 144
+    return out
+
+
+def _reference_permutation():
+    """Wire index -> vector-order index, built HERE from the annex labels.
+
+    Deliberately a second implementation, written from the standard's own
+    numbering rather than by calling anything in survey/p25.py, so it can be used
+    to check p25 without asking p25 to check itself."""
+    widths = (23, 23, 23, 23, 15, 15, 15, 7)
+    offsets, pos = [], 0
+    for w in widths:
+        offsets.append(pos)
+        pos += w
+    perm = [0] * 144
+    for wire, (cw, bit) in enumerate(_annex_labels()):
+        perm[wire] = offsets[cw] + (widths[cw] - 1 - bit)
+    return perm
+
+
+def _reference_interleave(vector_bits):
+    """Vector-ordered 144 bits -> wire order, using only the reference table."""
+    perm = _reference_permutation()
+    return [int(vector_bits[perm[w]]) for w in range(144)]
+
+
+def _reference_deinterleave(wire_bits):
+    """Wire-order 144 bits -> vector order, using only the reference table."""
+    perm = _reference_permutation()
+    out = [0] * 144
+    for w in range(144):
+        out[perm[w]] = int(wire_bits[w])
+    return out
+
+
+class TestVoiceInterleave(unittest.TestCase):
+    """The transport de-interleave — TIA-102.BAAA-A section 5.3.1.
+
+    This is the shortfall that a symmetric round trip physically cannot catch:
+    our encoder and our decoder agreed with each other while both disagreed with
+    every real transmitter. So none of these tests is a round trip through
+    p25.encode_frame_dibits(). Each one measures the permutation against the
+    standard, against a second implementation written here, or against a
+    structural property that only the correct table has."""
+
+    # ---- ground truth ----------------------------------------------------
+    def test_table_matches_the_standards_second_table(self):
+        """Table 5-1 (what p25.py transcribes) == annex 10.3/10.4 (transcribed
+        here). A single-entry transposition in either copy fails this."""
+        self.assertEqual(list(p25.VOICE_INTERLEAVE_TABLE), _annex_labels())
+
+    def test_permutation_matches_the_reference_implementation(self):
+        self.assertEqual(list(p25.VOICE_DEINTERLEAVE), _reference_permutation())
+
+    def test_code_word_widths_are_the_standards(self):
+        # 4x(23,12,7) Golay + 3x(15,11,3) Hamming + 7 bare = 144.
+        self.assertEqual(p25.IMBE_CODEWORD_WIDTHS,
+                         (23, 23, 23, 23, 15, 15, 15, 7))
+        self.assertEqual(sum(p25.IMBE_CODEWORD_WIDTHS), p25.VOICE_FRAME_BITS)
+
+    # ---- it is a permutation, and a NON-TRIVIAL one ----------------------
+    def test_is_a_bijection(self):
+        perm = list(p25.VOICE_DEINTERLEAVE)
+        self.assertEqual(len(perm), 144)
+        self.assertEqual(sorted(perm), list(range(144)),
+                         "de-interleave is not a bijection — bits are being "
+                         "dropped or duplicated")
+
+    def test_is_not_the_identity(self):
+        """Guards the failure mode where someone 'implements' the interleave as
+        a no-op and every symmetric test still passes."""
+        self.assertNotEqual(list(p25.VOICE_DEINTERLEAVE), list(range(144)))
+        moved = sum(1 for i, v in enumerate(p25.VOICE_DEINTERLEAVE) if i != v)
+        self.assertGreater(moved, 130, "almost nothing actually moves")
+
+    def test_every_code_word_bit_appears_exactly_once(self):
+        seen = {}
+        for cw, bit in p25.VOICE_INTERLEAVE_TABLE:
+            self.assertLess(bit, p25.IMBE_CODEWORD_WIDTHS[cw],
+                            f"c_{cw}({bit}) is out of range for its code word")
+            self.assertNotIn((cw, bit), seen, f"c_{cw}({bit}) transmitted twice")
+            seen[(cw, bit)] = True
+        self.assertEqual(len(seen), 144)
+        for cw, width in enumerate(p25.IMBE_CODEWORD_WIDTHS):
+            got = sum(1 for c, _ in seen if c == cw)
+            self.assertEqual(got, width, f"c_{cw} has {got} bits, expected {width}")
+
+    def test_interleave_and_deinterleave_are_true_inverses(self):
+        rng = np.random.default_rng(7)
+        for _ in range(50):
+            v = rng.integers(0, 2, 144).astype(np.uint8)
+            wire = p25.interleave_voice_frame(v)
+            self.assertEqual(list(p25.deinterleave_voice_frame(wire)), list(v))
+
+    def test_wrong_length_is_rejected(self):
+        for n in (0, 88, 143, 145):
+            with self.assertRaises(ValueError):
+                p25.deinterleave_voice_frame(np.zeros(n, dtype=np.uint8))
+            with self.assertRaises(ValueError):
+                p25.interleave_voice_frame(np.zeros(n, dtype=np.uint8))
+
+    # ---- the SEPARATION property: the entire point of interleaving -------
+    def test_minimum_separation_is_three_symbols(self):
+        """TIA-102.BAAA-A states the design property in prose: 'The minimum
+        separation between any two bits of the same error correction code is 3
+        symbols.' Reproducing a stated property is real evidence — a mis-copied
+        table would almost certainly break it."""
+        where = {}
+        for wire, (cw, _) in enumerate(p25.VOICE_INTERLEAVE_TABLE):
+            where.setdefault(cw, []).append(wire)
+        for cw, wires in sorted(where.items()):
+            gaps_sym = [(b // 2) - (a // 2) for a, b in zip(wires, wires[1:])]
+            gaps_bit = [b - a for a, b in zip(wires, wires[1:])]
+            self.assertEqual(min(gaps_sym), 3,
+                             f"c_{cw}: min symbol separation {min(gaps_sym)}, "
+                             "the standard says 3")
+            self.assertEqual(min(gaps_bit), 5, f"c_{cw}: min bit separation")
+
+    def test_a_burst_of_channel_errors_is_spread_across_code_words(self):
+        """The measurable payoff, and the asymmetric part: compare what a burst
+        does WITH the de-interleave against what it does WITHOUT it.
+
+        Golay(23,12,7) corrects 3 bit errors, Hamming(15,11,3) corrects 1. A
+        contiguous fade on the wire must not exceed those budgets."""
+        owner = [cw for cw, _ in p25.VOICE_INTERLEAVE_TABLE]
+
+        def worst(burst, codes):
+            return max(max([0] + [sum(1 for t in range(s, s + burst)
+                                      if owner[t] == c) for c in codes])
+                       for s in range(0, 144 - burst + 1))
+
+        golay, hamming = range(4), range(4, 7)
+        # Every protected code word survives any burst up to 5 bits: at most one
+        # error each, which even the Hamming words correct.
+        self.assertEqual(worst(5, range(7)), 1)
+        # All four Golay words still correct a burst as long as 17 bits.
+        self.assertEqual(worst(17, golay), 3)
+        self.assertGreater(worst(18, golay), 3)      # and 18 is genuinely too far
+        # Hamming words (t=1) run out at 6 — the honest limit, asserted not hidden.
+        self.assertEqual(worst(5, hamming), 1)
+        self.assertEqual(worst(6, hamming), 2)
+
+        # WITHOUT the de-interleave every one of those bits belongs to the same
+        # code word, so the identical fade is fatal. This is the whole point.
+        for burst in (6, 12, 17):
+            flat = [min(burst, 23)]
+            self.assertGreater(flat[0], worst(burst, golay),
+                               "de-interleaving is not actually spreading errors")
+        self.assertEqual(min(17, 23), 17)            # un-interleaved: 17 in one word
+        self.assertEqual(worst(17, golay), 3)        # interleaved: 3
+
+    # ---- asymmetric: each side checked against the reference, not each other
+    def test_externally_interleaved_frames_deinterleave_to_the_original(self):
+        """Apply a KNOWN interleave (built here from the standard's labels) to a
+        frame, then require p25 to recover it. p25's own encoder is never called.
+
+        144 one-hot probes localise a fault to a single bit position rather than
+        just saying 'something moved'."""
+        for pos in range(144):
+            vector = np.zeros(144, dtype=np.uint8)
+            vector[pos] = 1
+            wire = _reference_interleave(vector)
+            got = p25.deinterleave_voice_frame(np.array(wire, dtype=np.uint8))
+            self.assertEqual(list(got), list(vector),
+                             f"bit at vector position {pos} was not recovered")
+
+    def test_reference_deinterleave_agrees_on_random_frames(self):
+        rng = np.random.default_rng(11)
+        for _ in range(40):
+            wire = rng.integers(0, 2, 144).astype(np.uint8)
+            self.assertEqual(list(p25.deinterleave_voice_frame(wire)),
+                             _reference_deinterleave(wire))
+            vector = rng.integers(0, 2, 144).astype(np.uint8)
+            self.assertEqual(list(p25.interleave_voice_frame(vector)),
+                             _reference_interleave(vector))
+
+    def test_encoder_puts_interleaved_bits_on_the_wire(self):
+        """Encode side, checked against the reference permutation — NOT against
+        our decoder. Pulls the nine voice regions straight out of the emitted
+        dibits and compares them with the reference interleave."""
+        rng = np.random.default_rng(3)
+        frames = [rng.integers(0, 2, 144).astype(np.uint8) for _ in range(9)]
+        d = encode_frame_dibits(DUID_LDU1, NAC, voice=frames,
+                                lc_bits=make_link_control(tgid=TGID, source_id=SRC))
+        bits = list(dibits_to_bits(d))
+        payload = bits[48 + 64:]
+        pos, vi = 0, 0
+        for kind, nbits in p25.LDU_LAYOUT:
+            if kind == "V":
+                on_air = payload[pos:pos + nbits]
+                self.assertEqual(on_air, _reference_interleave(frames[vi]),
+                                 f"voice frame {vi} is not interleaved on the wire")
+                # and it must NOT be the raw vector order
+                self.assertNotEqual(on_air, list(frames[vi]))
+                vi += 1
+            pos += nbits
+        self.assertEqual(vi, 9)
+
+    def test_decoder_deinterleaves_a_stream_it_did_not_encode(self):
+        """Decode side. The wire stream is assembled HERE: the voice regions are
+        laid out with the reference interleave, so nothing in p25 chose their
+        positions. The decoder must hand back vector order."""
+        rng = np.random.default_rng(13)
+        frames = [rng.integers(0, 2, 144).astype(np.uint8) for _ in range(9)]
+        lc = make_link_control(tgid=TGID, source_id=SRC)
+        ctrl = p25._rs_block_encode(lc, hamming10_encode, 10, 12)
+
+        bits = p25._int_to_bits(FRAME_SYNC, 48)
+        bits += p25._int_to_bits(nid_encode(NAC, DUID_LDU1), 64)
+        vi = ci = 0
+        for kind, nbits in p25.LDU_LAYOUT:
+            if kind == "V":
+                bits += _reference_interleave(frames[vi])
+                vi += 1
+            elif kind == "C":
+                bits += ctrl[ci:ci + nbits]
+                ci += nbits
+            else:
+                bits += [0] * nbits
+
+        r = decode_p25_dibits(bits_to_dibits(bits))
+        f = _frames_by_duid(r)["LDU1"]
+        self.assertTrue(f["fec_ok"])
+        self.assertEqual(f["tgid"], TGID)
+        self.assertEqual(len(f["voice_bits"]), 9)
+        for i, (got, want) in enumerate(zip(f["voice_bits"], frames)):
+            self.assertEqual(list(got), list(want),
+                             f"voice frame {i} was not de-interleaved")
+
+    def test_a_no_op_deinterleave_would_fail_this_suite(self):
+        """Explicitly demonstrates the bug this work closes: if the decoder
+        skipped de-interleaving, the bits it returned would differ from the
+        transmitted logical frame for essentially every frame."""
+        rng = np.random.default_rng(17)
+        vector = rng.integers(0, 2, 144).astype(np.uint8)
+        wire = p25.interleave_voice_frame(vector)
+        differing = int(np.count_nonzero(np.asarray(wire) != vector))
+        self.assertGreater(differing, 40,
+                           "wire and vector order are nearly identical — the "
+                           "interleave would be undetectable off-air")
+
+    # ---- cross-module: the hand-off convention actually matches ----------
+    def test_handover_matches_the_vocoders_expected_bit_order(self):
+        """p25 de-interleaves into 'vector order'; ambe.unpack_imbe_frame() says
+        it wants 'vector-ordered frame bits'. That agreement has to be MEASURED,
+        not assumed — it is a contract between two modules owned separately.
+
+        Skipped rather than failed if ambe is mid-edit: this file owns p25."""
+        try:
+            from survey import ambe
+            pack, unpack = ambe.pack_imbe_frame, ambe.unpack_imbe_frame
+            info_bits, frame_bits = ambe.IMBE_INFO_BITS, ambe.IMBE_FRAME_BITS
+        except Exception as exc:                                   # noqa: BLE001
+            self.skipTest(f"survey/ambe.py unavailable or changed: {exc}")
+        if frame_bits != p25.VOICE_FRAME_BITS:
+            self.skipTest("ambe IMBE frame geometry changed")
+
+        rng = np.random.default_rng(23)
+        info = rng.integers(0, 2, info_bits).astype(np.uint8)
+        coded = np.asarray(pack(info), dtype=np.uint8)      # vector order, 144
+
+        d = encode_frame_dibits(DUID_LDU1, NAC, voice=[coded] * 9,
+                                lc_bits=make_link_control(tgid=TGID, source_id=SRC))
+        f = _frames_by_duid(decode_p25_dibits(d))["LDU1"]
+
+        rep = unpack(f["voice_bits"][0])
+        self.assertEqual(rep["errors"], 0,
+                         "vocoder FEC had to correct a clean frame — p25 and "
+                         "ambe disagree about the 144-bit vector order")
+        self.assertTrue(rep["fec_ok"])
+        self.assertEqual(list(np.asarray(rep["info_bits"])), list(info))
+
+        # ...and the same frame WITHOUT de-interleaving must NOT come out clean.
+        # This is what proves the de-interleave is load-bearing rather than
+        # cosmetic: feed the wire order straight in and the FEC falls apart.
+        wire = p25.interleave_voice_frame(coded)
+        bad = unpack(wire)
+        self.assertGreater(bad["errors"], rep["errors"],
+                           "skipping the de-interleave cost nothing — then the "
+                           "de-interleave is not doing anything")
+
+
+class TestLduGeometry(unittest.TestCase):
+    """LDU_LAYOUT and the status-symbol phase, checked against the transmit-order
+    annex (TIA-102.BAAA-A sections 10.3 / 10.4) rather than against our encoder.
+
+    The annex lists all 864 transmitted symbols of an LDU one at a time. Reduced
+    to run lengths of (frame sync | NID | voice | LC-or-ES | LSD), with the
+    status symbols removed, it reads exactly as the tuple below — which is the
+    geometry LDU_LAYOUT has to reproduce."""
+
+    # (kind, number of DATA symbols) after removing the 24 status symbols.
+    ANNEX_RUNS = (("F", 24), ("N", 32), ("V", 144), ("C", 20), ("V", 72),
+                  ("C", 20), ("V", 72), ("C", 20), ("V", 72), ("C", 20),
+                  ("V", 72), ("C", 20), ("V", 72), ("C", 20), ("V", 72),
+                  ("L", 16), ("V", 72))
+
+    def test_layout_reproduces_the_annex_run_lengths(self):
+        runs = [("F", p25.SYNC_DIBITS), ("N", p25.NID_DIBITS)]
+        for kind, nbits in p25.LDU_LAYOUT:
+            nsym = nbits // 2
+            if runs and runs[-1][0] == kind:
+                runs[-1] = (kind, runs[-1][1] + nsym)
+            else:
+                runs.append((kind, nsym))
+        self.assertEqual(tuple(runs), self.ANNEX_RUNS)
+
+    def test_an_ldu_is_840_data_symbols_and_864_on_air(self):
+        data = 2 * (p25.SYNC_DIBITS + p25.NID_DIBITS) + p25.LDU_PAYLOAD_BITS
+        self.assertEqual(data, 1680)                 # bits
+        self.assertEqual(data // 2, 840)             # data symbols
+        status = (data // 2) // p25.STATUS_DATA_DIBITS
+        self.assertEqual(status, 24)                 # annex: 24 status symbols
+        self.assertEqual(data // 2 + status, 864)    # 180 ms at 4800 Bd
+
+    def test_status_symbol_phase_matches_the_annex(self):
+        """The annex puts a status symbol at transmitted index 35 and every 36th
+        symbol after that, for all 24 of them."""
+        self.assertEqual(p25.STATUS_PERIOD_DIBITS, 36)
+        self.assertEqual(p25.STATUS_DATA_DIBITS, 35)
+        expected = [35 + 36 * k for k in range(24)]
+        self.assertEqual(expected[-1], 863)
+        d = encode_frame_dibits(DUID_LDU1, NAC, status=True,
+                                lc_bits=make_link_control(tgid=TGID))
+        self.assertEqual(d.size, 864)
+        stripped = p25.strip_status_symbols(d, 0)
+        self.assertEqual(stripped.size, 840)
+
+    def test_nine_voice_frames_per_ldu(self):
+        self.assertEqual(sum(1 for k, _ in p25.LDU_LAYOUT if k == "V"), 9)
+        self.assertEqual(p25.VOICE_FRAMES_PER_LDU, 9)
+        # Figure 8-3: VC1, VC2, then LC in six 40-bit chunks between the rest,
+        # with the LSD sitting between VC8 and VC9.
+        kinds = [k for k, _ in p25.LDU_LAYOUT]
+        self.assertEqual(kinds[:3], ["V", "V", "C"])
+        self.assertEqual(kinds[-3:], ["V", "L", "V"])
+
+
+class TestPublishedGeneratorMatrices(unittest.TestCase):
+    """The short block codes, pinned to TIA-102.BAAA-A Tables 5-3 and 5-4.
+
+    These codes were previously built here as "mathematically equivalent" codes
+    of the right length and minimum distance. That is not good enough and the
+    failure is invisible to every synthetic test: the extended Golay code is
+    unique up to equivalence, so ANY valid generator reproduces the {0,8,12,16,24}
+    weight distribution and corrects the same number of errors — while mapping
+    information onto DIFFERENT codewords. Encoder and decoder sharing a wrong
+    matrix round-trip perfectly and decode a real radio into garbage.
+
+    So these tests compare against the matrices as PRINTED in the standard."""
+
+    # Table 5-3, "Golay Generator Matrices", exactly as printed: each row is the
+    # 12-bit identity half then the 12-bit parity half, both in octal.
+    TABLE_5_3_24_12 = ("4000 6165", "2000 3073", "1000 7550", "0400 3664",
+                       "0200 1732", "0100 6631", "0040 3315", "0020 1547",
+                       "0010 6706", "0004 5227", "0002 4476", "0001 4353")
+    # Table 5-3, the separately-printed (18,6,8) column: 6-bit identity, 12-bit
+    # parity. The standard says this code is the (24,12,8) with the leftmost 6
+    # bits deleted; these rows are the independent statement of that.
+    TABLE_5_3_18_6 = ("40 3315", "20 1547", "10 6706",
+                      "04 5227", "02 4476", "01 4353")
+    # Table 5-4, "(10,6,3) short code", printed in binary as 6 identity columns
+    # followed by 4 parity columns.
+    TABLE_5_4_10_6 = ("1 0 0  0 0 0  1 1 1 0", "0 1 0  0 0 0  1 1 0 1",
+                      "0 0 1  0 0 0  1 0 1 1", "0 0 0  1 0 0  0 1 1 1",
+                      "0 0 0  0 1 0  0 0 1 1", "0 0 0  0 0 1  1 1 0 0")
+
+    @staticmethod
+    def _octal_row(row, kbits):
+        ident, parity = row.split()
+        return (int(ident, 8) << 12) | int(parity, 8), int(ident, 8), kbits
+
+    def test_golay_generator_polynomial_is_the_standards(self):
+        """Section 5.7: g(x) = x^11+x^10+x^6+x^5+x^4+x^2+1 = 6165 octal, and the
+        standard notes this is literally the first parity row of the matrix."""
+        self.assertEqual(0o6165, 0xC75)
+        self.assertEqual(p25.GOLAY24_PARITY_ROWS[0], 0o6165)
+
+    def test_golay24_matrix_is_table_5_3(self):
+        rows = [self._octal_row(r, 12)[0] for r in self.TABLE_5_3_24_12]
+        # left 12x12 half is the identity, as the standard states
+        for i, cw in enumerate(rows):
+            self.assertEqual(cw >> 12, 1 << (11 - i))
+        self.assertEqual(list(p25.GOLAY24_PARITY_ROWS),
+                         [cw & 0xFFF for cw in rows])
+        # and the module's encoder reproduces the matrix row for row
+        for i in range(12):
+            self.assertEqual(p25._extended_golay24_parity(1 << (11 - i)),
+                             rows[i] & 0xFFF)
+
+    def test_golay24_weight_distribution_still_identifies_the_code(self):
+        counts = {}
+        for m in range(4096):
+            cw = (m << 12) | p25._extended_golay24_parity(m)
+            w = bin(cw).count("1")
+            counts[w] = counts.get(w, 0) + 1
+        self.assertEqual(counts, {0: 1, 8: 759, 12: 2576, 16: 759, 24: 1})
+
+    def test_golay18_matches_the_standards_own_shortened_column(self):
+        """Table 5-3 prints the (18,6,8) rows separately. The module derives them
+        by the section 5.7 rule instead ("deleting the left most 6 bits from the
+        (24,12,8) code"), so this checks a derivation against a printed table."""
+        want = []
+        for r in self.TABLE_5_3_18_6:
+            ident, parity = r.split()
+            want.append((int(ident, 8) << 12) | int(parity, 8))
+        for i, row in enumerate(want):
+            self.assertEqual(row >> 12, 1 << (5 - i))      # identity half
+            self.assertEqual(golay18_encode(1 << (5 - i)), row,
+                             f"(18,6,8) basis row {i} differs from Table 5-3")
+        # the printed (18,6) rows are the last six (24,12) rows, truncated
+        full = [self._octal_row(r, 12)[0] for r in self.TABLE_5_3_24_12]
+        self.assertEqual(want, [cw & 0x3FFFF for cw in full[6:]])
+
+    def test_hamming10_matrix_is_table_5_4(self):
+        for i, row in enumerate(self.TABLE_5_4_10_6):
+            bits = [int(c) for c in row.split()]
+            self.assertEqual(len(bits), 10)
+            self.assertEqual(bits[:6], [1 if j == i else 0 for j in range(6)])
+            want = 0
+            for b in bits:
+                want = (want << 1) | b
+            self.assertEqual(hamming10_encode(1 << (5 - i)), want,
+                             f"(10,6,3) basis row {i} differs from Table 5-4")
+        self.assertEqual(list(p25.HAMMING10_PARITY_ROWS),
+                         [0b1110, 0b1101, 0b1011, 0b0111, 0b0011, 0b1100])
+
+    def test_hamming10_is_not_the_naive_shortening(self):
+        """Section 5.8 warns the shortening is deliberately not the obvious one
+        ('not just the left hand columns and top rows'). Pin that, so nobody
+        'simplifies' it back to a same-distance code that fails off-air."""
+        naive = (0b0011, 0b0101, 0b0110, 0b1001, 0b1010, 0b1100)
+        self.assertNotEqual(tuple(p25.HAMMING10_PARITY_ROWS), naive)
+
+    # TIA-102.BAAA-A section 5.9 prints the three Reed-Solomon generator
+    # polynomials outright, coefficients in octal, ascending powers of x. It also
+    # states the root convention: g(x) = (x + a)(x + a^2)...(x + a^R) — first
+    # consecutive root a^1, i.e. NARROW-SENSE. That was the module's single
+    # largest documented assumption ("the most likely thing to be wrong off-air")
+    # and these vectors settle it.
+    TABLE_5_9 = {
+        16: ("60 73 46 51 73 05 42 64 33 22 27 21 23 02 35 34 1"),   # (36,20,17)
+        12: ("50 41 02 74 11 60 34 71 03 55 05 71 1"),               # (24,12,13)
+        8:  ("26 06 24 57 60 45 75 67 1"),                           # (24,16,9)
+    }
+
+    def test_reed_solomon_generators_are_section_5_9(self):
+        for nroots, printed in sorted(self.TABLE_5_9.items()):
+            want = [int(tok, 8) for tok in printed.split()]
+            self.assertEqual(len(want), nroots + 1)
+            self.assertEqual(want[-1], 1, "generator must be monic")
+            self.assertEqual(p25._rs_generator(nroots), want,
+                             f"RS(nroots={nroots}) generator differs from "
+                             "TIA-102.BAAA-A section 5.9")
+
+    def test_reed_solomon_root_convention_is_narrow_sense(self):
+        """Section 5.9: g(x) = (x + a)(x + a^2) ... (x + a^R). Check it directly —
+        every alpha^i for i = 1..R must be a root, and alpha^0 must NOT be."""
+        for nroots in (8, 12, 16):
+            g = p25._rs_generator(nroots)
+            for i in range(1, nroots + 1):
+                acc = 0
+                for k in range(len(g) - 1, -1, -1):
+                    acc = p25._gmul(acc, p25._EXP[i]) ^ g[k]
+                self.assertEqual(acc, 0, f"alpha^{i} is not a root (nroots={nroots})")
+            acc = 0
+            for k in range(len(g) - 1, -1, -1):
+                acc = p25._gmul(acc, p25._EXP[0]) ^ g[k]
+            self.assertNotEqual(acc, 0, "alpha^0 is a root — that is FCR=0, not "
+                                        "the narrow-sense code the standard specifies")
+
+    def test_galois_field_is_the_standards(self):
+        # Section 5.9: "the extension Galois Field GF(2^6) generated by the
+        # primitive characteristic polynomial a^6 + a + 1" = 0x43.
+        self.assertEqual(p25.GF_POLY, 0x43)
+
+    def test_distances_are_unchanged_by_using_the_real_matrices(self):
+        words18 = [golay18_encode(d) for d in range(64)]
+        d18 = min(bin(a ^ b).count("1")
+                  for i, a in enumerate(words18) for b in words18[i + 1:])
+        self.assertEqual(d18, 8)
+        words10 = [hamming10_encode(d) for d in range(64)]
+        d10 = min(bin(a ^ b).count("1")
+                  for i, a in enumerate(words10) for b in words10[i + 1:])
+        self.assertEqual(d10, 3)
+
+
 def _analog_fm_dibits(seconds: float = 1.2, fs: float = 48000.0, seed: int = 5):
     """Analog FM voice -> the 4-level symbol stream a C4FM slicer would emit.
 
