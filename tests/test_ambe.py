@@ -151,6 +151,49 @@ class TestFecStructure(unittest.TestCase):
         self.assertEqual(len(ambe._HAMMING15_SYN), 16)
         self.assertEqual(set(ambe._HAMMING15_SYN.keys()), set(range(16)))
 
+    # ---- the mapping, which the three tests above provably cannot see -----
+    def test_hamming15_generator_is_tia_table_5_4(self):
+        """The parity row each information bit generates, checked one at a time
+        against TIA-102.BAAA-A section 5.8, Table 5-4, (15,11,3) column.
+
+        This is the test the module was missing. Minimum distance, perfect-code
+        structure and round-trip are all satisfied by ELEVEN DIFFERENT
+        permutations-worth of equivalent codes, only one of which is the one a
+        real radio uses — the same trap that hid an invented Golay generator in
+        survey/p25.py. Encoding a unit vector isolates exactly one row."""
+        rows = [hamming15_encode(1 << (10 - i)) & 0xF for i in range(11)]
+        self.assertEqual(rows, [0b1111, 0b1110, 0b1101, 0b1100, 0b1011, 0b1010,
+                                0b1001, 0b0111, 0b0110, 0b0101, 0b0011])
+        self.assertEqual(rows, list(ambe.HAMMING15_PARITY_ROWS))
+
+    def test_hamming15_is_not_the_crc_that_used_to_be_here(self):
+        """The specific wrong answer, named so a revert cannot pass silently.
+
+        A systematic CRC on g(x) = x^4+x+1 — which section 5.8 does cite as the
+        code's origin — produces the SAME ELEVEN ROWS IN A DIFFERENT ORDER. It
+        therefore satisfies every other test in this class while mapping
+        information onto different codewords off-air."""
+        crc = []
+        for i in range(11):
+            reg = (1 << (10 - i)) << 4
+            crc.append(ambe._gf2_remainder(reg, 0x13, 4))
+        self.assertEqual(crc, [0b1001, 0b1101, 0b1111, 0b1110, 0b0111, 0b1010,
+                               0b0101, 0b1011, 0b1100, 0b0110, 0b0011])
+        self.assertNotEqual(crc, list(ambe.HAMMING15_PARITY_ROWS))
+        # same SET, so distance and syndrome structure are identical -- which is
+        # precisely why they cannot distinguish the two
+        self.assertEqual(sorted(crc), sorted(ambe.HAMMING15_PARITY_ROWS))
+
+    def test_hamming15_row_set_is_forced_so_only_order_was_ever_in_question(self):
+        # A systematic (15,11) code has d=3 iff its parity rows are distinct and
+        # all of weight >= 2; there are exactly 11 such nibbles, so the SET is
+        # determined by the parameters alone and carries no information about
+        # which code this is. Stating that here is what justifies the two tests
+        # above existing at all.
+        forced = [n for n in range(16) if bin(n).count("1") >= 2]
+        self.assertEqual(len(forced), 11)
+        self.assertEqual(sorted(ambe.HAMMING15_PARITY_ROWS), forced)
+
 
 class TestFecCorrection(unittest.TestCase):
     def test_golay23_clean_roundtrip(self):
@@ -361,15 +404,29 @@ class TestPitchTable(unittest.TestCase):
 
 class TestParameterUnpack(unittest.TestCase):
     def test_hand_built_frame(self):
-        # 88 bits assembled by hand, no packer involved:
-        #   b0 = 00000000        -> index 0  -> 405.06 Hz, L=9, K=3
-        #   b1 = 1 0 1           -> bands voiced / unvoiced / voiced
-        #   b2 = 101010          -> gain index 42
-        #   next 70 bits         -> the amplitude quantizers b3..b10 (73 - K)
-        #   final 1 bit          -> b_{L+2}
-        bits = np.array([0] * 8 + [1, 0, 1] + [1, 0, 1, 0, 1, 0] + [0] * 71,
-                        dtype=np.uint8)
-        self.assertEqual(bits.size, IMBE_INFO_BITS)
+        """88 bits assembled by hand at the positions TIA-102.BABA 7.1 puts the
+        fields, with no help from imbe_priority_map() — so this is an external
+        check on the map, not a restatement of it.
+
+        b0 = 0 -> 405.06 Hz, L = 9, K = 3. For K = 3 clause 7.1 lands the
+        control fields at these absolute information-bit indices:
+
+            info[0:6]                 b0 bits 7..2  (the pitch's TOP SIX)
+            info[6], [7], [8]         b2 bits 5, 4, 3   (gain, top three)
+            info[48], [49], [50]      b1 bits 2, 1, 0   (V/UV, MSB = low band)
+            info[51], [52]            b2 bits 2, 1
+            info[84]                  b2 bit 0
+            info[85], [86]            b0 bits 1, 0
+            info[87]                  b_{L+2}, unused
+
+        Note what this pins: b0 is SPLIT and b2 is split three ways. Reading
+        info[0:8] as the pitch — which this module used to do — would take
+        info[6] and info[7] (gain bits 5 and 4) as the pitch's low bits."""
+        bits = np.zeros(IMBE_INFO_BITS, dtype=np.uint8)
+        bits[6], bits[7], bits[8] = 1, 0, 1            # gain 101---
+        bits[51], bits[52] = 0, 1                      # gain ---01-
+        bits[84] = 0                                   # gain -----0  => 0b101010
+        bits[48], bits[49], bits[50] = 1, 0, 1         # bands V / UV / V
         p = decode_imbe_params(bits)
         self.assertEqual(p["b0"], 0)
         self.assertAlmostEqual(p["f0_hz"], 405.063, places=2)
@@ -384,6 +441,44 @@ class TestParameterUnpack(unittest.TestCase):
         # 3 harmonics per band: 1-3 voiced, 4-6 unvoiced, 7-9 voiced
         self.assertEqual([bool(x) for x in p["voiced"][1:]],
                          [True] * 3 + [False] * 3 + [True] * 3)
+
+    def test_the_old_contiguous_layout_would_fail_this(self):
+        """Names the bug that was fixed, so a revert cannot pass quietly.
+
+        Under the old convention b0 was info[0:8]. Build a frame whose pitch is
+        written the OLD way and show it does not read back — otherwise nothing
+        in this suite distinguishes the two layouts."""
+        old = np.zeros(IMBE_INFO_BITS, dtype=np.uint8)
+        old[0:8] = int_to_bits(0b10110101, 8)          # 181, written contiguously
+        self.assertNotEqual(decode_imbe_params(old)["b0"], 0b10110101)
+        # and the standard's placement does read back
+        new = np.zeros(IMBE_INFO_BITS, dtype=np.uint8)
+        new[0:6] = int_to_bits(0b10110101 >> 2, 6)
+        new[85], new[86] = 0, 1
+        self.assertEqual(decode_imbe_params(new)["b0"], 0b10110101)
+
+    def test_pitch_index_is_split_six_plus_two(self):
+        # Each of the eight pitch bits, one at a time, at the index clause 7.1
+        # assigns it. A layout error shows up here as a wrong power of two.
+        for bit in range(8):
+            bits = np.zeros(IMBE_INFO_BITS, dtype=np.uint8)
+            if bit >= 2:
+                bits[5 - (bit - 2)] = 1                # b0 bits 7..2 -> info[0:6]
+            else:
+                bits[86 - bit] = 1                     # b0 bit 1 -> 85, bit 0 -> 86
+            self.assertEqual(decode_imbe_params(bits)["b0"], 1 << bit,
+                             f"b0 bit {bit} is not where 7.1 puts it")
+
+    def test_trailing_bit_is_carried_not_decoded(self):
+        # info[87] is b_{L+2}. The standard defines it; this decoder does not
+        # use it, and flipping it must not perturb any decoded parameter.
+        base = pack_imbe_params(100, [True] * imbe_band_count(imbe_pitch(100)[2]), 21)
+        flipped = base.copy()
+        flipped[ambe.IMBE_TRAILING_INDEX] ^= 1
+        a, b = decode_imbe_params(base), decode_imbe_params(flipped)
+        for key in ("b0", "L", "K", "gain_index", "voiced_bands"):
+            self.assertEqual(a[key], b[key], key)
+        np.testing.assert_array_equal(a["amplitude_bits"], b["amplitude_bits"])
 
     def test_field_roundtrip_through_packer(self):
         for b0 in (0, 1, 37, 100, 150, 207):
@@ -433,6 +528,147 @@ class TestParameterUnpack(unittest.TestCase):
         bits = pack_imbe_params(64, [True] * K, 9, amplitude_bits=amp)
         p = decode_imbe_params(bits)
         np.testing.assert_array_equal(p["amplitude_bits"], amp)
+
+
+class TestBitPrioritization(unittest.TestCase):
+    """TIA-102.BABA clause 7.1 — the 88-bit field order.
+
+    This used to be a local convention and it was wrong, in the way that costs
+    the most: a frame could FEC-clean perfectly and still decode to the wrong
+    pitch. Round-trip tests could never have caught it, because pack and unpack
+    shared the mistake. So everything here is either a STRUCTURAL property of
+    the standard's rule or a pin against a map published outside this module."""
+
+    # Fingerprint over the (quantizer, bit) assignment of all 79 prioritized
+    # positions for every one of the 48 legal harmonic counts — 3792 entries.
+    #
+    # This exact value was computed from mbelib's tabulated bo[48][79][2]
+    # priority map, parsed deterministically out of imbe7200x4400_const.h
+    # (sha256 62982451...24737, the same hash-pinned artifact
+    # survey/imbe_tables.py already sources, independently present in the
+    # Software Heritage archive). ambe.imbe_priority_map() DERIVES the same map
+    # from the bit allocation and TIA-102.BABA Fig. 22, and agrees on all 3792
+    # entries. Pinning the hash rather than the table keeps 7,584 integers of
+    # someone else's data out of this repo while still locking the answer.
+    PUBLISHED_MAP_FINGERPRINT = (
+        "c592572130ef9e0fa9d5ab02a52c9bf4b876c706cb1e488625379b201fe12f87")
+
+    def test_priority_map_matches_the_published_map(self):
+        h = hashlib.sha256()
+        for L in ALL_L:
+            for m, n in ambe.imbe_priority_map(L):
+                h.update(f"{L}:{m}:{n};".encode())
+        self.assertEqual(h.hexdigest(), self.PUBLISHED_MAP_FINGERPRINT,
+                         "the derived priority map no longer agrees with the "
+                         "published one — a real frame would decode to noise")
+
+    def test_priority_map_is_a_bijection_onto_exactly_the_frame_fields(self):
+        """Every prioritized position carries exactly one quantizer bit, and
+        between them they carry every bit of b_1, b_2 and b_3..b_{L+1} once.
+
+        A permutation that dropped a bit, or wrote one twice, is the failure
+        mode that produces confident nonsense rather than an exception."""
+        for L in ALL_L:
+            K = imbe_band_count(L)
+            alloc = ambe.imbe_amplitude_allocation(L)
+            cells = ambe.imbe_priority_map(L)
+            self.assertEqual(len(cells), 79, f"L={L}")
+            self.assertEqual(len(set(cells)), 79, f"L={L}: a cell is used twice")
+            want = {(1, k) for k in range(K)}
+            want |= {(2, k) for k in range(6)}
+            for c, bits in enumerate(alloc):
+                want |= {(3 + c, k) for k in range(bits)}
+            self.assertEqual(set(cells), want, f"L={L}")
+
+    def test_scan_runs_by_bit_significance_not_by_quantizer(self):
+        """Fig. 22 is read row by row, so EVERY quantizer's MSB is transmitted
+        before ANY quantizer's second bit. That is the whole reason the field
+        order is a scatter rather than a concatenation, and it is what makes the
+        leading bits worth Golay-protecting."""
+        for L in ALL_L:
+            scan = ambe.imbe_priority_scan(L)
+            rows = [n for _m, n in scan]
+            self.assertEqual(rows, sorted(rows, reverse=True), f"L={L}")
+            prev_row, prev_q = None, None
+            for q, n in scan:
+                if n == prev_row:
+                    self.assertGreater(q, prev_q,
+                                       f"L={L}: row {n} is not left to right")
+                prev_row, prev_q = n, q
+
+    def test_control_fields_do_not_depend_on_the_amplitude_allocation(self):
+        """Where b_1 and b_2 sit depends only on K, hence only on the pitch.
+
+        Load-bearing: it is what lets an unsourced amplitude allocation cost
+        only the magnitudes instead of making the whole frame unreadable."""
+        for L in ALL_L:
+            ctrl = ambe.imbe_control_map(imbe_band_count(L))
+            full = ambe.imbe_priority_map(L)
+            for pos, cell in ctrl.items():
+                self.assertEqual(full[pos], cell, f"L={L} pos={pos}")
+            self.assertEqual({p for p, (m, _n) in enumerate(full) if m < 3},
+                             set(ctrl), f"L={L}")
+
+    def test_gain_index_is_not_contiguous(self):
+        # 3 + 2 + 1, in three separate places. Asserted because "read six bits
+        # somewhere" is the mistake this class exists to prevent.
+        for L in ALL_L:
+            at = sorted(p for p, (m, _n) in enumerate(ambe.imbe_priority_map(L))
+                        if m == 2)
+            self.assertEqual(len(at), 6, f"L={L}")
+            runs = 1 + sum(1 for a, b in zip(at, at[1:]) if b != a + 1)
+            self.assertEqual(runs, 3, f"L={L}: gain index sits in {runs} runs")
+
+    def test_every_pitch_index_round_trips_every_field(self):
+        # The regression net under the structural tests: all 208 legal pitch
+        # indices, random voicing and a random amplitude field each.
+        rng = np.random.default_rng(31)
+        for b0 in range(ambe.IMBE_PITCH_RESERVED):
+            _, _, L = imbe_pitch(b0)
+            K = imbe_band_count(L)
+            flags = [bool(x) for x in rng.integers(0, 2, K)]
+            gain = int(rng.integers(0, 64))
+            amp = rng.integers(
+                0, 2, imbe_amplitude_bit_budget(L)["bits"]).astype(np.uint8)
+            p = decode_imbe_params(pack_imbe_params(b0, flags, gain,
+                                                    amplitude_bits=amp))
+            self.assertEqual(p["b0"], b0)
+            self.assertEqual(p["voiced_bands"], flags, f"b0={b0}")
+            self.assertEqual(p["gain_index"], gain, f"b0={b0}")
+            np.testing.assert_array_equal(p["amplitude_bits"], amp)
+
+    def test_pitch_voicing_and_gain_survive_an_unsourced_allocation(self):
+        # If a bit-allocation gap were ever reinstated, the amplitudes go but
+        # the control fields must not: they sit at allocation-independent
+        # positions, and a decoder that threw here would lose the pitch too.
+        L = 42
+        b0 = next(b for b in range(ambe.IMBE_PITCH_RESERVED)
+                  if imbe_pitch(b)[2] == L)
+        K = imbe_band_count(L)
+        flags = [(i % 2 == 0) for i in range(K)]
+        bits = pack_imbe_params(b0, flags, 47)
+        original = T.UNVERIFIED_L
+        try:
+            T.UNVERIFIED_L = (L,)
+            p = decode_imbe_params(bits)
+            self.assertEqual(p["b0"], b0)
+            self.assertEqual(p["L"], L)
+            self.assertEqual(p["voiced_bands"], flags)
+            self.assertEqual(p["gain_index"], 47)
+            self.assertIsNone(p["magnitudes"])
+            self.assertFalse(p["magnitudes_available"])
+        finally:
+            T.UNVERIFIED_L = original
+
+    def test_a_wrong_allocation_raises_instead_of_producing_a_map(self):
+        # The 79 = 6 + K + sum(alloc) accounting closes only at the exact bit
+        # budget, so a corrupted allocation table cannot silently yield a
+        # plausible map that quietly mis-decodes every frame.
+        L = 20
+        alloc = list(ambe.imbe_amplitude_allocation(L))
+        alloc[0] += 1
+        with self.assertRaises(ValueError):
+            ambe.imbe_priority_map(L, alloc)
 
 
 class TestSynthesis(unittest.TestCase):
@@ -1736,6 +1972,46 @@ class TestHonestyAfterImplementation(unittest.TestCase):
         # and the residual source-risk is still stated, not quietly retired
         self.assertIn("mbelib is its own authority", flat)
         self.assertIn("per-entry", flat.lower())
+        # the two air-interface constants that used to be local inventions are
+        # recorded as FIXED/CLOSED with what they were checked against, and the
+        # transport contract now names the caller that satisfies it
+        self.assertIn("(FIXED)", flat)
+        self.assertIn("Table 5-4", flat)
+        self.assertIn("7.1", flat)
+        self.assertIn("survey/p25.py now", flat)
+
+    def test_capability_records_what_the_two_fixed_constants_conform_to(self):
+        # "we fixed it" is worth nothing to a report reader without the source
+        # it was fixed against, so capability() carries both -- and what the
+        # wrong version was, which is what makes a regression recognisable.
+        conf = ambe.capability()["air_interface_conformance"]
+        ham = conf["hamming15_11_generator"]
+        self.assertIn("Table 5-4", ham["source"])
+        self.assertIn("mbelib", ham["corroborated_by"])
+        self.assertIn("CRC", ham["was"])
+        fo = conf["imbe_88_bit_field_order"]
+        self.assertIn("7.1", fo["source"])
+        self.assertTrue(fo["derived"])
+        self.assertIn("3792", fo["corroborated_by"])
+        self.assertIn(T.MBELIB_SHA256, fo["corroborated_by"])
+        self.assertIn("wrong pitch", fo["was"])
+
+    def test_capability_states_the_transport_contract(self):
+        # ambe does not de-interleave; p25 does. That hand-off is a contract
+        # between two separately-owned modules, so it has to be stated where
+        # the router can read it, not only in a docstring.
+        order = ambe.capability()["input_bit_order"]
+        self.assertIn("c_0..c_7", order)
+        self.assertIn("de-interleaved", order)
+        self.assertIn("p25", order)
+
+    def test_capability_no_longer_calls_the_field_order_a_local_convention(self):
+        # The claim that was retired. If it comes back, either the fix was
+        # reverted or someone re-pasted the old text over a real improvement.
+        sa = ambe.capability()["spectral_amplitudes"]
+        joined = " ".join(sa["unverified_assumptions"])
+        self.assertNotIn("field ORDER", joined)
+        self.assertIn("no off-air frame has ever been decoded", joined)
 
 
 class TestBitHelpers(unittest.TestCase):

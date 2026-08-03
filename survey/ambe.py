@@ -26,6 +26,14 @@ WHAT IS IMPLEMENTED AND SYNTHETICALLY VERIFIED
     all 4096 / 2048 codewords and assert minimum distance 7 / 8 / 3, and assert
     the Golay syndrome table is a perfect bijection over all 2048 error patterns
     of weight <= 3. That proves these really are the named codes.
+  * (FIXED) The Hamming(15,11,3) GENERATOR MATRIX is now TIA-102.BAAA-A
+    Table 5-4's, not a CRC on g(x) = x^4+x+1. Those two differ: they generate
+    the same code with the rows PERMUTED, so the old one had correct minimum
+    distance, a correct perfect-code syndrome table and a perfect round-trip
+    through our own encoder — and mapped u_4/u_5/u_6 onto different codewords
+    than a real radio. Exactly the bug class that hid an invented Golay
+    generator in survey/p25.py. The eleven parity rows are now pinned per-row
+    in the tests, because distance tests provably cannot see this.
   * The prioritized-bit scrambler (Lehmer LCG x <- 173x + 13849 mod 2^16, MSB
     tapped, seeded from u_0) used by both codecs to whiten the FEC-protected
     vectors. Round-trips through pack_*/unpack_*.
@@ -78,11 +86,18 @@ WHAT IS **NOT** IMPLEMENTED — THE GAPS THAT REMAIN
     higher-order allocation is provably what mbelib says, but mbelib is its own
     authority there. That is not paranoia: mbelib demonstrably contains at least
     one real error (the L=23 gain step typo). Buying the standard would close it.
-  * The 88-bit FIELD ORDER remains this module's own convention (b0, then b1,
-    then b2, then the amplitude quantizers, then b_{L+2}). The field WIDTHS and
-    the quantizer arithmetic are sourced; which physical bit index each field
-    occupies in a real off-air frame is NOT, and is the first thing to check
-    when this meets real traffic.
+  * (CLOSED) The 88-bit FIELD ORDER is no longer this module's own convention.
+    It used to read b0 as info[0:8], then b1, then b2, then the amplitude
+    quantizers — plausible, self-consistent, and WRONG. TIA-102.BABA clause 7.1
+    scatters b_0..b_{L+2} across u_0..u_7 by priority: only the top SIX bits of
+    the pitch index lead the frame, its bottom two sit at info[85..86], the gain
+    index is split 3 + 2 + 1 across the frame, and every amplitude quantizer is
+    interleaved by bit significance. Under the old layout a perfectly
+    FEC-cleaned off-air frame decoded to the wrong pitch — hence the wrong L,
+    hence the wrong everything — on essentially every frame. The scan is now
+    DERIVED from the bit allocation (no new tables) and reproduces mbelib's
+    tabulated bo[48][79][2] map for all 48 x 79 = 3792 entries. See the block
+    comment at IMBE_PITCH_BITS for the full provenance.
   * Adaptive smoothing (clause 9) and the frame-repeat / erasure concealment
     behaviour behind the reserved pitch codes.
   * The AMBE+2 2450 parameter quantizer. Its pitch/gain/magnitude tables differ
@@ -90,7 +105,17 @@ WHAT IS **NOT** IMPLEMENTED — THE GAPS THAT REMAIN
     FEC and hands back 49 verified information bits and NO parameters. That is
     still useful in the field ("do these bursts FEC-clean as real AMBE voice, or
     is this noise?") but it is not audio.
-  * Transport-layer de-interleaving. Callers pass vector-ordered frame bits.
+  * The AMBE+2 (DMR) field order. Everything above about IMBE clause 7.1 is
+    IMBE-only; AMBE+2 3600x2450 has its own prioritization that is not
+    implemented and not sourced. The DMR path still returns FEC-verified bits
+    and nothing else.
+
+WHAT THE CALLER IS NOW RESPONSIBLE FOR
+  * Transport-layer de-interleaving is NOT done here — but survey/p25.py now
+    does it. It de-interleaves per TIA-102.BAAA-A Table 5-1 and hands voice
+    frames over in code-word order c_0..c_7, MSB-first, which is exactly the
+    144-bit layout unpack_imbe_frame() expects. Any other caller must do the
+    same; passing raw on-air bit order will fail every Golay and Hamming decode.
 
 CONSEQUENCE, STATED PLAINLY: this module now decodes the full IMBE parameter
 set — pitch, voicing AND the spectral envelope — for ALL 48 legal harmonic
@@ -98,15 +123,20 @@ counts, so a P25 Phase 1 frame that FEC-cleans comes out as speech-shaped audio
 with the transmitted formant structure rather than as a buzz. That is a real
 change: `intelligible` can now be True in a report, where before it never could.
 
+Two of the three things that would have broken real traffic are now closed: the
+Hamming(15,11) mapping is the standard's, and the 88-bit FIELD ORDER is the
+standard's clause-7.1 priority scan rather than a local guess. Transport
+de-interleaving lives in the caller and survey/p25.py implements it.
+
 But read this next part before anyone puts it in front of an operator, because
-it is the whole risk: NO OFF-AIR FRAME HAS EVER BEEN DECODED BY THIS CODE. Every
-claim is backed by synthetic vectors, by the standard's own worked example, and
-by checksums over the tables — not by a recording of a radio. Two specific
-things would break real traffic and are invisible to synthetic tests: the
-physical bit ORDER inside the 88-bit vector (our convention, unverified), and
-transport de-interleaving (absent). Until someone decodes a real capture and
-listens to it, "intelligible=True" means "the dequantizer ran and believes it
-produced an envelope", NOT "a human heard words". Say that to the operator.
+it is still the whole risk: NO OFF-AIR FRAME HAS EVER BEEN DECODED BY THIS CODE.
+Every claim is backed by synthetic vectors, by published tables parsed
+deterministically out of hash-pinned artifacts, and by agreement with an
+independent implementation — not by a recording of a radio. A chain of stages
+that are each individually right can still be wired together wrongly, and only
+real traffic finds that. Until someone decodes a real capture and listens to it,
+"intelligible=True" means "the dequantizer ran and believes it produced an
+envelope", NOT "a human heard words". Say that to the operator.
 
 No legal harmonic count returns magnitudes=None any more. The placeholder
 envelope (envelope="synthetic") therefore has no frame left to serve on the IMBE
@@ -135,7 +165,30 @@ MAX_HARMONICS = 56            # IMBE L range is 9..56
 # an equivalent code with a DIFFERENT codeword mapping — so if off-air P25/DMR
 # frames ever fail to FEC-clean here, this constant is the first thing to flip.
 GOLAY23_POLY = 0xC75
-HAMMING15_POLY = 0x13         # x^4+x+1
+
+# ---- Hamming(15,11,3): TIA-102.BAAA-A section 5.8, Table 5-4 ----------------
+# The 4 parity bits generated by each of the 11 information bits, MSB row first.
+#
+# THIS USED TO BE A CRC ON g(x) = x^4+x+1 (0x13) AND THAT WAS WRONG. Section 5.8
+# does say the code is "derived from the code that is generated by the
+# polynomial g(x) = x^4 + x + 1", but it then says how: "The (15,11,3) standard
+# Hamming code is derived from the cyclic version by arranging the rows of the
+# four parity check columns in ascending order." The systematic CRC on that same
+# polynomial produces the rows in a DIFFERENT order —
+#     1001 1101 1111 1110 0111 1010 0101 1011 1100 0110 0011
+# which is a permutation of the same eleven nibbles. Same code, same minimum
+# distance 3, same perfect-code syndrome structure, PERFECT ROUND-TRIP through
+# our own encoder — and a different information-to-codeword mapping than a real
+# radio, so every u_4/u_5/u_6 would have come out scrambled off-air. Identical
+# failure mode to the invented Golay generator that survived in survey/p25.py.
+#
+# (The set of eleven rows is forced: a systematic (15,11) code has d=3 iff its
+# parity rows are distinct and all of weight >= 2, and there are exactly eleven
+# such nibbles. So ONLY the order was ever in question, and only the published
+# table settles it. That is precisely why weight/distance tests cannot see this
+# bug — see tests/test_ambe.py::TestFecStructure.)
+HAMMING15_PARITY_ROWS = (0b1111, 0b1110, 0b1101, 0b1100, 0b1011, 0b1010,
+                         0b1001, 0b0111, 0b0110, 0b0101, 0b0011)
 
 # ---- IMBE 7200x4400 (P25 Phase 1) frame geometry ----
 # 88 information bits split into 8 prioritized vectors u_0..u_7; the four most
@@ -160,17 +213,58 @@ AMBE_CODED_WIDTHS = (24, 23, 11, 14)
 AMBE_PN_BITS = 23             # vector 1 coded
 AMBE_ERR_LIMIT = 4            # heuristic mute gate — see _fec_verdict()
 
-# ---- IMBE information-bit field layout (OUR DOCUMENTED CONVENTION) ----
-# The 88 information bits are read MSB-first as:
-#     b0  = bits[0:8]           pitch index
-#     b1  = bits[8:8+K]         K voiced/unvoiced band decisions, low band first
-#     b2  = bits[8+K:14+K]      gain index
-#     rest = spectral amplitude bits (NOT dequantized — see the module docstring)
-# This is the natural priority ordering (u_0, the best-protected vector, carries
-# the pitch), and pack_imbe_params/decode_imbe_params round-trip through it. It
-# has NOT been checked against an off-air frame, so treat the exact placement of
-# b1/b2 as provisional until someone validates it on real traffic.
-IMBE_PITCH_BITS = 8
+# ==============================================================================
+# IMBE information-bit field layout — TIA-102.BABA section 7.1, "Bit
+# Prioritization". THIS IS THE STANDARD'S ORDER, NOT A LOCAL CONVENTION.
+# ==============================================================================
+# The 88 information bits are NOT the quantizer values laid end to end. The
+# encoder scatters b_0..b_{L+2} across the eight vectors u_0..u_7 by PRIORITY,
+# so that the bits whose corruption hurts most land in the best-protected
+# vectors. Concatenating the vectors MSB-first (which is what unpack_imbe_frame
+# returns, and what mbelib calls imbe_d[88]) gives:
+#
+#   info[0:6]    u_0 bits 11..6  = b_0 bits 7..2   (pitch, TOP SIX BITS ONLY)
+#   info[6:9]    u_0 bits  5..3  = b_2 bits 5..3   (gain, top three bits)
+#   info[9:85]   u_0 bits  2..0, then all of u_1, u_2, u_3, u_4, u_5, u_6 and
+#                u_7 bits 6..3 — a 79-position stream (counting from info[6])
+#                carrying b_1, the rest of b_2, and every spectral-amplitude
+#                quantizer, interleaved by the Fig. 22 priority scan below
+#   info[85]     u_7 bit 2       = b_0 bit 1
+#   info[86]     u_7 bit 1       = b_0 bit 0
+#   info[87]     u_7 bit 0       = b_{L+2}         (not used by the decoder)
+#
+# So the pitch index is SPLIT: six bits at the very front and two bits 85 places
+# later. An implementation that reads b_0 as info[0:8] gets the top six bits
+# right and then two bits of the gain index where the pitch's LSBs should be —
+# a wrong pitch, hence a wrong L, hence a wrong everything, on every frame that
+# FEC-cleans perfectly. This module did exactly that until it was fixed.
+#
+# PROVENANCE — verified two ways, neither of them a summarising fetch:
+#   1. TIA-102.BABA section 7.1's own text, downloaded as raw bytes and read
+#      directly. It states the u_0 11..6 <- b_0 7..2 assignment, the u_0 5..3
+#      <- b_2 5..3 assignment, the Fig. 22 scan, the b_1-then-b_2-bits-2-and-1
+#      insertion beginning at u_4 bit 10, and the closing four bits of u_7 as
+#      b_2 bit 0, b_0 bit 1, b_0 bit 0, b_{L+2}.
+#   2. mbelib's tabulated bo[48][79][2] priority map, parsed deterministically
+#      out of imbe7200x4400_const.h — the same hash-pinned artifact
+#      survey/imbe_tables.py already sources (sha256 62982451...24737, present
+#      independently in the Software Heritage archive). imbe_priority_map()
+#      reproduces all 48 x 79 = 3792 of its entries EXACTLY, and mbelib's own
+#      b_0 assembly reads imbe_d[0..5] + imbe_d[85..86], matching (1).
+#
+# Note what is NOT here: a table. The scan is DERIVED from the bit allocation
+# this module already has and already verifies per-entry, so the field order
+# adds no new transcribed numbers and no new licence obligation — mbelib's
+# bo[] served only as the check, and a check is not the data.
+IMBE_PITCH_BITS = 8           # b_0 is 8 bits WIDE; it is not 8 CONTIGUOUS bits
+IMBE_PITCH_HIGH_BITS = 6      # ...of which the top 6 lead the frame
+IMBE_B0_LOW_INDICES = (85, 86)   # ...and the bottom 2 sit here, bit 1 then bit 0
+IMBE_SCAN_START = 6           # first prioritized position (u_0 bit 5)
+IMBE_SCAN_STOP = 85           # one past the last (u_7 bit 3)
+IMBE_TRAILING_INDEX = 87      # b_{L+2}; carried, never decoded
+IMBE_MAX_QUANT_BITS = 11      # Fig. 22 has 11 rows, MSB row 10 down to row 0
+IMBE_CONTROL_PREFIX = 3       # gain bits 5..3 lead the prioritized stream
+IMBE_SCAN_BREAK = 39          # amplitude scan bits emitted before b_1 appears
 IMBE_GAIN_BITS = 6
 IMBE_PITCH_RESERVED = 208     # b0 >= this is reserved (silence / frame repeat)
 # TIA-102.BABA initialises a new stream's amplitude history to M_l(-1) = 1.0
@@ -199,10 +293,17 @@ def _gf2_remainder(value: int, poly: int, poly_deg: int) -> int:
 def _build_syndrome_table(n: int, k: int, poly: int, max_weight: int) -> dict:
     """syndrome -> error pattern, for every error pattern up to max_weight bits.
 
-    Built by exhaustive enumeration at import (2048 entries for Golay23, 16 for
-    Hamming15 — microseconds). Both codes are PERFECT, so the enumeration is a
-    bijection onto the syndrome space; tests assert exactly that, which is what
-    proves the generator polynomial really produces the named code."""
+    For the CYCLIC codes only — Golay(23,12), whose 2048 entries enumerate at
+    import in microseconds. Hamming(15,11) no longer comes through here: it is
+    defined by TIA-102.BAAA-A Table 5-4's generator MATRIX rather than by a
+    polynomial, so its syndromes are built from that matrix in
+    _build_hamming15_syndromes().
+
+    Golay(23,12) is PERFECT, so this enumeration is a bijection onto the
+    syndrome space; the tests assert exactly that, which is what proves the
+    generator polynomial really produces the named code. Note the limit of that
+    argument, learned the hard way from the Hamming bug directly below: being
+    the named code does not make it the same MAPPING as the transmitter's."""
     deg = n - k
     table = {0: 0}
     positions = list(range(n))
@@ -225,7 +326,40 @@ def _build_syndrome_table(n: int, k: int, poly: int, max_weight: int) -> dict:
 
 
 _GOLAY23_SYN = _build_syndrome_table(23, 12, GOLAY23_POLY, 3)
-_HAMMING15_SYN = _build_syndrome_table(15, 11, HAMMING15_POLY, 1)
+
+
+def _hamming15_parity(data11: int) -> int:
+    """4 parity bits for 11 information bits, per TIA-102.BAAA-A Table 5-4.
+
+    Row i of the table applies to the i'th information bit counting from the
+    MSB — the same MSB-first convention bits_to_int() uses everywhere else."""
+    par = 0
+    for i in range(11):
+        if (data11 >> (10 - i)) & 1:
+            par ^= HAMMING15_PARITY_ROWS[i]
+    return par
+
+
+def _hamming15_syndrome(cw15: int) -> int:
+    return _hamming15_parity((cw15 >> 4) & 0x7FF) ^ (cw15 & 0xF)
+
+
+def _build_hamming15_syndromes() -> dict:
+    """syndrome -> single-bit error pattern, enumerated over the 15 columns.
+
+    No longer a polynomial remainder: the code is now defined by the standard's
+    generator matrix, so its syndrome table has to be built from that matrix.
+    Hamming(15,11) is perfect, so this must come out a bijection onto all 16
+    syndromes — which tests/test_ambe.py asserts, and which would fail if
+    Table 5-4 had been transcribed with a repeated or a weight-1 row."""
+    table = {0: 0}
+    for b in range(15):
+        e = 1 << b
+        table.setdefault(_hamming15_syndrome(e), e)
+    return table
+
+
+_HAMMING15_SYN = _build_hamming15_syndromes()
 
 
 # ------------------------------------------------------------------------- FEC
@@ -273,9 +407,14 @@ def golay24_decode(cw24: int):
 
 
 def hamming15_encode(data11: int) -> int:
-    """11 data bits -> systematic 15-bit Hamming codeword (data in the high bits)."""
-    reg = (data11 & 0x7FF) << 4
-    return reg | _gf2_remainder(reg, HAMMING15_POLY, 4)
+    """11 data bits -> systematic 15-bit Hamming codeword (data in the high bits).
+
+    Uses TIA-102.BAAA-A Table 5-4's generator matrix, NOT a CRC on g(x). See the
+    HAMMING15_PARITY_ROWS comment: the CRC gives an equivalent code with a
+    different mapping, which round-trips perfectly here and decodes to garbage
+    on a real radio."""
+    data11 &= 0x7FF
+    return (data11 << 4) | _hamming15_parity(data11)
 
 
 def hamming15_decode(cw15: int):
@@ -284,7 +423,7 @@ def hamming15_decode(cw15: int):
     error mis-corrects into a third wrong bit. Same reasoning as golay23_decode:
     the honest gate is the frame-level correction count."""
     cw = cw15 & 0x7FFF
-    e = _HAMMING15_SYN[_gf2_remainder(cw, HAMMING15_POLY, 4)]
+    e = _HAMMING15_SYN[_hamming15_syndrome(cw)]
     fixed = cw ^ e
     return (fixed >> 4) & 0x7FF, _popcount(e), True
 
@@ -927,10 +1066,125 @@ def dequantize_imbe_amplitudes(amp_bits, L: int, gain_index: int,
     return mags * IMBE_OUTPUT_SCALE, log_mags, "spectral amplitudes decoded"
 
 
+# --------------------------------------------- derived: the bit priority scan
+def imbe_priority_scan(L: int, allocation=None) -> tuple:
+    """TIA-102.BABA Fig. 22 — the order the amplitude quantizer bits go on air.
+
+    Figure 22 draws b_3..b_{L+1} as columns, bit 10 (the MSB row) at the top
+    down to bit 0 at the bottom, and shades the cells each quantizer actually
+    owns. The scan begins at the upper left and reads LEFT TO RIGHT ALONG EACH
+    ROW, top row first, taking only shaded cells.
+
+    So the frame is ordered by BIT SIGNIFICANCE across all quantizers at once:
+    every quantizer's MSB is transmitted before any quantizer's second bit. That
+    is what makes the leading bits the highest-priority ones, and it is why the
+    amplitude field cannot be read as a contiguous run of per-quantizer values.
+
+    Returns ((quantizer, bit), ...) of length sum(allocation), with the
+    quantizer numbered the standard's way so that the first one is b_3."""
+    L = int(L)
+    alloc = [int(b) for b in (imbe_amplitude_allocation(L) if allocation is None
+                              else allocation)]
+    if len(alloc) != L - 1:
+        raise ValueError(f"L={L} has quantizers b_3..b_{L + 1} = {L - 1} of them, "
+                         f"allocation has {len(alloc)}")
+    if any(b < 0 or b > IMBE_MAX_QUANT_BITS for b in alloc):
+        raise ValueError(f"allocation entries must be 0..{IMBE_MAX_QUANT_BITS}")
+    return tuple((3 + c, r)
+                 for r in range(IMBE_MAX_QUANT_BITS - 1, -1, -1)
+                 for c in range(L - 1) if alloc[c] > r)
+
+
+def imbe_control_map(K: int) -> dict:
+    """{offset: (quantizer, bit)} for the V/UV and gain bits inside info[6:85].
+
+    Worth isolating because these positions depend ONLY on K — that is, only on
+    the pitch index — and not on the spectral amplitude bit allocation. So the
+    voicing decisions and the gain index of a frame remain recoverable even for
+    a harmonic count whose amplitude allocation is unsourced, which is what lets
+    imbe_amplitude_available() stay a magnitudes-only gate instead of making the
+    whole frame unreadable.
+
+    Section 7.1 order: gain bits 5,4,3 lead the prioritized stream; 39 amplitude
+    scan bits follow; then the whole V/UV field MSB first (its MSB is the LOWEST
+    band); then gain bits 2 and 1; the scan resumes; and gain bit 0 is last."""
+    K = int(K)
+    m = {0: (2, 5), 1: (2, 4), 2: (2, 3)}
+    base = IMBE_CONTROL_PREFIX + IMBE_SCAN_BREAK
+    for j in range(K):
+        m[base + j] = (1, K - 1 - j)
+    m[base + K] = (2, 2)
+    m[base + K + 1] = (2, 1)
+    m[IMBE_SCAN_STOP - IMBE_SCAN_START - 1] = (2, 0)
+    return m
+
+
+def imbe_priority_map(L: int, allocation=None) -> tuple:
+    """(quantizer, bit) for each of the 79 prioritized positions info[6:85].
+
+    The control positions from imbe_control_map() with the Fig. 22 amplitude
+    scan threaded through everything left over.
+
+    Quantizer 1 is b_1 (the V/UV decisions), quantizer 2 is b_2 (the gain
+    index), and 3 and up are the spectral amplitude quantizers b_3..b_{L+1}.
+
+    The 79 = 6 + K + sum(alloc) accounting only closes when sum(alloc) is
+    exactly the 73 - K bit budget, so a wrong allocation table cannot quietly
+    produce a plausible-looking map — it raises here instead."""
+    L = int(L)
+    K = imbe_band_count(L)
+    n = IMBE_SCAN_STOP - IMBE_SCAN_START
+    ctrl = imbe_control_map(K)
+    scan = list(imbe_priority_scan(L, allocation))
+    free = [p for p in range(n) if p not in ctrl]
+    if len(scan) != len(free):
+        raise ValueError(f"L={L}: {len(scan)} amplitude bits for {len(free)} free "
+                         f"positions — the bit allocation does not sum to the "
+                         f"{imbe_amplitude_bit_budget(L)['bits']}-bit budget")
+    out = dict(ctrl)
+    out.update(zip(free, scan))
+    return tuple(out[p] for p in range(n))
+
+
+def _imbe_gather(bits, L: int):
+    """info[6:85] -> (b_1, b_2, quantizer indices or None).
+
+    b_1 and b_2 come out of the control positions and are always recoverable.
+    The amplitude quantizers need the bit allocation, so they come back None for
+    a harmonic count imbe_amplitude_available() refuses."""
+    K = imbe_band_count(L)
+    b1 = b2 = 0
+    for pos, (m, n) in imbe_control_map(K).items():
+        if int(bits[IMBE_SCAN_START + pos]) & 1:
+            if m == 1:
+                b1 |= 1 << n
+            else:
+                b2 |= 1 << n
+    if not imbe_amplitude_available(L)[0]:
+        return b1, b2, None, None
+    alloc = imbe_amplitude_allocation(L)
+    qval = [0] * (int(L) - 1)
+    for pos, (m, n) in enumerate(imbe_priority_map(L, alloc)):
+        if m >= 3 and int(bits[IMBE_SCAN_START + pos]) & 1:
+            qval[m - 3] |= 1 << n
+    return b1, b2, qval, alloc
+
+
+def _imbe_scatter(out, L: int, b1: int, b2: int, qval) -> None:
+    """The exact inverse of _imbe_gather, writing into out[6:85] in place."""
+    for pos, (m, n) in enumerate(imbe_priority_map(L)):
+        src = b1 if m == 1 else b2 if m == 2 else qval[m - 3]
+        out[IMBE_SCAN_START + pos] = (int(src) >> n) & 1
+
+
 # -------------------------------------------------------- IMBE frame -> parameters
 def decode_imbe_params(bits88, prev_log_mags=None, enhance: bool = True) -> dict:
-    """88 IMBE information bits -> MBE parameters, per the layout documented at
-    IMBE_PITCH_BITS above.
+    """88 IMBE information bits -> MBE parameters, per TIA-102.BABA section 7.1.
+
+    The 88 bits are the eight prioritized vectors u_0..u_7 concatenated MSB
+    first, exactly as unpack_imbe_frame() returns them. This function undoes the
+    priority scan documented at IMBE_PITCH_BITS above — it does NOT read the
+    fields as contiguous slices, because on a real radio they are not.
 
     prev_log_mags is the previous frame's UNENHANCED log2 amplitudes (the
     `log_magnitudes` this function returned last frame), which the inter-frame
@@ -939,12 +1193,20 @@ def decode_imbe_params(bits88, prev_log_mags=None, enhance: bool = True) -> dict
     unenhanced predictor state — feeding the enhanced values back instead causes
     a slow drift that degrades intelligibility over a few seconds.
 
+    `amplitude_bits` is the GATHERED amplitude field: the quantizer values
+    b_3..b_{L+1} re-serialized MSB-first in allocation order. That is the form
+    the dequantizer consumes and the form worth logging for analysis; it is a
+    permutation of bits drawn from all over the frame, not a slice of it.
+
     magnitudes is None only when the amplitude bit allocation for this L is not
-    sourced (L = 42, 43, 44 — see survey/imbe_tables.py); `note` says so. A
-    reserved pitch index (>= 208) is a silence / frame repeat code and is
-    reported as such, not decoded as a bogus 405 Hz buzz."""
+    sourced (see survey/imbe_tables.py); `note` says so. A reserved pitch index
+    (>= 208) is a silence / frame repeat code and is reported as such, not
+    decoded as a bogus 405 Hz buzz."""
     bits = _as_bits(bits88, IMBE_INFO_BITS, "IMBE information frame")
-    b0 = bits_to_int(bits[0:IMBE_PITCH_BITS])
+    # b_0 is split: six bits at the front, two at info[85..86]. See section 7.1.
+    b0 = ((bits_to_int(bits[0:IMBE_PITCH_HIGH_BITS])
+           << (IMBE_PITCH_BITS - IMBE_PITCH_HIGH_BITS))
+          | bits_to_int([bits[i] for i in IMBE_B0_LOW_INDICES]))
     if b0 >= IMBE_PITCH_RESERVED:
         return {"b0": b0, "reserved_pitch": True, "silence": True, "w0": 0.0,
                 "f0_hz": 0.0, "L": 0, "K": 0, "voiced_bands": [],
@@ -955,14 +1217,20 @@ def decode_imbe_params(bits88, prev_log_mags=None, enhance: bool = True) -> dict
 
     w0, f0_hz, L = imbe_pitch(b0)
     K = imbe_band_count(L)
-    p = IMBE_PITCH_BITS
-    band_flags = [bool(b) for b in bits[p:p + K]]
-    gain_index = bits_to_int(bits[p + K:p + K + IMBE_GAIN_BITS])
-    n_amp = imbe_amplitude_bit_budget(L)["bits"]
-    amp_bits = bits[p + K + IMBE_GAIN_BITS:p + K + IMBE_GAIN_BITS + n_amp].copy()
-    mags, log_mags, note = dequantize_imbe_amplitudes(
-        amp_bits, L, gain_index, prev_log_mags=prev_log_mags, w0=w0,
-        enhance=enhance)
+    b1, gain_index, qval, alloc = _imbe_gather(bits, L)
+    # b_1's MSB is the LOWEST band (mbelib reads bb[1][K-1] for harmonic 1).
+    band_flags = [bool((b1 >> (K - 1 - j)) & 1) for j in range(K)]
+    if qval is None:
+        # Pitch, voicing and gain are recoverable; the amplitudes are not.
+        amp_bits = np.zeros(0, dtype=np.uint8)
+        mags, log_mags, note = None, None, imbe_amplitude_available(L)[1]
+    else:
+        amp_bits = np.concatenate(
+            [int_to_bits(qval[c], alloc[c]) for c in range(L - 1)]
+            + [np.zeros(0, dtype=np.uint8)]).astype(np.uint8)
+        mags, log_mags, note = dequantize_imbe_amplitudes(
+            amp_bits, L, gain_index, prev_log_mags=prev_log_mags, w0=w0,
+            enhance=enhance)
     return {"b0": b0, "reserved_pitch": False, "silence": False, "w0": w0,
             "f0_hz": f0_hz, "L": L, "K": K, "voiced_bands": band_flags,
             "voiced": _expand_voiced(band_flags, L), "gain_index": gain_index,
@@ -976,22 +1244,32 @@ def pack_imbe_params(b0: int, voiced_bands, gain_index: int,
                      amplitude_bits=None) -> np.ndarray:
     """Build 88 information bits from parameter fields (test/self-check path).
 
-    The mirror of decode_imbe_params, so the field layout is asserted by
-    round-trip rather than by assertion-free assumption. amplitude_bits pads with
+    The exact inverse of decode_imbe_params, priority scan and all, so the two
+    now agree on the STANDARD's layout rather than on a shared local convention.
+    Round-tripping through this pair is therefore still not evidence that the
+    layout is right — that comes from TIA-102.BABA 7.1 and from the per-entry
+    agreement with mbelib's bo[] table, both cited at IMBE_PITCH_BITS.
+
+    amplitude_bits is the gathered field (quantizer values MSB-first in
+    allocation order, the same thing decode_imbe_params returns) and pads with
     zeros to fill the frame."""
     b0 = int(b0)
+    out = np.zeros(IMBE_INFO_BITS, dtype=np.uint8)
+    hi = IMBE_PITCH_BITS - IMBE_PITCH_HIGH_BITS
+    out[0:IMBE_PITCH_HIGH_BITS] = int_to_bits(b0 >> hi, IMBE_PITCH_HIGH_BITS)
+    for k, idx in enumerate(IMBE_B0_LOW_INDICES):
+        out[idx] = (b0 >> (hi - 1 - k)) & 1
     if b0 >= IMBE_PITCH_RESERVED:
-        out = np.zeros(IMBE_INFO_BITS, dtype=np.uint8)
-        out[0:IMBE_PITCH_BITS] = int_to_bits(b0, IMBE_PITCH_BITS)
         return out
     _, _, L = imbe_pitch(b0)
     K = imbe_band_count(L)
     flags = list(voiced_bands)
     if len(flags) != K:
         raise ValueError(f"b0={b0} implies L={L}, K={K} bands; got {len(flags)} flags")
-    head = np.concatenate([int_to_bits(b0, IMBE_PITCH_BITS),
-                           np.array([1 if f else 0 for f in flags], dtype=np.uint8),
-                           int_to_bits(int(gain_index), IMBE_GAIN_BITS)])
+    b1 = 0
+    for j, f in enumerate(flags):
+        if f:
+            b1 |= 1 << (K - 1 - j)
     n_amp = imbe_amplitude_bit_budget(L)["bits"]
     amp = np.zeros(n_amp, dtype=np.uint8)
     if amplitude_bits is not None:
@@ -999,9 +1277,10 @@ def pack_imbe_params(b0: int, voiced_bands, gain_index: int,
         if supplied.size > n_amp:
             raise ValueError(f"amplitude_bits too long: {supplied.size} > {n_amp}")
         amp[:supplied.size] = supplied
-    # b_{L+2}: the last bit of the 88 sits after the amplitude field.
-    tail = np.zeros(IMBE_INFO_BITS - head.size - n_amp, dtype=np.uint8)
-    return np.concatenate([head, amp, tail]).astype(np.uint8)
+    qval, _ = imbe_amplitude_indices(amp, L)
+    _imbe_scatter(out, L, b1, int(gain_index) & 0x3F, qval)
+    # info[87] is b_{L+2}, which the decoder does not use; left zero.
+    return out
 
 
 # ------------------------------------------------------------ placeholder envelope
@@ -1389,6 +1668,36 @@ def capability() -> dict:
     return {
         "module": "ambe",
         "sample_rate": SAMPLE_RATE,
+        # The transport contract, stated where the router can read it.
+        "input_bit_order": (
+            "IMBE: 144 coded bits in code-word order c_0..c_7, MSB-first — i.e. "
+            "ALREADY transport-de-interleaved. survey/p25.py does this per "
+            "TIA-102.BAAA-A Table 5-1 before calling here; any other caller "
+            "must too."),
+        # Two constants that used to be local inventions and now are not. Kept
+        # machine-readable because 'we fixed it' is worth nothing without saying
+        # what it was checked against.
+        "air_interface_conformance": {
+            "hamming15_11_generator": {
+                "source": "TIA-102.BAAA-A section 5.8, Table 5-4",
+                "corroborated_by": ("mbelib ecc_const.h hammingGenerator[4], "
+                                    "parsed deterministically (ISC)"),
+                "was": ("a CRC on g(x)=x^4+x+1, which generates the same code "
+                        "with permuted rows — right distance, right syndromes, "
+                        "perfect round-trip, WRONG codewords off-air"),
+            },
+            "imbe_88_bit_field_order": {
+                "source": "TIA-102.BABA section 7.1 (Bit Prioritization), Fig. 22",
+                "derived": True,
+                "corroborated_by": (
+                    "reproduces mbelib's tabulated bo[48][79][2] priority map "
+                    "for all 3792 entries, parsed from imbe7200x4400_const.h "
+                    "sha256 " + str(_T.MBELIB_SHA256)),
+                "was": ("b0=info[0:8] then b1, b2 and a contiguous amplitude "
+                        "field — a local convention that decoded a clean "
+                        "off-air frame to the wrong pitch, hence the wrong L"),
+            },
+        },
         "protocols": {
             "p25_phase1_imbe": {"fec": True,
                                 "parameters": "pitch + voicing + magnitudes",
@@ -1437,7 +1746,6 @@ def capability() -> dict:
                 "tia_corroborated_L": _T.TIA_CORROBORATED_L,
             },
             "unverified_assumptions": [
-                "88-bit field ORDER is this module's convention, not sourced",
                 "no off-air frame has ever been decoded",
                 # The honest residual on the tables themselves.
                 "for L=18..56 the higher-order allocation rests on mbelib alone; "
@@ -1452,21 +1760,25 @@ def capability() -> dict:
             "The IMBE spectral amplitude dequantizer is implemented and this "
             "module now decodes a full envelope for ALL {tot} legal harmonic "
             "counts (L=9..56) — the former L=42/43/44 gap is closed. Both "
-            "sourced tables now have per-entry verification against a "
-            "hash-pinned copy of mbelib. What remains unproven is NOT the "
-            "transcription: it is that NO OFF-AIR FRAME HAS EVER BEEN DECODED. "
-            "The 88-bit field order is this module's own convention and "
-            "transport de-interleaving is absent, so 'intelligible' means the "
-            "dequantizer ran, not that a human heard words. Label any audio "
-            "shown to an operator accordingly."
+            "sourced tables have per-entry verification against a hash-pinned "
+            "copy of mbelib, the Hamming(15,11) generator is now TIA-102.BAAA-A "
+            "Table 5-4's rather than a locally-invented equivalent code, and "
+            "the 88-bit field order is now TIA-102.BABA clause 7.1's priority "
+            "scan rather than this module's own convention. What remains "
+            "unproven is NOT the transcription: it is that NO OFF-AIR FRAME HAS "
+            "EVER BEEN DECODED. Stages that are each right can still be wired "
+            "together wrongly, so 'intelligible' means the dequantizer ran, not "
+            "that a human heard words. Label any audio shown to an operator "
+            "accordingly."
         ).format(tot=total_L) if not unverified else (
             "The IMBE spectral amplitude dequantizer is implemented and this "
             "module decodes a full envelope for {ok} of {tot} harmonic counts "
-            "(L={bad} are unsupported and return no magnitudes). NO OFF-AIR "
-            "FRAME HAS EVER BEEN DECODED: the 88-bit field order is this "
-            "module's own convention and transport de-interleaving is absent, "
-            "so 'intelligible' means the dequantizer ran, not that a human "
-            "heard words. Label any audio shown to an operator accordingly."
+            "(L={bad} are unsupported and return no magnitudes; their pitch, "
+            "voicing and gain still decode). The Hamming(15,11) generator and "
+            "the 88-bit field order are now the published ones. NO OFF-AIR "
+            "FRAME HAS EVER BEEN DECODED, so 'intelligible' means the "
+            "dequantizer ran, not that a human heard words. Label any audio "
+            "shown to an operator accordingly."
         ).format(ok=total_L - len(unverified), tot=total_L,
                  bad="/".join(str(x) for x in unverified)),
     }

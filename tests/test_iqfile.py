@@ -78,14 +78,25 @@ def _p25_voice_frames(rng, pitch0=90):
     """Nine IMBE frames, properly FEC-coded by ambe.pack_imbe_frame().
 
     Real coded frames, not filler: that is what lets the end-to-end test assert
-    100 % IMBE FEC-clean and therefore prove that the voice bits survive the
-    write/read round trip bit for bit. A plausible, slowly-moving pitch index
-    also exercises the field-order plausibility check."""
+    100 % IMBE FEC-clean and therefore prove the voice bits survive the
+    write/read round trip bit for bit.
+
+    Built through ambe.pack_imbe_params(), NOT by writing raw bit positions.
+    This originally wrote the pitch into info[0:8], which was this project's own
+    convention; the real IMBE layout (TIA-102.BABA 7.1) splits b_0 across u_0
+    bits 11..6 and u_7 bits 2..1. Once the layout was corrected the old fixture
+    still PASSED — it just encoded a different pitch than it named (asking for
+    90..98 actually produced 91,90,93,92,95,95,99,96). A positive control that
+    passes while controlling nothing is worse than no control, so the pitch is
+    now set through the parameter API and asserted to survive below."""
     out = []
     for i in range(p25.VOICE_FRAMES_PER_LDU):
-        info = np.zeros(ambe.IMBE_INFO_BITS, dtype=np.uint8)
-        info[:ambe.IMBE_PITCH_BITS] = [int(b) for b in format(pitch0 + i, "08b")]
-        info[ambe.IMBE_PITCH_BITS:] = rng.integers(0, 2, ambe.IMBE_INFO_BITS - 8)
+        b0 = pitch0 + i
+        _, _, L = ambe.imbe_pitch(b0)          # band count follows L, not b0
+        info = ambe.pack_imbe_params(
+            b0,
+            voiced_bands=rng.integers(0, 2, ambe.imbe_band_count(L)),
+            gain_index=int(rng.integers(0, 64)))
         out.append(list(ambe.pack_imbe_frame(info)))
     return out
 
@@ -415,6 +426,27 @@ class TestP25EndToEnd(_Tmp):
     exactly the property wanted: when a real off-air capture fails to decode, the
     operator needs to be able to rule the container out in one command.
     """
+
+    def test_the_fixture_encodes_the_pitch_it_claims(self):
+        """Guards the POSITIVE CONTROL itself.
+
+        _p25_voice_frames() used to write the pitch at raw offsets 0..7, this
+        project's own convention. When the real TIA-102.BABA 7.1 layout landed,
+        this fixture kept passing while silently encoding a DIFFERENT pitch than
+        it named — asking for 90..98 produced 91,90,93,92,95,95,99,96. Every
+        assertion downstream still went green, because none of them depended on
+        the value being what it said. A control that passes while controlling
+        nothing is worse than no control at all, so it is now pinned directly.
+        """
+        rng = np.random.default_rng(7)
+        frames = _p25_voice_frames(rng, pitch0=90)
+        for i, coded in enumerate(frames):
+            back = ambe.unpack_imbe_frame(np.asarray(coded, dtype=np.uint8))
+            self.assertTrue(back["fec_ok"], f"frame {i} did not FEC-clean")
+            got = ambe.decode_imbe_params(back["info_bits"])
+            self.assertEqual(got["b0"], 90 + i,
+                             f"frame {i}: fixture named pitch {90 + i} but "
+                             f"encoded {got['b0']}")
 
     def setUp(self):
         super().setUp()
