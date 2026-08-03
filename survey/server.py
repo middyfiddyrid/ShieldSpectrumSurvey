@@ -2155,6 +2155,85 @@ def create_app(db, cfg, demo=False) -> Flask:
                         "signals": rows, "counts": counts,
                         "remaining_unexplained": remaining})
 
+    @app.post("/api/signals/manual")
+    def signal_manual():
+        """Operator marked a frequency by eye off the live spectrum/waterfall and
+        sent it to review. This exists because the detector's threshold is not the
+        operator's eye: a signal plainly visible on the display can sit under the
+        detection threshold (or inside a dampened/expected range) and never reach
+        the ledger. The tech has to be able to say "that one, right there".
+
+        EVIDENTIARY: stored with operator_marked=1 so the report can always tell a
+        human-marked frequency from an instrument detection. It is NOT promoted to
+        a detection — classification stays UNVERIFIED and triage starts 'suspect'
+        so it lands in the review queue rather than in findings."""
+        from .correlation import classify_signal
+        session = st.session()
+        if not session:
+            return err("no session")
+        body = request.get_json(silent=True) or {}
+        center_mhz = body.get("center_mhz")
+        if center_mhz is None:
+            return err("need center_mhz")
+        try:
+            center_mhz = float(center_mhz)
+        except (TypeError, ValueError):
+            return err("center_mhz must be a number")
+        if not (0 < center_mhz < 100_000):
+            return err("center_mhz out of range")
+        bw_khz = body.get("bw_khz")
+        try:
+            bw_khz = float(bw_khz) if bw_khz not in (None, "") else None
+        except (TypeError, ValueError):
+            bw_khz = None
+        peak_dbm = body.get("peak_dbm")
+        try:
+            peak_dbm = float(peak_dbm) if peak_dbm not in (None, "") else None
+        except (TypeError, ValueError):
+            peak_dbm = None
+
+        # Attach to the sweep in progress; if none is running, the most recent
+        # sweep in this session (sweep_id is NOT NULL). A session with no sweep
+        # at all has nothing to attach to.
+        cur = st.controller.state or {}
+        sweep_id = cur.get("sweep_id")
+        if not sweep_id:
+            row = db.query_one("SELECT id FROM sweeps WHERE session_id=? "
+                               "ORDER BY id DESC LIMIT 1", (session["id"],))
+            sweep_id = row["id"] if row else None
+        if not sweep_id:
+            return err("run a sweep first — there is nothing to attach this to")
+
+        # Link it to the stored segment whose span contains this frequency, so the
+        # ledger's segment-review and thumbnail crop work on it like any other row.
+        # A segment row only exists once that segment finishes, so a mark made mid
+        # segment legitimately has none — the column is nullable.
+        seg_row = db.query_one(
+            "SELECT id FROM segments WHERE sweep_id=? AND low_mhz<=? AND high_mhz>=? "
+            "ORDER BY id DESC LIMIT 1", (sweep_id, center_mhz, center_mhz))
+        segment_id = seg_row["id"] if seg_row else None
+        baseline_rows = db.query("SELECT * FROM baseline WHERE session_id=?",
+                                 (session["id"],))
+        cls = classify_signal(center_mhz, baseline_rows)
+        now = time.time()
+        note = (body.get("note") or "").strip()
+        sid = db.execute(
+            "INSERT INTO signals (sweep_id,session_id,segment_id,room,module,phase,"
+            "center_mhz,bw_khz,peak_dbm,classification,matched_label,match_reason,"
+            "caution,identity_tier,display_label,detected_utc,"
+            "operator_marked,operator_marked_utc,triage_status,triage_notes,"
+            "triage_updated_utc) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (sweep_id, session["id"], segment_id, cur.get("room"), cur.get("module"),
+             cur.get("phase"), center_mhz, bw_khz, peak_dbm,
+             "UNVERIFIED", cls.matched_label,
+             "operator marked this frequency on the live display",
+             int(cls.caution), cls.identity_tier, cls.display_label, now,
+             1, now, "suspect", note, now))
+        log.info("operator marked %.4f MHz for review (signal %s)", center_mhz, sid)
+        row = db.query_one("SELECT * FROM signals WHERE id=?", (sid,))
+        return jsonify(dict(row))
+
     @app.post("/api/signals/<int:signal_id>/triage")
     def signal_triage(signal_id):
         session = st.session()

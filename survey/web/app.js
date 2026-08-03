@@ -1248,7 +1248,12 @@ function renderLiveLedger() {
       `onerror="this.style.visibility='hidden'" title="click: expand signal picture + details"></td>` +
       `<td class="det-utc" title="${esc(fmtDetected(s, true))}">${esc(fmtDetected(s))}</td>` +
       `<td><a class="freqlink" href="#" data-center="${s.center_mhz}" data-label="${esc(id)}" ` +
-      `data-sid="${s.id}" data-attr="${esc(s.attribution_status || "")}">${fmtF(s.center_mhz)}</a></td>` +
+      `data-sid="${s.id}" data-attr="${esc(s.attribution_status || "")}">${fmtF(s.center_mhz)}</a>` +
+      // A frequency the OPERATOR marked by eye is not an instrument detection.
+      // It has to be obvious at a glance in the ledger, not just in the database.
+      (s.operator_marked ? `<span class="op-marked" title="The operator marked this ` +
+        `frequency on the live display — it is NOT an automatic detection">MARKED BY EYE</span>` : "") +
+      `</td>` +
       `<td>${s.peak_dbm} dBm</td>` +
       `<td>${s.snr_db != null ? s.snr_db + " dB" : "—"}</td>` +
       `<td>${s.bw_khz != null ? Math.round(s.bw_khz) + " kHz" : "—"}</td>` +
@@ -2151,6 +2156,166 @@ function redrawSweepChart() {
   if (t && $("sweep-overlay").classList.contains("show"))
     drawTrace($("livechart"), t, muteRangesFor(), App.hoverHL);
 }
+
+/* ---------- F9: read & mark ANY frequency straight off the display ----------
+   The detector's threshold is not the operator's eye. A signal that is plainly
+   VISIBLE on the chart or waterfall can sit under the detection threshold, or
+   inside a dampened "expected" range, and never reach the ledger — so the tech
+   has no way to say "that one, right there". These handlers give them one:
+   hover reads the frequency under the cursor, click runs the SAME fused ANALYZE
+   the ledger rows use, and ADD TO REVIEW puts it in the queue marked as
+   operator-marked (never as an instrument detection). */
+const XHair = { mhz: null, dbm: null, raf: 0 };
+
+// x pixel -> {mhz,dbm}. Uses drawTrace's exact i/(n-1) bin-CENTER mapping (the
+// same one pushWaterfall matches), so the readout agrees with the peak the
+// operator is actually pointing at instead of sitting a half-bin off.
+function traceAtX(cv, clientX) {
+  const t = App._lastTrace;
+  if (!t) return null;
+  const arr = t.amps || t.maxpeak || t.avg || [];
+  const n = arr.length;
+  if (!n) return null;
+  const r = cv.getBoundingClientRect();
+  if (!r.width) return null;
+  const frac = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+  const i = Math.round(frac * (n - 1));
+  const freqs = t.freqs || [];
+  const mhz = (freqs.length === n) ? freqs[i]
+    : ((t.low != null && t.high != null) ? t.low + frac * (t.high - t.low) : null);
+  if (mhz == null) return null;
+  return { mhz, dbm: (arr[i] == null ? null : arr[i]) };
+}
+
+function xhairMove(ev, cv) {
+  const p = traceAtX(cv, ev.clientX);
+  if (!p) { xhairClear(); return; }
+  XHair.mhz = p.mhz; XHair.dbm = p.dbm;
+  const el = $("xhair-readout");
+  el.innerHTML = `<b>${esc(fmtF(p.mhz))}</b>` +
+    (p.dbm == null ? "" : ` <span class="xr-amp">${p.dbm.toFixed(1)} dBm</span>`) +
+    `<br><span class="xr-hint">click to inspect this frequency</span>`;
+  el.classList.add("show");
+  // keep the box beside the cursor but always fully on screen
+  const pad = 14, w = el.offsetWidth, h = el.offsetHeight;
+  let x = ev.clientX + pad, y = ev.clientY + pad;
+  if (x + w > window.innerWidth - 4) x = ev.clientX - pad - w;
+  if (y + h > window.innerHeight - 4) y = ev.clientY - pad - h;
+  el.style.left = Math.max(4, x) + "px";
+  el.style.top = Math.max(4, y) + "px";
+  // thin vertical marker on the chart — reuses the ledger-hover highlight so
+  // drawTrace needs no new parameter
+  const t = App._lastTrace;
+  const span = (t && t.high != null && t.low != null) ? (t.high - t.low) : 0;
+  const half = Math.max(span * 0.002, 0.004);
+  App.hoverHL = { lo: p.mhz - half, hi: p.mhz + half };
+  // one redraw per animation frame — mousemove fires far faster than the chart
+  // can usefully repaint, and drawTrace redraws the whole canvas
+  if (!XHair.raf) XHair.raf = requestAnimationFrame(() => {
+    XHair.raf = 0; redrawSweepChart();
+  });
+}
+
+function xhairClear() {
+  const el = $("xhair-readout");
+  if (el) el.classList.remove("show");
+  XHair.mhz = null;
+  if (!App._hoverRow) { App.hoverHL = null; redrawSweepChart(); }
+}
+
+["livechart", "waterfall"].forEach(id => {
+  const cv = $(id);
+  if (!cv) return;
+  cv.addEventListener("mousemove", (e) => xhairMove(e, cv));
+  cv.addEventListener("mouseleave", xhairClear);
+  cv.addEventListener("click", (e) => {
+    const p = traceAtX(cv, e.clientX);
+    if (p) openMarkModal(p.mhz, p.dbm);
+  });
+});
+
+const Mark = { mhz: null, dbm: null, sid: null };
+
+function openMarkModal(mhz, dbm) {
+  Mark.mhz = mhz; Mark.dbm = dbm; Mark.sid = null;
+  $("mm-title").textContent = "Inspect " + fmtF(mhz);
+  $("mm-sub").textContent = (dbm == null ? "" : dbm.toFixed(1) + " dBm on the display");
+  $("mm-verdict").innerHTML = "";
+  $("mm-grid").innerHTML = "";
+  $("mm-cands").innerHTML = "";
+  $("mm-msg").textContent = "";
+  const add = $("mm-add");
+  add.disabled = false; add.textContent = "＋ ADD TO REVIEW";
+  $("mark-modal").classList.add("show");
+  xhairClear();
+  runMarkAnalyze();
+}
+function closeMarkModal() { $("mark-modal").classList.remove("show"); }
+
+async function runMarkAnalyze() {
+  const stat = $("mm-status");
+  stat.textContent = "analyzing " + fmtF(Mark.mhz) + " …";
+  let j;
+  try { j = await api("/api/analyze/signal", { center_mhz: Mark.mhz, label: "" }); }
+  catch (e) { stat.textContent = "analyze failed: " + (e.message || e); return; }
+  App.lastAnalyze = j;
+  stat.textContent = j.note || "";
+  const interp = j.interpretation || {};
+  const verdict = interp.readable || interp.summary || "";
+  $("mm-verdict").innerHTML = verdict
+    ? esc(verdict)
+    : "<span class='note'>no verdict yet — see what could occupy this band below</span>";
+  const f = j.features || {};
+  const rows = [
+    ["Frequency", fmtF(Mark.mhz)],
+    ["Anything there?", j.signal_present
+      ? "yes — above the noise floor"
+      : "no clear signal above the noise floor right now"],
+    ["Signal strength over noise", f.snr_db == null ? "—" : f.snr_db + " dB"],
+    ["Protocol decoded", (j.decode && j.decode.protocol) || "none"],
+    ["Radio used", j.source || "—"],
+  ];
+  $("mm-grid").innerHTML = rows.map(([k, v]) =>
+    `<div>${esc(k)}</div><div>${esc(String(v))}</div>`).join("");
+  const cands = (j.candidates || []).slice(0, 6);
+  $("mm-cands").innerHTML = cands.map(c =>
+    `<div class="mm-cand"><span>${esc(c.name || c.label || "?")}</span>` +
+    `<span class="note">${c.score == null ? "" : esc(String(c.score))}</span></div>`).join("");
+}
+
+if ($("mm-close")) $("mm-close").addEventListener("click", closeMarkModal);
+if ($("mark-modal")) $("mark-modal").addEventListener("click", (e) => {
+  if (e.target.id === "mark-modal") closeMarkModal();       // backdrop click
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && $("mark-modal") &&
+      $("mark-modal").classList.contains("show")) closeMarkModal();
+});
+if ($("mm-reanalyze")) $("mm-reanalyze").addEventListener("click", runMarkAnalyze);
+if ($("mm-listen")) $("mm-listen").addEventListener("click", () => {
+  if (Mark.mhz != null) listenAt(Mark.mhz, fmtF(Mark.mhz), undefined, Mark.sid, null);
+});
+if ($("mm-add")) $("mm-add").addEventListener("click", async () => {
+  const btn = $("mm-add");
+  if (Mark.mhz == null) return;
+  btn.disabled = true;
+  try {
+    const r = await api("/api/signals/manual", {
+      center_mhz: Mark.mhz,
+      peak_dbm: Mark.dbm,
+      note: "operator marked this off the live display",
+    });
+    Mark.sid = r.id;
+    btn.textContent = "✓ ADDED TO REVIEW";
+    $("mm-msg").textContent = "Added at " + fmtF(r.center_mhz) +
+      " — it is in the review list as OPERATOR-MARKED, not as an instrument " +
+      "detection, so the report can always tell the two apart.";
+    ledgerLast = 0;                       // let the next poll pick it up now
+  } catch (e) {
+    btn.disabled = false;
+    $("mm-msg").textContent = "could not add: " + (e.message || e);
+  }
+});
 
 /* -- historic segment review: click a ledger row, see the segment it was
       found in — the stored max hold + average (the realtime trace is never

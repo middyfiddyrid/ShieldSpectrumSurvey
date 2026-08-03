@@ -403,6 +403,16 @@ class Database:
             if "experiments_json" not in cols:
                 c.execute("ALTER TABLE signals ADD COLUMN "
                           "experiments_json TEXT DEFAULT ''")
+            # OPERATOR-MARKED detections (tech clicked the spectrum/waterfall and
+            # said "this one"). EVIDENTIARY: a human-marked frequency is NOT an
+            # instrument detection and must never be presentable as one — the
+            # report has to be able to tell them apart. 0 = detector found it,
+            # 1 = the operator marked it by eye.
+            if "operator_marked" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN "
+                          "operator_marked INTEGER DEFAULT 0")
+            if "operator_marked_utc" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN operator_marked_utc REAL")
             # LAN device checker: IP/vendor enrichment + operator block state on
             # the shared inventory table (kind='lan'). blocked is set ONLY by an
             # operator-confirmed action, never by discovery.

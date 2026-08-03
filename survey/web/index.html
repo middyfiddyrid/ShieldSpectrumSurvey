@@ -261,6 +261,36 @@ body:not(.single-rx) nav .step.single-only { display:none; }
 #next-step-banner .btn { padding:5px 12px; font-size:12px; }
 #sl-nav-pos { margin-left:auto; }
 #sl-head #sl-close { margin-left:8px; }
+/* ---- cursor frequency readout over the live chart / waterfall ---- */
+#xhair-readout { display:none; position:fixed; z-index:82; pointer-events:none;
+  padding:4px 8px; background:rgba(6,10,16,.94); border:1px solid var(--green);
+  border-radius:3px; font-size:12.5px; line-height:1.45; color:var(--bright);
+  white-space:nowrap; box-shadow:0 2px 10px rgba(0,0,0,.5); }
+#xhair-readout.show { display:block; }
+#xhair-readout b { color:var(--green); font-size:13.5px; }
+#xhair-readout .xr-amp { color:var(--txt); }
+#xhair-readout .xr-hint { color:var(--muted); font-size:11px; }
+#livechart, #waterfall { cursor:crosshair; }
+/* ---- click-a-frequency inspector ---- */
+#mm-card { background:var(--panel); border:1px solid var(--line); border-radius:4px;
+  padding:16px; width:min(720px,94vw); max-height:92vh; overflow-y:auto;
+  display:flex; flex-direction:column; gap:12px; }
+#mm-head { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+#mm-head b { font-size:16px; color:var(--bright); }
+#mm-close { margin-left:auto; }
+#mm-verdict:empty { display:none; }
+#mm-verdict { padding:8px 10px; background:var(--panel2); border:1px solid var(--line);
+  border-radius:3px; font-size:13px; }
+#mm-cands:empty { display:none; }
+#mm-cands { display:flex; flex-direction:column; gap:1px; border:1px solid var(--line);
+  border-radius:3px; overflow:hidden; }
+#mm-cands .mm-cand { display:flex; gap:10px; justify-content:space-between;
+  padding:5px 9px; background:var(--panel2); font-size:12.5px; }
+#mm-msg:empty { display:none; }
+/* operator-marked (not an instrument detection) — must read at a glance */
+.op-marked { margin-left:6px; padding:1px 5px; font-size:9.5px; letter-spacing:.4px;
+  border:1px solid #d9a441; color:#d9a441; border-radius:2px; vertical-align:middle;
+  white-space:nowrap; }
 /* verification rundown — the ordered "how we know what this is" checklist */
 #sl-rundown { display:flex; flex-direction:column; gap:1px; border:1px solid var(--line);
   border-radius:3px; overflow:hidden; }
@@ -2018,6 +2048,35 @@ body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid va
     <div id="sl-grid" class="kv"></div>
     <div class="row" id="sl-actions"></div>
     <div class="note" id="sl-msg"></div>
+  </div>
+</div>
+
+<!-- Cursor frequency readout: follows the mouse over the live chart / waterfall
+     so the tech can read the frequency of anything they can SEE, whether or not
+     the detector picked it up. -->
+<div id="xhair-readout"></div>
+
+<!-- Click-a-frequency inspector. Runs the same fused ANALYZE the ledger rows
+     use (/api/analyze/signal), on a frequency the operator picked by eye. -->
+<div class="overlay" id="mark-modal" style="z-index:75">
+  <div id="mm-card">
+    <div id="mm-head">
+      <b id="mm-title">Inspect frequency</b>
+      <span class="note" id="mm-sub"></span>
+      <button class="btn" id="mm-close">✕ CLOSE</button>
+    </div>
+    <div id="mm-body">
+      <div class="note" id="mm-status">analyzing…</div>
+      <div id="mm-verdict"></div>
+      <div id="mm-grid" class="kv"></div>
+      <div id="mm-cands"></div>
+    </div>
+    <div class="row" id="mm-actions">
+      <button class="btn primary" id="mm-add">＋ ADD TO REVIEW</button>
+      <button class="btn" id="mm-listen">▸ TUNE &amp; LISTEN</button>
+      <button class="btn" id="mm-reanalyze">↻ RE-ANALYZE</button>
+    </div>
+    <div class="note" id="mm-msg"></div>
   </div>
 </div>
 
