@@ -668,7 +668,8 @@ def create_app(db, cfg, demo=False) -> Flask:
         # real radio listen state (drives the LIVE indicator) — sourced from the
         # controller flags _audio_blocks sets, so a silently-dropped stream reads idle
         ls = getattr(st.controller, "listen_spectrum", None)
-        live = {"listening": bool(getattr(st.controller, "listening", False))}
+        live = {"listening": bool(getattr(st.controller, "listening", False)),
+                "error": getattr(st.controller, "listen_error", None)}
         if ls:
             live.update({"center_mhz": ls.get("center_mhz"), "mode": ls.get("mode"),
                          "ts": ls.get("ts")})
@@ -1451,6 +1452,7 @@ def create_app(db, cfg, demo=False) -> Flask:
         with mlock:                           # wait for the previous user of THIS radio to release
             mstop.clear()
             st.controller.listening = True
+            st.controller.listen_error = None      # new tune -> clear the last stream's failure
             st.controller.listen_offset_hz = 0.0   # new tune -> demod band center until clicked
             st.controller.listen_chan_bw_hz = None # new tune -> per-mode default channel width
             st.controller.listen_squelch_snr_db = sq_default  # ON by default (5 dB; config listen_squelch_snr_db, null=off)
@@ -1527,6 +1529,17 @@ def create_app(db, cfg, demo=False) -> Flask:
                 # this line is the field evidence for "the monitor radio failed"
                 log.warning("live monitor stream on %s ended: %s: %s",
                             msrc, type(e).__name__, e)
+                # ...and publish it. A dead radio used to leave the client an
+                # empty 200 with no error anywhere in the UI, so the operator
+                # watched a live-looking waterfall (served by the separate
+                # listen_spectrum path) and heard silence with nothing to
+                # explain it. uhd_error 44 on set_rx_rate is the common one:
+                # replug the B220. Only record a genuine device failure — a
+                # retune or a closed tab lands here too and is not an error.
+                if not mstop.is_set():
+                    st.controller.listen_error = {
+                        "source": msrc, "kind": type(e).__name__, "detail": str(e),
+                        "ts": _time.time()}
             finally:
                 st.controller.listening = False
                 st.controller.listen_spectrum = None

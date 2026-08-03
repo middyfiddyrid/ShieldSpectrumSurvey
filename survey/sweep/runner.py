@@ -74,6 +74,7 @@ class SweepController:
         self.listen_stop = threading.Event()   # set to stop the active audio stream
         self.listening = False
         self.listen_spectrum = None            # latest live analyzer+waterfall from the audio stream
+        self.listen_error = None               # why the last audio stream died, for the UI to show
         self.record_stop = threading.Event()   # set to stop the active monitor recording
         self.recording = None                  # active/last recording descriptor
         # F8 phase-interferometry DF (B220 dual-RX): dedicated stop event so

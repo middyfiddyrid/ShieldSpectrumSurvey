@@ -877,9 +877,17 @@ class B220Source(AD936xSource):
     def stream_iq(self, center_hz: float, sample_rate: float, n_block: int, stop):
         """Continuous IQ for live audio (UHD continuous mode — the Pluto/iio
         kernel-buffer dance in the base class does not apply)."""
+        # LO FIRST, then rate — same ordering (and same reason) as capture_iq_dual
+        # below. The AD9361 derives its baseband VCO from the CURRENT LO, so
+        # setting the listen rate while the LO is still parked at the previous
+        # sweep's center makes the VCO search fail with "RFVCO can't find valid
+        # VCO rate" (uhd_error 44) and the stream dies before a single sample.
+        # Rate-first was why listening failed where sweeping (which sets its rate
+        # once at open) and DF (which already tunes first) both worked, and why
+        # the same frequency could succeed or fail depending on the preceding LO.
+        self._set_lo(center_hz)
         self._set_sample_rate(sample_rate)
         self._set_rf_bandwidth(sample_rate)
-        self._set_lo(center_hz)
         if self._settle_s > 0:
             time.sleep(self._settle_s)
         self.sdr.start_continuous(self._chan)
@@ -894,9 +902,23 @@ class B220Source(AD936xSource):
                 self.sdr.stop_continuous()
             except Exception:  # noqa: BLE001
                 pass
-            self._set_sample_rate(self._fs)
-            self._set_rf_bandwidth(self._fs)
-            self._set_buffer_size(self._nsamp)
+            # Restoring the sweep rate can hit the same VCO wall. If it does,
+            # drop the handle: is_alive() then goes False and the controller
+            # reconnects at the configured sweep rate. Swallowing it would leave
+            # the radio at the listen rate while the sweep still does its math
+            # at self._fs — a silently mis-scaled sweep is far worse than a
+            # reconnect.
+            try:
+                self._set_sample_rate(self._fs)
+                self._set_rf_bandwidth(self._fs)
+                self._set_buffer_size(self._nsamp)
+            except Exception as e:  # noqa: BLE001
+                log.warning("could not restore the sweep rate after listening "
+                            "(%s) — closing the radio so it reopens clean", e)
+                try:
+                    self.close()
+                except Exception:  # noqa: BLE001
+                    pass
 
     def capture_iq(self, center_hz: float, sample_rate: float,
                    n_samples: int) -> np.ndarray:

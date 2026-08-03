@@ -449,10 +449,49 @@ function render(st) {
       lb.textContent = "● LIVE" + (lv.center_mhz != null ? " @ " + fmtF(lv.center_mhz) : "") +
         (lv.mode ? " " + String(lv.mode).toUpperCase() : "") + (App.autoTimer ? " · AUTO" : "");
       lb.style.color = "#ff5252";
+      // The stream holding the radio can be a LEFTOVER from an earlier tune (a
+      // preempted or fallback stream that survived) — then this badge contradicts
+      // the panel title and nothing says which is real (2026-08-02: panel on
+      // 797.8092, radio still demodulating 343.9386). Flag it. The 5 s grace
+      // covers normal takeover lag on a re-tune; AUTO stepping skips the check.
+      if (!App.autoTimer && App.inspCenter != null && lv.center_mhz != null &&
+          Math.abs(lv.center_mhz - App.inspCenter) > 0.002 &&
+          Date.now() - (App.inspTunedAt || 0) > 5000) {
+        lb.textContent = "● LIVE @ " + fmtF(lv.center_mhz) +
+          " ⚠ LEFTOVER STREAM — this panel is " + fmtF(App.inspCenter) +
+          " — press LISTEN to retake";
+        lb.style.color = "#ffd24a";
+      }
     } else {
       lb.textContent = "○ IDLE"; lb.style.color = "#6b7b90";
     }
+    // Say WHY the audio stopped. The stream can die on the radio while the
+    // endpoint has already returned 200, so without this the operator watches a
+    // live-looking waterfall and hears silence with nothing to explain it —
+    // which is exactly how a dead radio stayed invisible for weeks. The backend
+    // clears listen_error on every fresh tune, so this self-clears on retry.
+    const nt = $("insp-note");
+    if (nt) {
+      if (!lv.listening && lv.error) {
+        const d = String(lv.error.detail || lv.error.kind || "");
+        const rig = lv.error.source === "b220" ? "B220 Mini"
+                  : (lv.error.source === "pluto" ? "Pluto" : (lv.error.source || "radio"));
+        let hint = "";
+        if (/worker is not running|reconnect to respawn/i.test(d))
+          hint = "  ▸ press CONNECT to respawn the radio worker, then tune again.";
+        else if (/RFVCO|uhd_error 44|set_rx_rate/i.test(d))
+          hint = "  ▸ the radio refused the listen sample rate. Unplug the " +
+                 "B220 USB for 5 s, replug, then tune again without sweeping first.";
+        nt.textContent = "AUDIO STREAM DIED on the " + rig + " — " + d + hint;
+        nt.style.cssText = "background:rgba(255,193,7,.12);border:1px solid #ffc107;" +
+                           "color:#ffc107;padding:5px 10px;border-radius:3px";
+        App._liveErrShown = true;
+      } else if (App._liveErrShown && !lv.error) {
+        nt.textContent = ""; nt.style.cssText = ""; App._liveErrShown = false;
+      }
+    }
   }
+  renderMonitorBanner(st);
   // sync the device-source picker to the active/last-used source on first load
   // (don't fight the operator if they've changed it this session)
   if ($("device-source") && !App._srcSynced && st.source) {
@@ -1923,10 +1962,13 @@ function listenStop() {
 
 // must be called from a user gesture (the click that opens inspect) so the
 // browser autoplay policy lets the AudioContext start/resume.
+// Resolves true (PCM streaming), "fallback" (this CLIENT can't do Web Audio /
+// fetch-streaming — the <audio> path is worth trying), or false (failed or the
+// server refused — the <audio> path must NOT be tried; see caller).
 async function listenStart(center, modeOverride, onState) {
   listenStop();
   const Ctor = window.AudioContext || window.webkitAudioContext;
-  if (!Ctor) { onState("Web Audio not supported — using <audio> fallback", false); return false; }
+  if (!Ctor) { onState("Web Audio not supported — using <audio> fallback", false); return "fallback"; }
   if (!Listen.ctx) {
     Listen.ctx = new Ctor();
     Listen.gain = Listen.ctx.createGain();
@@ -1959,7 +2001,7 @@ async function listenStart(center, modeOverride, onState) {
   }
   if (!r.body || !r.body.getReader) {
     onState("streaming unsupported — using <audio> fallback", false);
-    return false;
+    return "fallback";
   }
   Listen.reader = r.body.getReader();
   pumpPcm(onState).catch(() => {});
@@ -2868,12 +2910,22 @@ function inspectByFreq(center, label, mode, sid, attr) {
     MonitorDock.openPage();
   }
   const tuneId = (App.tuneId = (App.tuneId || 0) + 1);
+  const prevCenter = App.inspCenter;
   App.inspCenter = center; App.inspLabel = label;   // for mode <select> re-tune
+  App.inspTunedAt = Date.now();                     // grace anchor for the stale-stream badge
   App.demodMhz = center;                             // demod tuner starts at band center (offset 0)
   App.demodBwHz = null;                              // new signal -> per-mode default channel width
   if (arguments.length >= 4) {                       // opened from a detected signal (has an id)
     App.inspSignalId = (sid != null && !isNaN(sid)) ? sid : null;
     App.inspAttribution = attr || "unassessed";
+  } else if (prevCenter == null || Math.abs(prevCenter - center) >= 0.0005) {
+    // Re-tuned to a DIFFERENT frequency by a caller that carries no id
+    // (openInspect, huntStep, DISSEMINATE ▶ LISTEN). Nothing else ever clears
+    // these, so the previous signal's id would ride along and any analysis or
+    // recording launched here would attach to the wrong signal. Same-frequency
+    // re-tunes (mode <select>, DISSEMINATE on the signal already open) keep it.
+    App.inspSignalId = null;
+    App.inspAttribution = "unassessed";
   }
   renderInspAttribution();
   if ($("insp-bw")) $("insp-bw").value = "auto";
@@ -2891,7 +2943,10 @@ function inspectByFreq(center, label, mode, sid, attr) {
   loadRecordings();
   stopSpectrumPoll();
   listenStop();
-  const au = $("insp-audio"); au.pause(); au.removeAttribute("src");
+  // pause+removeAttribute alone does NOT abort the media fetch — the browser can
+  // keep (and retry) the old /api/listen stream, which then preempts the new tune
+  // and holds the radio at the OLD frequency. load() is what actually detaches it.
+  const au = $("insp-audio"); au.pause(); au.removeAttribute("src"); au.load();
   clearInspectCanvases();
   // ANY entry point lands here — the signal lightbox, a baseline row, the wiki,
   // the hunt list. listenAt() starts the ladder for its own path; start one here
@@ -2933,7 +2988,11 @@ function inspectByFreq(center, label, mode, sid, attr) {
   const _lb = App.listenStepBase || 0;
   try { ListenSteps.done(_lb, `tuned to ${fmtF(center)}`); ListenSteps.active(_lb + 1); } catch (e) {}
   listenStart(center, mode, onState).then((ok) => {
-    if (!ok && App.tuneId === tuneId) {     // guard: don't stomp a newer tune
+    // fall back to the <audio> element ONLY when the CLIENT can't do Web Audio /
+    // fetch-streaming. Never on a server refusal: re-hitting /api/listen after a
+    // 409 is how a zombie stream got born — it grabbed the radio once it freed
+    // and sat on the OLD frequency while the operator had tuned elsewhere.
+    if (ok === "fallback" && App.tuneId === tuneId) {   // guard: don't stomp a newer tune
       const ibw = ($("insp-ibw") || {}).value || "2.4";
       const blockS = ($("insp-block-s") || {}).value || "0.5";
       au.src = `/api/listen?center_mhz=${encodeURIComponent(center)}` +
@@ -3043,6 +3102,33 @@ function hasConcurrentMonitor() {
   return sdrs.length >= 2 || sdrs.some(r => r.role === "monitor" && !r.busy);
 }
 
+/* Persistent "no monitor radio" warning while a sweep runs. Without it the only
+   evidence the Pluto was offline was a log line — the backend silently retried
+   auto-connect every ~75 s for an hour (2026-08-02) while LISTEN's hand-off
+   behaviour looked random to the operator. Builds its own fixed DOM (bottom-LEFT;
+   ListenSteps owns bottom-right), driven from the 1 Hz render() so it appears and
+   clears with the actual role state, not UI intent. */
+function renderMonitorBanner(st) {
+  const need = !!(st && st.sweep && st.sweep.running &&
+                  st.roles && st.roles.concurrent_enabled && !hasConcurrentMonitor());
+  let el = document.getElementById("monitor-offline");
+  if (!need) { if (el) el.style.display = "none"; return; }
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "monitor-offline";
+    el.style.cssText =
+      "position:fixed;left:16px;bottom:16px;z-index:99998;max-width:360px;" +
+      "background:#0b0f14ee;border:1px solid #ffc107;border-radius:6px;" +
+      "padding:9px 12px;font:11px/1.6 Consolas,monospace;color:#ffc107;" +
+      "box-shadow:0 6px 22px #000a;pointer-events:none";
+    document.body.appendChild(el);
+  }
+  el.style.display = "";
+  el.textContent = "⚠ MONITOR RADIO OFFLINE — no second SDR (Pluto) connected. " +
+    "LISTEN will STOP this sweep to take the radio (data kept). Replug the " +
+    "Pluto / press CONNECT to listen while the sweep keeps running.";
+}
+
 // Entry point for the NON-baseline lists (Results / detected signals / Wiki).
 // Disables Next/Prev (no list to step) and tunes the given center+label.
 // AUTO-HANDOFF: if there's no second radio to monitor with and a sweep is
@@ -3065,17 +3151,20 @@ async function listenAt(center, label, mode, sid, attr) {
   const tuneSteps = [`tune to ${fmtF(center)}`, "open audio stream",
                      "demodulate — live audio"];
   ListenSteps.begin(single
-    ? ["stop the sweep (frees the radio)", "confirm the radio released"].concat(tuneSteps)
+    ? ["stop the sweep (frees the radio — data kept)",
+       "confirm the radio released"].concat(tuneSteps)
     : tuneSteps);
   App.listenStepBase = single ? 2 : 0;   // where the tune/stream/demod steps start
   if (single) {
     if ($("ft-msg")) {
       $("ft-msg").textContent =
-        `one radio — sweep STOPPED so you can listen on ${fmtF(center)}`;
+        `one radio — sweep STOPPED (data kept) so you can listen on ${fmtF(center)}`;
     }
     ListenSteps.active(0);
     try {
-      await api("/api/sweep/abort", {});
+      // explicit erase:false — pause-and-save: the hand-off must never delete
+      // sweep data (the erase variant is reserved for the SWEEP card's dialog)
+      await api("/api/sweep/abort", { erase: false });
     } catch (e) {
       ListenSteps.fail(0, "could not stop the sweep — stop it from the SWEEP card, "
                           + "then press LISTEN again");
@@ -3123,8 +3212,8 @@ async function listenAt(center, label, mode, sid, attr) {
   // away believing a sweep is still collecting when it is stopped.
   if (App.sweepPausedForListen && $("insp-note")) {
     $("insp-note").textContent =
-      "SWEEP STOPPED to free the single radio for this listen — restart the sweep " +
-      "from the SWEEP card when you are done listening.";
+      "SWEEP STOPPED to free the single radio for this listen — data collected so " +
+      "far is KEPT. Restart the sweep from the SWEEP card when you are done listening.";
   }
 }
 
@@ -3331,7 +3420,13 @@ function setDemodBw(hz) {
   App.demodBwHz = hz;
   const sel = $("insp-bw");
   if (sel) sel.value = (hz == null) ? "auto" : String(hz);
-  api("/api/listen/bandwidth", { chan_bw_hz: (hz == null) ? "auto" : hz }).catch(() => {});
+  // trailing debounce: the wheel fires per tick (a trackpad flick = dozens), and
+  // each used to POST — the server only needs the value the operator settles on
+  clearTimeout(App._bwPostT);
+  App._bwPostT = setTimeout(() => {
+    const v = App.demodBwHz;
+    api("/api/listen/bandwidth", { chan_bw_hz: (v == null) ? "auto" : v }).catch(() => {});
+  }, 250);
 }
 
 // Scroll-wheel over the analyzer widens/narrows the channel through the preset steps.
@@ -3448,7 +3543,7 @@ const MonitorDock = {
     if (!this.mode) return;
     try { stopAuto(); listenStop(); stopSpectrumPoll(); } catch (e) {}
     const a = $("insp-audio");
-    if (a) { a.pause(); a.removeAttribute("src"); }
+    if (a) { a.pause(); a.removeAttribute("src"); a.load(); }
     const p = this._restore();
     if (p) p.style.display = "none";
   },
@@ -4086,7 +4181,7 @@ $("insp-close").onclick = () => {
   stopSpectrumPoll();
   listenStop();
   $("inspect-panel").style.display = "none";
-  const a = $("insp-audio"); a.pause(); a.removeAttribute("src");
+  const a = $("insp-audio"); a.pause(); a.removeAttribute("src"); a.load();
 };
 
 // On resize, drop the waterfall texture so the next poll rebuilds it at the new
@@ -4489,6 +4584,21 @@ $("btn-identify").onclick = async () => {
     renderIdentify(r);
   } catch (e) { $("id-msg").textContent = "FAILED: " + e.message; }
 };
+
+// Type a frequency -> hear it. The box only fed IDENTIFY before, and the
+// inspect panel's own tuner is display:none until something else tunes it, so
+// there was no way to type a frequency and listen. Enter/blur commits too.
+function tuneTypedFreq() {
+  const c = parseFloat($("id-center").value);
+  if (isNaN(c) || c <= 0) {
+    $("id-msg").textContent = "enter a frequency in MHz, e.g. 433.92";
+    return;
+  }
+  $("id-msg").textContent = "tuning " + c.toFixed(4) + " MHz…";
+  listenAt(c, "manual tune");        // 2 args -> no signal id, correctly unlinked
+}
+if ($("btn-listen-freq")) $("btn-listen-freq").onclick = tuneTypedFreq;
+if ($("id-center")) $("id-center").addEventListener("change", tuneTypedFreq);
 
 function moduleRange(side) {
   const dev = App.state && App.state.device;

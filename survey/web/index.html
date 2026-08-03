@@ -551,6 +551,8 @@ body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid va
       <label class="note" for="id-bw">BW kHz</label>
       <input id="id-bw" type="text" placeholder="optional" style="width:90px">
       <button class="btn" id="btn-identify">IDENTIFY</button>
+      <button class="btn primary" id="btn-listen-freq"
+              title="tune the monitor radio to this frequency and listen">▶ LISTEN</button>
       <span id="id-msg" class="note"></span>
     </div>
     <div id="id-results"></div>
@@ -777,7 +779,10 @@ body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid va
         <option value="50000">50 kHz</option>
         <option value="100000">100 kHz</option>
         <option value="150000">150 kHz</option>
-        <option value="250000">250 kHz</option>
+        <option value="200000">200 kHz</option>
+        <option value="250000">250 kHz — broadcast FM</option>
+        <option value="300000">300 kHz</option>
+        <option value="400000">400 kHz</option>
       </select>
       <label class="note">Block</label>
       <select id="insp-block-s" title="Shorter blocks = faster, more live spectrum (more USB load)">
