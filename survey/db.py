@@ -413,6 +413,13 @@ class Database:
                           "operator_marked INTEGER DEFAULT 0")
             if "operator_marked_utc" not in cols:
                 c.execute("ALTER TABLE signals ADD COLUMN operator_marked_utc REAL")
+            # NEAR-FLOOR candidates: cleared the low tier but not the detection
+            # threshold. A bug sweep's whole point is low-power emitters, and a
+            # single 12 dB gate was dropping signals the operator could plainly
+            # see (0-2 dB over the floor). These are LEADS for review — same
+            # evidentiary rule as operator_marked: never printed as findings.
+            if "near_floor" not in cols:
+                c.execute("ALTER TABLE signals ADD COLUMN near_floor INTEGER DEFAULT 0")
             # LAN device checker: IP/vendor enrichment + operator block state on
             # the shared inventory table (kind='lan'). blocked is set ONLY by an
             # operator-confirmed action, never by discovery.

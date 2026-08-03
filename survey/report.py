@@ -66,22 +66,40 @@ def _fmt_dbm(v):
 # printed next to real detections it has to say so in the row itself, not only in
 # a footnote — a reader scanning the table must never take it for a measurement.
 MARKED_TAG = " (operator-marked)"
+NEAR_FLOOR_TAG = " (near-floor lead)"
 MARKED_NOTE = (
     "Rows tagged <b>(operator-marked)</b> were marked on the live display by the "
     "technician, not produced by the detector. They are recorded for review and "
     "are not instrument detections; treat them as items the technician wanted "
     "examined, not as measured findings.")
+NEAR_FLOOR_NOTE = (
+    "Rows tagged <b>(near-floor lead)</b> sat close enough to the noise floor "
+    "that they did not clear the detection threshold. They are recorded so a "
+    "low-power emitter is not silently discarded, but they are leads for review, "
+    "not measured findings — a near-floor reading is as consistent with noise as "
+    "with a weak transmitter.")
 
 
-def _is_marked(s):
+def _flagged(s, col):
+    """sqlite3.Row has no .get, and older rows predate these columns."""
     try:
-        return bool(s["operator_marked"])
+        return bool(s[col])
     except (KeyError, IndexError, TypeError):
         return False
 
 
+def _is_marked(s):
+    return _flagged(s, "operator_marked")
+
+
+def _is_near_floor(s):
+    return _flagged(s, "near_floor")
+
+
 def _freq_cell(s):
-    return _fmt_freq(s["center_mhz"]) + (MARKED_TAG if _is_marked(s) else "")
+    return (_fmt_freq(s["center_mhz"])
+            + (MARKED_TAG if _is_marked(s) else "")
+            + (NEAR_FLOOR_TAG if _is_near_floor(s) else ""))
 
 BAND_COLORS = {"broadcast": "#2e86c1", "land_mobile": "#7d3c98", "ism": "#e67e22",
                "cellular": "#16a085", "aviation": "#5d6d7e", "gps": "#c0392b",
@@ -721,6 +739,8 @@ def generate_report(db, cfg, session_id: int, reports_dir: str) -> dict:
                                 0.8 * inch, 2.6 * inch, 0.95 * inch]))
         if any(_is_marked(s) for s in mod_signals):
             el.append(Paragraph(MARKED_NOTE, ss["Cell"]))
+        if any(_is_near_floor(s) for s in mod_signals):
+            el.append(Paragraph(NEAR_FLOOR_NOTE, ss["Cell"]))
 
     # ---- Room comparison ----
     rooms = sorted({s["room"] for s in signals if s["phase"] == "interior" and s["room"]})
@@ -793,6 +813,8 @@ def generate_report(db, cfg, session_id: int, reports_dir: str) -> dict:
                                 0.6 * inch, 1.15 * inch, 0.75 * inch, 2.15 * inch]))
         if any(_is_marked(s) for s in anomalies):
             el.append(Paragraph(MARKED_NOTE, ss["Cell"]))
+        if any(_is_near_floor(s) for s in anomalies):
+            el.append(Paragraph(NEAR_FLOOR_NOTE, ss["Cell"]))
     else:
         el.append(Paragraph(
             "No unverified or caution-flagged signals were detected in the completed phases.",
@@ -1209,7 +1231,9 @@ def export_csv(db, session_id: int, out_dir: str) -> str:
             "localization_score", "strongest_room",
             # 1 = the technician marked this frequency on the live display; it is
             # not a detector output. Anyone analysing the CSV needs that column.
-            "operator_marked"]
+            "operator_marked",
+            # 1 = cleared only the near-floor tier, not the detection threshold.
+            "near_floor"]
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = _csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         w.writeheader()

@@ -782,18 +782,39 @@ class SweepController:
         dev.stream(dwell, on_frame, abort=self.abort_event)
         dev.set_calculator("normal")
 
+        # Near-floor tier: a bug sweep exists to find LOW-POWER emitters, and a
+        # single detection threshold was dropping signals the operator could
+        # plainly see on the display. Anything between this and threshold_db
+        # comes back tagged tier="candidate" — a lead for review, never a
+        # finding. null/absent disables the tier and restores single-tier.
+        # 8.0, not 6.0: config.yaml is gitignored, so THIS default is what ships.
+        # Measured over 120 synthetic noise-only segments, 6 dB produced ~0.42
+        # false candidates per segment (a 40-pass max-hold routinely peaks 6 dB
+        # over the floor on noise alone); 8 dB produced zero.
+        cand_db = self.cfg.get("detection", "candidate_threshold_db", default=8.0)
+        cand_db = float(cand_db) if cand_db is not None else None
+        pers_frac = float(self.cfg.get("detection", "persistence_min_frac",
+                                       default=0.85))
         floor, signals = detect_signals(acc.freqs, acc.avg, acc.maxpeak, acc.hits,
-                                        acc.passes, threshold_db, merge_gap)
+                                        acc.passes, threshold_db, merge_gap,
+                                        candidate_threshold_db=cand_db,
+                                        low_hits=acc.low_hits,
+                                        persistence_min_frac=pers_frac)
         # low-frequency hygiene: conducted noise / analyzer LF artifacts pile up
         # at the bottom of the range; ignore below the floor frequency and demand
         # extra SNR in the HF region
         ignore_below = float(self.cfg.get("detection", "ignore_below_mhz", default=0.15))
         lf_extra_db = float(self.cfg.get("detection", "lf_extra_threshold_db", default=6.0))
         lf_region = float(self.cfg.get("detection", "lf_extra_below_mhz", default=50.0))
+        # LF hygiene applies to each signal against ITS OWN tier's threshold —
+        # holding a near-floor candidate to the detection threshold would filter
+        # out every candidate in the LF region, which is the opposite of the point.
+        def _lf_ok(s):
+            base = threshold_db if s.tier == "detection" else (cand_db or threshold_db)
+            return (s.center_mhz >= lf_region
+                    or s.peak_dbm >= floor + base + lf_extra_db)
         signals = [s for s in signals
-                   if s.center_mhz >= ignore_below
-                   and (s.center_mhz >= lf_region
-                        or s.peak_dbm >= floor + threshold_db + lf_extra_db)]
+                   if s.center_mhz >= ignore_below and _lf_ok(s)]
         segment_id = self.db.execute(
             "INSERT INTO segments (sweep_id,low_mhz,high_mhz,noise_floor_dbm,avg_passes,"
             "maxhold_dwell_s,status,data_json) VALUES (?,?,?,?,?,?,?,?)",
@@ -807,14 +828,15 @@ class SweepController:
                 "INSERT INTO signals (sweep_id,session_id,segment_id,room,module,phase,"
                 "center_mhz,bw_khz,peak_dbm,avg_dbm,floor_dbm,persistence,classification,"
                 "matched_label,match_reason,caution,identity_tier,display_label,"
-                "group_key,group_label,bin_start,bin_end,detected_utc) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "group_key,group_label,bin_start,bin_end,detected_utc,near_floor) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (sweep_id, session_id, segment_id, room, module, phase,
                  s.center_mhz, s.bw_khz, s.peak_dbm, s.avg_dbm, s.floor_dbm,
                  s.persistence, cls.classification, cls.matched_label,
                  cls.match_reason, int(cls.caution), cls.identity_tier,
                  cls.display_label, cls.group_key, cls.group_label,
-                 s.bin_start, s.bin_end, time.time()))
+                 s.bin_start, s.bin_end, time.time(),
+                 1 if s.tier == "candidate" else 0))
 
         # F2: flip expected records found, accumulate anomalies for the side panel.
         # Same _matches rule the report uses, so live panel and PDF agree.

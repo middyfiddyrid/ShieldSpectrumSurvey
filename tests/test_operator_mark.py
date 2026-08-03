@@ -165,12 +165,15 @@ class OperatorMarkReportTest(unittest.TestCase):
     def test_csv_export_carries_the_flag(self):
         self._sig(433.92, operator_marked=1)
         self._sig(915.0)
+        import csv as _csv
         path = export_csv(self.db, self.sid, self.dir)
-        with open(path, encoding="utf-8") as f:
-            text = f.read()
-        self.assertIn("operator_marked", text.splitlines()[0])
-        marked = [ln for ln in text.splitlines()[1:] if ln.startswith("433.92")]
-        self.assertTrue(marked and marked[0].rstrip().endswith("1"))
+        with open(path, encoding="utf-8", newline="") as f:
+            rows = list(_csv.DictReader(f))
+        # by column NAME, not position — column order changes as the schema grows
+        self.assertIn("operator_marked", rows[0])
+        by_freq = {r["center_mhz"]: r for r in rows}
+        self.assertEqual(by_freq["433.92"]["operator_marked"], "1")
+        self.assertEqual(by_freq["915.0"]["operator_marked"], "0")
 
     def test_freq_cell_tags_marked_and_leaves_detections_alone(self):
         marked = self.db.query_one("SELECT * FROM signals WHERE id=?",
