@@ -1278,7 +1278,8 @@ def create_app(db, cfg, demo=False) -> Flask:
                     routed = route_decode(iq, fs, feats, prefer=prefer)
                     if routed.get("messages"):
                         decode = routed
-                    interpretation = interpret(feats, routed.get("protocol"))
+                    interpretation = interpret(feats, routed.get("protocol"),
+                                              encrypted=bool(routed.get("encrypted")))
                     # AUDIO: analog modes are listenable (hear the room); data modes
                     # would just be hash, so skip audio for them. HONESTY GATE: an
                     # empty channel gets NO audio clip — the one-shot demod path
@@ -3441,7 +3442,8 @@ def create_app(db, cfg, demo=False) -> Flask:
             feats = iq_features(iq, fs)
             candidates = identify(center * 1e6, feats, load_reference(), top_n=5)
             routed = route_decode(iq, fs, feats, prefer=mode if mode else None)
-            interpretation = interpret(feats, routed.get("protocol"))
+            interpretation = interpret(feats, routed.get("protocol"),
+                                              encrypted=bool(routed.get("encrypted")))
             audio = None
             if mode not in DATA_MODES and feats.get("signal_present"):
                 try:

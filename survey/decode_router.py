@@ -87,21 +87,39 @@ def route_decode(iq, fs, feats, prefer=None):
         if r and r.get("messages"):
             r.setdefault("protocol", name.upper())
             r["tried"] = tried
+            # Surface encryption at the TOP level. DMR/P25 report it per message,
+            # and without this a decoded-but-encrypted call reaches interpret()
+            # looking like ordinary readable content — the UI would then offer
+            # "readable content below" for traffic nobody can read.
+            r["encrypted"] = any(m.get("encrypted") for m in r["messages"]
+                                 if isinstance(m, dict))
             return r
     return {"protocol": None, "messages": [], "tried": tried,
             "note": "no decodable protocol matched its signature"}
 
 
-def interpret(feats, decoded_protocol=None):
+def interpret(feats, decoded_protocol=None, encrypted=False):
     """Plain-English field verdict: what the device is and whether its content is
     readable. `readable` ∈ {decoded, listen, maybe_decode, encrypted,
-    identify_only, none, unknown} drives the UI hint."""
+    identify_only, none, unknown} drives the UI hint.
+
+    encrypted=True means the protocol decoded but its PAYLOAD is not readable —
+    a DMR/P25 call with the privacy bit set. That is a genuine TSCM finding (who
+    is operating in this space), so it must not read as a failure; but it must
+    not read as readable content either."""
     if not feats:
         return {"summary": "No IQ — connect the Pluto to interrogate this signal.",
                 "readable": "unknown"}
     if not feats.get("signal_present"):
         return {"summary": "Noise floor — no real emitter at this frequency.",
                 "readable": "none"}
+    if decoded_protocol and encrypted:
+        return {"summary": f"Identified as {decoded_protocol}, and the call "
+                "metadata below is readable — but the voice payload is ENCRYPTED, "
+                "so its content cannot be recovered by any means here. Who is "
+                "operating in this space, and on what talkgroup, is still a "
+                "finding.",
+                "readable": "encrypted"}
     if decoded_protocol:
         if str(decoded_protocol).upper().startswith("ANALOG-VIDEO"):
             # Video "decodes" to a sync verdict + a still, not to readable content —
