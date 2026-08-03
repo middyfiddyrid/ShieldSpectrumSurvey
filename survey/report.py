@@ -54,6 +54,35 @@ CLASS_DISPLAY = {"VERIFIED": "Identified", "PLAUSIBLE": "Likely normal",
 def _class_label(v):
     return CLASS_DISPLAY.get(v or "", v or "")
 
+
+def _fmt_dbm(v):
+    """Amplitude cell. Operator-marked rows can carry no amplitude (the tech
+    marked a frequency, not a measured peak), so this must not assume a number —
+    an unguarded format here fails the whole PDF build."""
+    return f"{v:.0f}" if v is not None else "—"
+
+
+# An operator-marked frequency is NOT an instrument detection. Wherever one is
+# printed next to real detections it has to say so in the row itself, not only in
+# a footnote — a reader scanning the table must never take it for a measurement.
+MARKED_TAG = " (operator-marked)"
+MARKED_NOTE = (
+    "Rows tagged <b>(operator-marked)</b> were marked on the live display by the "
+    "technician, not produced by the detector. They are recorded for review and "
+    "are not instrument detections; treat them as items the technician wanted "
+    "examined, not as measured findings.")
+
+
+def _is_marked(s):
+    try:
+        return bool(s["operator_marked"])
+    except (KeyError, IndexError, TypeError):
+        return False
+
+
+def _freq_cell(s):
+    return _fmt_freq(s["center_mhz"]) + (MARKED_TAG if _is_marked(s) else "")
+
 BAND_COLORS = {"broadcast": "#2e86c1", "land_mobile": "#7d3c98", "ism": "#e67e22",
                "cellular": "#16a085", "aviation": "#5d6d7e", "gps": "#c0392b",
                "ham": "#7f8c8d", "other": "#566573"}
@@ -681,7 +710,7 @@ def generate_report(db, cfg, session_id: int, reports_dir: str) -> dict:
                  "Room"]]
         for s in sorted(mod_signals, key=lambda x: x["center_mhz"]):
             rows.append([
-                _fmt_freq(s["center_mhz"]), f"{s['peak_dbm']:.0f}",
+                _freq_cell(s), _fmt_dbm(s["peak_dbm"]),
                 f"{s['bw_khz']:.0f}" if s["bw_khz"] else "",
                 f"{(s['persistence'] or 0) * 100:.0f}%",
                 _class_label(s["classification"]),
@@ -690,6 +719,8 @@ def generate_report(db, cfg, session_id: int, reports_dir: str) -> dict:
                 s["room"] or ""])
         el.append(_table(rows, [1.0 * inch, 0.6 * inch, 0.55 * inch, 0.5 * inch,
                                 0.8 * inch, 2.6 * inch, 0.95 * inch]))
+        if any(_is_marked(s) for s in mod_signals):
+            el.append(Paragraph(MARKED_NOTE, ss["Cell"]))
 
     # ---- Room comparison ----
     rooms = sorted({s["room"] for s in signals if s["phase"] == "interior" and s["room"]})
@@ -751,7 +782,7 @@ def generate_report(db, cfg, session_id: int, reports_dir: str) -> dict:
         for s in anomalies:
             rows.append([
                 f"{s['anomaly_score']:.0f}" if s["anomaly_score"] is not None else "",
-                _fmt_freq(s["center_mhz"]), f"{s['peak_dbm']:.0f}",
+                _freq_cell(s), _fmt_dbm(s["peak_dbm"]),
                 f"{(s['persistence'] or 0) * 100:.0f}%",
                 f"+{s['interior_delta_db']:.0f} dB" if s["interior_delta_db"] else "—",
                 (s["strongest_room"] or "—") +
@@ -760,6 +791,8 @@ def generate_report(db, cfg, session_id: int, reports_dir: str) -> dict:
                 Paragraph(_why_cell(s), ss["Cell"])])
         el.append(_table(rows, [0.45 * inch, 0.95 * inch, 0.45 * inch, 0.5 * inch,
                                 0.6 * inch, 1.15 * inch, 0.75 * inch, 2.15 * inch]))
+        if any(_is_marked(s) for s in anomalies):
+            el.append(Paragraph(MARKED_NOTE, ss["Cell"]))
     else:
         el.append(Paragraph(
             "No unverified or caution-flagged signals were detected in the completed phases.",
@@ -1173,7 +1206,10 @@ def export_csv(db, session_id: int, out_dir: str) -> str:
     cols = ["center_mhz", "bw_khz", "peak_dbm", "avg_dbm", "floor_dbm", "persistence",
             "phase", "module", "room", "classification", "matched_label", "match_reason",
             "caution", "anomaly_score", "score_reason", "interior_delta_db",
-            "localization_score", "strongest_room"]
+            "localization_score", "strongest_room",
+            # 1 = the technician marked this frequency on the live display; it is
+            # not a detector output. Anyone analysing the CSV needs that column.
+            "operator_marked"]
     with open(path, "w", newline="", encoding="utf-8") as f:
         w = _csv.DictWriter(f, fieldnames=cols, extrasaction="ignore")
         w.writeheader()

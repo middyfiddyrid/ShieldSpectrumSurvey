@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from survey.db import Database                           # noqa: E402
 from survey.config import Config                         # noqa: E402
 from survey.server import create_app                     # noqa: E402
+from survey.report import _freq_cell, export_csv, generate_report   # noqa: E402
 
 
 class OperatorMarkTest(unittest.TestCase):
@@ -120,6 +121,63 @@ class OperatorMarkTest(unittest.TestCase):
         r = app2.test_client().post("/api/signals/manual", json={"center_mhz": 433.92})
         self.assertEqual(r.status_code, 400)
         self.assertIn("sweep", r.get_json()["error"].lower())
+
+
+class OperatorMarkReportTest(unittest.TestCase):
+    """The distinction has to survive into the deliverables. A marked frequency
+    printed next to real detections without saying so is the failure that matters
+    — that is a technician's guess reading as a measurement to counsel."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.db = Database(os.path.join(self.dir, "t.db"))
+        self.cfg = Config(os.path.join(self.dir, "config.yaml"))
+        self.sid = self.db.create_session("1 A St", 0, 0, "test", 25, 5, "op")
+        self.sweep = self.db.execute(
+            "INSERT INTO sweeps (session_id,phase,status,started_utc) VALUES (?,?,?,?)",
+            (self.sid, "interior", "done", time.time()))
+
+    def _sig(self, center, **kw):
+        cols = {"sweep_id": self.sweep, "session_id": self.sid, "center_mhz": center,
+                "phase": "interior", "module": "right", "room": "Office",
+                "classification": "UNVERIFIED", "peak_dbm": -70.0, "bw_khz": 25.0,
+                "persistence": 0.5, "matched_label": "", "match_reason": "",
+                "anomaly_score": 50.0}
+        cols.update(kw)
+        keys = ",".join(cols)
+        qs = ",".join("?" * len(cols))
+        return self.db.execute(f"INSERT INTO signals ({keys}) VALUES ({qs})",
+                               tuple(cols.values()))
+
+    def test_report_builds_when_a_marked_signal_has_no_amplitude(self):
+        """REGRESSION: the amplitude cells used an unguarded format, so a mark
+        carrying no measured peak took down the whole PDF build."""
+        self._sig(433.92, peak_dbm=None, operator_marked=1)
+        out = generate_report(self.db, self.cfg, self.sid, self.dir)
+        self.assertTrue(os.path.exists(out["path"]))
+        self.assertGreater(os.path.getsize(out["path"]), 1000)
+
+    def test_report_builds_with_a_normal_signal(self):
+        self._sig(915.0)
+        out = generate_report(self.db, self.cfg, self.sid, self.dir)
+        self.assertTrue(os.path.exists(out["path"]))
+
+    def test_csv_export_carries_the_flag(self):
+        self._sig(433.92, operator_marked=1)
+        self._sig(915.0)
+        path = export_csv(self.db, self.sid, self.dir)
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+        self.assertIn("operator_marked", text.splitlines()[0])
+        marked = [ln for ln in text.splitlines()[1:] if ln.startswith("433.92")]
+        self.assertTrue(marked and marked[0].rstrip().endswith("1"))
+
+    def test_freq_cell_tags_marked_and_leaves_detections_alone(self):
+        marked = self.db.query_one("SELECT * FROM signals WHERE id=?",
+                                   (self._sig(433.92, operator_marked=1),))
+        auto = self.db.query_one("SELECT * FROM signals WHERE id=?", (self._sig(915.0),))
+        self.assertIn("operator-marked", _freq_cell(marked))
+        self.assertNotIn("operator-marked", _freq_cell(auto))
 
 
 if __name__ == "__main__":
