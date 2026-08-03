@@ -1744,6 +1744,103 @@ def create_app(db, cfg, demo=False) -> Flask:
         row = db.query_one("SELECT * FROM recordings WHERE id=?", (rid,))
         return jsonify(row or {"recording_id": rid})
 
+    # Bench-validation IQ capture. Deliberately the SMALL sibling of
+    # tools/iq_record.py: the CLI is the real instrument (it reports the achieved
+    # sample rate, clipping and dropped buffers, which is what tells you a
+    # capture is worth taking home, and it is what the offline iterate loop is
+    # built around). This button exists only so a signal already on screen can be
+    # grabbed without leaving the UI. Synchronous and hard-capped, so it stays
+    # out of the sweep/monitor thread model entirely.
+    IQ_SIGMF_MAX_SECONDS = 30.0
+
+    @app.post("/api/record/iq_sigmf")
+    def record_iq_sigmf():
+        from .iqfile import IQMeta, SigMFWriter
+        session = st.session()
+        if not session:
+            return err("no session")
+        body = request.get_json(silent=True) or {}
+        if body.get("center_mhz") is None:
+            return err("need center_mhz")
+        center_mhz = float(body["center_mhz"])
+        seconds = min(float(body.get("seconds") or 5.0), IQ_SIGMF_MAX_SECONDS)
+        if seconds <= 0:
+            return err("seconds must be > 0")
+        dev, mlock, mstop, msrc = st.controller.ensure_monitor()
+        if not (dev is not None and hasattr(dev, "capture_iq")
+                and getattr(dev, "is_swept_sdr", False)):
+            return err("connect an SDR (Pluto or B220) to record IQ", 409)
+        if st.controller.busy(msrc):
+            return err("the monitor radio is busy — stop it to record IQ", 409)
+        fs = float(body.get("sample_rate")
+                   or _mcfg(msrc, "stream_sample_rate", 2_400_000))
+        want = int(round(fs * seconds))
+        sess_dir = os.path.join(_recordings_dir(), str(session["id"]), "sigmf")
+        os.makedirs(sess_dir, exist_ok=True)
+        base = os.path.join(sess_dir,
+                            f"{int(time.time())}_{int(round(center_mhz * 1000))}khz")
+        info = dev.info
+        meta = IQMeta(center_hz=center_mhz * 1e6, sample_rate=fs, source=msrc or "",
+                      hardware=f"{info.model} ({info.driver}) {info.port}".strip(),
+                      gain_db=_mcfg(msrc, "gain_db", None),
+                      gain_mode=str(_mcfg(msrc, "gain_mode", "")),
+                      note=str(body.get("note") or ""),
+                      recorder="Shield TSCM spectrum_survey /api/record/iq_sigmf")
+        writer = SigMFWriter(base, meta)
+        mstop.set()                       # preempt any live audio stream on this radio
+        stop = threading.Event()
+        got = 0
+        t0 = time.time()
+        try:
+            with mlock:
+                if callable(getattr(dev, "stream_iq", None)):
+                    n_block = max(1024, int(fs * float(
+                        _mcfg(msrc, "listen_block_seconds", 0.25))))
+                    for iq in dev.stream_iq(center_mhz * 1e6, fs, n_block, stop):
+                        blk = iq if got + len(iq) <= want else iq[:want - got]
+                        got += writer.append(blk)
+                        if got >= want:
+                            stop.set()
+                            break
+                else:
+                    # No continuous stream on this radio: one-shot captures are
+                    # NOT time-contiguous, so say so in the sidecar rather than
+                    # let a spliced file look like a clean recording.
+                    meta.extra["contiguous"] = False
+                    while got < want:
+                        got += writer.append(
+                            dev.capture_iq(center_mhz * 1e6, fs,
+                                           min(1 << 18, want - got)))
+        except Exception as e:  # noqa: BLE001
+            log.exception("SigMF IQ capture failed")
+            summary = writer.close()
+            return jsonify({"error": str(e), **summary}), 502
+        finally:
+            stop.set()
+        summary = writer.close()
+        elapsed = time.time() - t0
+        achieved = got / elapsed if elapsed > 0 else 0.0
+        warnings = list(summary["warnings"])
+        if got < want:
+            warnings.append(f"SHORT: {want - got} samples missing")
+        if achieved < fs * 0.98:
+            warnings.append(
+                f"DROPPED BUFFERS: delivered {achieved:,.0f} S/s against "
+                f"{fs:,.0f} requested — this file contains splices, and frame "
+                "sync will break at every one of them")
+        rel = os.path.relpath(summary["data_path"], _recordings_dir())
+        rid = db.add_recording(
+            session["id"], round(center_mhz, 5), rel,
+            signal_id=body.get("signal_id"), mode="iq_sigmf",
+            duration_s=round(summary["seconds"], 2), sample_rate=int(fs),
+            kind="iq", notes="SigMF pair (.sigmf-data + .sigmf-meta); replay with "
+                             "tools/iq_replay.py")
+        return jsonify({**summary, "recording_id": rid, "file_path": rel,
+                        "achieved_sample_rate": round(achieved, 1),
+                        "warnings": warnings,
+                        "replay": f"py tools/iq_replay.py --file {rel} "
+                                  "--decoder auto"})
+
     @app.get("/api/recordings")
     def recordings_list():
         session = st.session()

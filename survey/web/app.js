@@ -4139,8 +4139,39 @@ async function dissemOpen() {
 }
 if ($("insp-analyze")) $("insp-analyze").onclick = analyzeSignal;
 if ($("insp-dissem")) $("insp-dissem").onclick = dissemOpen;
+// BENCH capture to a SigMF pair. Synchronous and short by design — this is the
+// small sibling of tools/iq_record.py, which is the instrument that actually
+// reports achieved sample rate, clipping and dropped buffers. Anything the
+// server flags as a problem is shown here rather than swallowed: a clipped or
+// spliced capture that looks fine is the expensive failure.
+async function recordSigmf() {
+  const center = App.inspCenter;
+  if (center == null) { alert("Open a signal in the monitor first."); return; }
+  const raw = prompt("Record how many seconds of raw IQ? (max 30)", "5");
+  if (raw === null) return;
+  const seconds = parseFloat(raw);
+  if (!(seconds > 0)) { alert("Enter a positive number of seconds."); return; }
+  const note = prompt("Operator note for the sidecar (what you're aiming at):", "") || "";
+  const b = $("insp-record-sigmf");
+  if (b) { b.disabled = true; b.textContent = "⦿ …"; }
+  $("insp-msg").textContent = `● capturing ${seconds}s of IQ…`;
+  try {
+    const r = await api("/api/record/iq_sigmf",
+                        { center_mhz: center, seconds, note, label: App.inspLabel || "" });
+    const warn = (r.warnings || []).join(" · ");
+    $("insp-msg").textContent =
+      `■ SigMF saved: ${(r.samples || 0).toLocaleString()} samples, ` +
+      `${((r.bytes || 0) / 1e6).toFixed(1)} MB, peak ${r.peak_amplitude}` +
+      (warn ? ` — ${warn}` : " — clean");
+    if (warn) alert("Capture written, but check this before you rely on it:\n\n" + warn);
+    loadRecordings();
+  } catch (e) { alert("SigMF capture failed: " + (e.message || e)); }
+  finally { if (b) { b.disabled = false; b.textContent = "⦿ SigMF"; } }
+}
+
 if ($("insp-record")) $("insp-record").onclick = () => toggleRecord("audio");
 if ($("insp-record-iq")) $("insp-record-iq").onclick = () => toggleRecord("iq");
+if ($("insp-record-sigmf")) $("insp-record-sigmf").onclick = recordSigmf;
 
 /* ---------- MANUAL gated triage (post-hoc, no radio) ---------- */
 const TRIAGE_LABELS = { cleared: "Cleared", suspect: "Suspect", flagged: "Flag", ask_client: "Ask client" };
