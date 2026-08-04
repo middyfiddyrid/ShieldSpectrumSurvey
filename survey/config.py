@@ -179,6 +179,15 @@ DEFAULTS = {
         "sweep_avg_passes": 2,
         "identify_samples": 131072,
         "identify_captures": 8,
+        # LISTEN/ANALYZE sample rate for the B220 as MONITOR radio. Must be set
+        # here, NOT inherited from pluto.* (2.4 MHz): this AD9361's RFVCO cannot
+        # synthesise a valid rate that low and connect/analyze raises
+        # "RFVCO can't find valid VCO rate!". 5 MHz is the documented safe floor
+        # (see the df section). Lives in code, not just config.yaml, so every
+        # machine that pulls the repo gets it — config.yaml is gitignored and
+        # would otherwise leave a fresh checkout crashing on B220 analyze.
+        "listen_sample_rate": 5_000_000,
+        "stream_sample_rate": 5_000_000,
         # UHD fc32 samples are normalised ~[-1,1] (vs the Pluto sweep path's raw
         # +/-2048 ADC counts), so the equivalent offset sits ~+66 dB above the
         # Pluto's -30. APPROXIMATE — tune per-unit; lean on baseline-delta.
