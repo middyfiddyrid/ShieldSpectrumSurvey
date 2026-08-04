@@ -144,24 +144,35 @@ def substantive_assessment(group, live_result=None):
     return False, "one-pass unexplained signal retained on the watch list"
 
 
-def _category_for(group, substantive):
+def _category_for(group, substantive, is_lab=False):
     row = group["best"]
     inv = _inventory_state(row)
     if inv == "client":
-        return "client_inventory"
-    if substantive:
-        return "priority_anomaly"
-    if inv == "other":
-        return "other_inventory"
-    if (str(row.get("classification") or "") in ("VERIFIED", "PLAUSIBLE")
+        category = "client_inventory"
+    elif substantive:
+        category = "priority_anomaly"
+    elif inv == "other":
+        category = "other_inventory"
+    elif (str(row.get("classification") or "") in ("VERIFIED", "PLAUSIBLE")
             and not bool(row.get("caution"))):
+        category = "known_environment"
+    elif str(row.get("attribution_status") or "") in ("third_party", "infrastructure"):
+        category = "known_environment"
+    else:
+        category = "unexplained_watch"
+    # LAB / BENCH session: the operator has explicitly declared this their own
+    # space, so an unexplained emitter is expected bench gear, not a threat.
+    # Downgrade the anomaly buckets to known_environment — the signal is still
+    # listed and fully analyzable, it just stops being raised as a red anomaly.
+    # HARD-GATED on is_lab: a FIELD sweep is byte-for-byte unaffected (this
+    # function returns the identical category it always did when is_lab is False).
+    # Inventory categories are never touched.
+    if is_lab and category in ("priority_anomaly", "unexplained_watch"):
         return "known_environment"
-    if str(row.get("attribution_status") or "") in ("third_party", "infrastructure"):
-        return "known_environment"
-    return "unexplained_watch"
+    return category
 
 
-def build_ambient_overview(rows, live_results=None):
+def build_ambient_overview(rows, live_results=None, is_lab=False):
     live_results = live_results or {}
     groups = consolidate_emitters(rows)
     counts = Counter()
@@ -169,7 +180,7 @@ def build_ambient_overview(rows, live_results=None):
     for group in groups:
         live = live_results.get(group.get("signal_id")) or {}
         substantive, reason = substantive_assessment(group, live)
-        category = _category_for(group, substantive)
+        category = _category_for(group, substantive, is_lab)
         counts[category] += 1
         group.update(substantive=substantive, substantive_reason=reason,
                      category=category, category_label=CATEGORY_META[category]["label"],

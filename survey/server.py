@@ -1002,8 +1002,15 @@ def create_app(db, cfg, demo=False) -> Flask:
                 "SELECT kind,identifier,name,rssi_dbm,channel,freq_mhz,extra,"
                 "owned,vendor FROM inventory WHERE session_id=? "
                 "AND kind IN ('wifi','ble')", (session_id,))
+            # A LAB/BENCH session downgrades anomaly buckets to known_environment
+            # (the operator declared this their own space) — gated so field sweeps
+            # are unaffected. Fetch it once and thread it through every overview.
+            _srow = db.query_one(
+                "SELECT COALESCE(kind,'field') AS kind FROM sessions WHERE id=?",
+                (session_id,))
+            is_lab = bool(_srow and _srow["kind"] == "lab")
             enriched = enrich_signal_rows(rows, inventory=inv, base_dir=cfg.base_dir)
-            overview = build_ambient_overview(enriched)
+            overview = build_ambient_overview(enriched, is_lab=is_lab)
             _post_sweep_update(
                 stage="inventory", overview=overview,
                 message=(f"Accounted for inventory and known sources across "
@@ -1044,7 +1051,7 @@ def create_app(db, cfg, demo=False) -> Flask:
             for index, group in enumerate(candidates, 1):
                 result, unavailable = _content_free_live_check(group)
                 if unavailable:
-                    overview = build_ambient_overview(enriched, live_results)
+                    overview = build_ambient_overview(enriched, live_results, is_lab=is_lab)
                     _post_sweep_update(
                         running=False, stage="needs_radio", progress=index - 1,
                         total=total, overview=overview, message=unavailable,
@@ -1055,7 +1062,7 @@ def create_app(db, cfg, demo=False) -> Flask:
                         }, finished_utc=time.time())
                     return
                 live_results[group.get("signal_id")] = result or {}
-                partial = build_ambient_overview(enriched, live_results)
+                partial = build_ambient_overview(enriched, live_results, is_lab=is_lab)
                 partial_prompt = None
                 if partial.get("priority_count"):
                     partial_prompt = {
@@ -1070,7 +1077,7 @@ def create_app(db, cfg, demo=False) -> Flask:
                     message=(f"Content-free live check {index} of {total}: "
                              f"{group.get('frequency_mhz', 0):.4f} MHz"))
 
-            overview = build_ambient_overview(enriched, live_results)
+            overview = build_ambient_overview(enriched, live_results, is_lab=is_lab)
             priority = overview.get("priority_count", 0)
             if priority:
                 message = (f"Automatic review complete - {priority} substantive "
