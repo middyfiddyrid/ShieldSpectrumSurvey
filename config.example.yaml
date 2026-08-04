@@ -113,10 +113,16 @@ pluto:
   sweep_avg_passes: 2
   identify_samples: 131072
   identify_captures: 8
-  listen_sample_rate: 2400000
+  # Listen/analyze at the same rate as the B220 so the Pluto runs the identical
+  # demod path (DMR/NXDN/POCSAG etc. are NOT gated per radio — server.py _mcfg
+  # resolves the same keys for whichever radio is the monitor). 2400000 was the
+  # stock-AD9363 setting. If IQ drops on a Pluto reached over the USB-ethernet
+  # gadget (uri ip:192.168.2.1), that link — not the radio — is the ceiling:
+  # step back toward 3000000.
+  listen_sample_rate: 5000000
   listen_seconds: 0.5
   analyze_seconds: 2.0
-  stream_sample_rate: 2400000
+  stream_sample_rate: 5000000
   listen_block_seconds: 0.15
   listen_wf_nperseg: 512
   listen_wf_rows_per_block: 8
@@ -132,6 +138,15 @@ pluto:
   listen_classify_interval_s: 2.0
   listen_classify_budget_s: 0.05
   cal_offset_db: -30.0
+  # 70 MHz-6 GHz requires the AD9364 frequency extension APPLIED TO THE PHYSICAL
+  # PLUTO — it is a property of the radio, not of this file. A stock AD9363 unit
+  # rejects 70 MHz and sdr_source._probe_tuning_range silently clamps the floor
+  # to 325 MHz with a warning. Apply on the Pluto's serial console (COM4 on the
+  # laptop; check Device Manager, it moves):
+  #     root/analog -> fw_setenv attr_name compatible
+  #                    fw_setenv attr_val ad9364
+  #                    reboot
+  # Verify: dmesg | grep ad9361_probe  =>  "enter (ad9364)". Revert with ad9363.
   freq_min_hz: 70000000
   freq_max_hz: 6000000000
   require_extended: false
