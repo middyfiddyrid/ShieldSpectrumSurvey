@@ -4,6 +4,35 @@ Continuation brief for a fresh Fable/Claude Code session. Read this first, then 
 
 ---
 
+# ⚡ 2026-08-03 — background Pluto auto-seek REMOVED (operator call)
+
+`SweepController.start_monitor_autoseek()` — the 20 s background poller started in
+`create_app()` — is **gone**. It probed for the Pluto forever whether or not the
+operator was doing anything, and with no Pluto attached that cost, per the logs of
+2026-08-03: a worker PROCESS respawned every ~63 s from 13:13 to 21:10, live audio
+chopped about once a minute, and ~5 MB of `logs/app.log` an hour (5 rotations in a
+day). The 60 s cooldown and the `if self.listening: pass` guard were both already
+in place — they made it quieter, not bounded.
+
+**The seek itself is NOT gone.** It now runs on operator actions only, which is
+every path that actually needs the radio:
+- `ensure_monitor()` → INSPECT / ANALYZE / LISTEN / RECORD
+- `autoseek_monitor()` → DEVICE-card connect (`/api/device/connect`) + startup
+
+The only behaviour lost: plugging the Pluto in mid-session is noticed on your next
+click instead of within 60 s on its own. `tests/test_autoseek_quiet_while_listening.py`
+was rewritten to assert both halves (nothing probes unprompted; the action paths
+still seek) and carries a tripwire test that fails if a background seek returns.
+1143 tests green.
+
+Related and NOT yet fixed — see the 699 MHz post-mortem: a monitor stream that ends
+cleanly with **zero blocks** (worker sends `{"stream":"end","err":None}`) yields an
+empty HTTP 200 with no audio, no `listen_error`, and nothing in the log. The
+exception path publishes `listen_error` (server.py ~1585); the clean-zero-block path
+does not.
+
+---
+
 # ⚡⚡ 2026-07-12 (seventh ask) — "split screen will not work / why can't both radios run / disseminate button needs to be there"
 
 Root causes found (all three layers, in order of what the operator actually hit):
@@ -124,13 +153,12 @@ Pluto, and if it's there, automatically connect and fire up the audio."
 
 - `SweepController._try_open_pluto_monitor()` (shared probe, cooldown-guarded 60 s,
   serialised by `_monitor_probe_lock`); `autoseek_monitor()` (proactive, no sweep
-  needed); `start_monitor_autoseek()` (20 s background poller, started in
-  create_app for non-demo). `ensure_monitor()` now seeks PROACTIVELY (was: only
-  mid-sweep). `/api/device/connect` spawns a seek right after the sweeper connects.
+  needed); ~~`start_monitor_autoseek()` (20 s background poller, started in
+  create_app for non-demo)~~ — **the background poller was REMOVED 2026-08-03, see
+  below**. `ensure_monitor()` seeks PROACTIVELY (was: only mid-sweep).
+  `/api/device/connect` spawns a seek right after the sweeper connects.
 - Net: connect the B220 (or launch with it in) and the Pluto auto-joins as monitor
-  within ≤60 s of being plugged in — no manual connect, ever. Verified on hardware:
-  the seek fires on the 60 s cadence (log: "could not auto-connect the Pluto
-  monitor: … No device found" while the Pluto was unplugged — proving it's polling).
+  on your next action — no manual connect, ever.
 - 376 tests green (3 new autoseek tests; the old "idle → no autoconnect" test was
   inverted to "idle → seeks proactively" per the new intent).
 

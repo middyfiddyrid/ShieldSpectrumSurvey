@@ -92,13 +92,12 @@ def create_app(db, cfg, demo=False) -> Flask:
     st.admin = bool(cfg.get("app", "admin", default=False)) and not demo
     app.config["APP_STATE"] = st
 
-    # hands-free second radio: keep seeking the Pluto so it auto-joins as the
-    # monitor the moment it's plugged in (operator ask — never hand-connect it).
-    # No-op in the public demo (simulated device) and until a sweeper is connected.
+    # hands-free second radio: the Pluto is sought on operator ACTIONS only —
+    # DEVICE-card connect and every monitor action via ensure_monitor(). The
+    # background poller that re-probed every 20 s forever was removed 2026-08-03;
+    # see Controller.autoseek_monitor() for what that cost and why.
     # (The startup auto-connect of the SWEEPER lives in app.py so the test suite,
     # which builds create_app directly, never spins up hardware.)
-    if not demo:
-        st.controller.start_monitor_autoseek()
 
     def start_autoconnect():
         """Background auto-connect of the configured sweeper (device.source) +
@@ -1226,6 +1225,11 @@ def create_app(db, cfg, demo=False) -> Flask:
         feats = spec = analyzer = audio = decode = interpretation = None
         in_range = False
         note = ""
+        # captured for the window-4 verdict (survey/verdict.py): the radio's real
+        # tuning range and the capture bandwidth make the "out of band" / "too
+        # wide" FAIL causes objective rather than asserted.
+        radio_lo_mhz = radio_hi_mhz = capture_fs_hz = None
+        capture_error = False
         # Monitor target: in dual-device mode this is the Pluto + its OWN lock, so
         # ANALYZE runs while the B220/RFE keeps sweeping — ensure_monitor even
         # auto-opens the Pluto mid-sweep. In single-device mode it's the active
@@ -1243,12 +1247,14 @@ def create_app(db, cfg, demo=False) -> Flask:
         else:
             mods = dev.info.modules
             lo_mhz, hi_mhz = min(m.min_mhz for m in mods), max(m.max_mhz for m in mods)
+            radio_lo_mhz, radio_hi_mhz = lo_mhz, hi_mhz
             if not (lo_mhz <= center_mhz <= hi_mhz):
                 note = (f"{center_mhz:.3f} MHz is outside the radio's "
                         f"{lo_mhz:.0f}-{hi_mhz:.0f} MHz range — apply the AD9364 extension")
             else:
                 try:
                     fs = float(_mcfg(msrc, "listen_sample_rate", 2_400_000))
+                    capture_fs_hz = fs
                     # ANALYZE is a deliberate "interrogate this" action — capture a
                     # bit longer than the live listen so the decoders have enough
                     # symbols (paging frames, repeated device packets).
@@ -1302,6 +1308,7 @@ def create_app(db, cfg, demo=False) -> Flask:
                 except Exception as e:  # noqa: BLE001
                     log.exception("analyze capture failed")
                     note = f"capture failed: {e}"
+                    capture_error = True
 
         candidates = identify(center_mhz * 1e6, feats, ref)
         from .behavior import behavior_from_identify
@@ -1347,6 +1354,19 @@ def create_app(db, cfg, demo=False) -> Flask:
                     (decode or {}).get("protocol") or "")
             except Exception:  # noqa: BLE001 — persistence is best-effort
                 log.exception("analysis persist failed")
+        # WINDOW 4 (truth panel) verdict: did we REVEAL THE CONTENT, or is this a
+        # FAIL? The engine only scores mechanical content recovery — it never
+        # judges whether a signal is "relevant" (that call is the operator's, and
+        # an AI is not trusted to make it). See survey/verdict.py.
+        from .verdict import score_signal
+        verdict = score_signal(
+            feats=feats, routed=(decode or {}),
+            audio_present=bool(audio),
+            image_present=bool((decode or {}).get("frame_png")),
+            in_range=in_range,
+            radio_lo_mhz=radio_lo_mhz, radio_hi_mhz=radio_hi_mhz,
+            center_mhz=center_mhz, capture_fs_hz=capture_fs_hz,
+            capture_error=capture_error)
         return jsonify({
             "center_mhz": center_mhz, "label": label, "mode": mode,
             "bw_khz": bw_khz, "in_range": in_range, "note": note,
@@ -1358,6 +1378,7 @@ def create_app(db, cfg, demo=False) -> Flask:
             "inventory_matches": inv_matches,
             "inventory_summary": inv_summary,
             "signal_present": bool(feats and feats.get("signal_present")),
+            "verdict": verdict,
             "novelty": novelty})
 
     def _validate_listen_request():

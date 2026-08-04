@@ -353,50 +353,20 @@ class SweepController:
         return self.monitor_target()
 
     def autoseek_monitor(self):
-        """Proactive seek — called after a primary connect and by the background
-        poller: bring the Pluto up as the monitor the moment it's detected, no
-        sweep or click required (operator ask 2026-07-11: 'it should seek out the
-        Pluto and automatically connect')."""
+        """Proactive seek — ONE probe, on an operator action: bring the Pluto up
+        as the monitor the moment it's detected, no manual connect required
+        (operator ask 2026-07-11: 'it should seek out the Pluto and automatically
+        connect'). Called from the DEVICE-card connect and from ensure_monitor()
+        on every monitor action (inspect / analyze / listen / record).
+
+        THERE IS NO BACKGROUND SEEK. A polling thread used to run this every 20 s
+        for the life of the process; with no Pluto attached it spawned a worker
+        PROCESS and enumerated USB forever — chopping live audio roughly once a
+        minute, respawning a worker every ~63 s, and writing ~5 MB of log an hour
+        (removed 2026-08-03, operator call). The cost of that is the ONLY thing
+        lost: plugging the Pluto in mid-session is now noticed on your next
+        click instead of on its own."""
         return self._try_open_pluto_monitor()
-
-    def start_monitor_autoseek(self, interval_s: float = 20.0):
-        """Background thread that keeps trying to bring up the Pluto monitor while
-        concurrent mode is on and it isn't connected yet — so plugging the Pluto
-        in AFTER launch is picked up hands-free. The 60 s failure cooldown inside
-        the probe means a faulting/absent Pluto is retried gently, not hammered."""
-        if getattr(self, "_autoseek_thread", None) and self._autoseek_thread.is_alive():
-            return
-
-        def loop():
-            while True:
-                try:
-                    # NO membership pre-gate on self.devices: a DEAD monitor
-                    # handle must reach the probe so _evict_dead_monitor can
-                    # drop it and the reopen happens hands-free (the probe
-                    # early-returns cheaply when a LIVE Pluto is connected).
-                    # NEVER probe for the Pluto while live audio is running. The
-                    # probe spawns a worker PROCESS and enumerates USB, which
-                    # takes seconds; doing that underneath a real-time demod
-                    # stream starves the audio thread and the operator hears it
-                    # as a chop every retry cycle. With no Pluto attached this
-                    # fired forever, so listening was chopped roughly once a
-                    # minute for the whole session. The seek resumes the moment
-                    # the stream stops — plugging in mid-listen is still picked
-                    # up, just after the audio ends rather than through it.
-                    if self.listening:
-                        pass
-                    elif (self.concurrent_enabled()
-                            and self.active_source not in (None, "pluto")):
-                        self.autoseek_monitor()
-                except Exception:  # noqa: BLE001
-                    log.exception("monitor autoseek loop error")
-                self._autoseek_stop.wait(interval_s)
-                if self._autoseek_stop.is_set():
-                    return
-
-        self._autoseek_stop = threading.Event()
-        self._autoseek_thread = threading.Thread(target=loop, daemon=True)
-        self._autoseek_thread.start()
 
     def device_roles(self) -> dict:
         """What each connected radio is doing — for the UI to show 'RFE sweeping +

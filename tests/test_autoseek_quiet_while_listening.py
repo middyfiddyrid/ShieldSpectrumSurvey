@@ -1,15 +1,19 @@
-"""The Pluto autoseek must go quiet while live audio is running.
+"""The Pluto seek runs on operator ACTIONS only — never on a background timer.
 
-Field report: listening was choppy with no Pluto attached. The background
-autoseek spawns a worker PROCESS and enumerates USB on every retry — seconds of
-work — and with no Pluto present it retried forever. Doing that underneath a
-real-time demod stream starves the audio thread, and the operator hears it.
+Field report: listening was choppy with no Pluto attached. The seek spawns a
+worker PROCESS and enumerates USB on every probe — seconds of work. A background
+poller used to do that every 20 s for the life of the process, so with no Pluto
+present it retried forever: audio chopped about once a minute, a worker respawned
+every ~63 s, and the log grew ~5 MB an hour. The poller was removed 2026-08-03.
+
+These tests lock in BOTH halves of the replacement contract:
+  * nothing probes the USB bus unless the operator did something, and
+  * the operator-action path still brings the Pluto up hands-free.
 """
 
 import os
 import sys
 import tempfile
-import threading
 import time
 import unittest
 from pathlib import Path
@@ -26,44 +30,37 @@ class AutoseekQuietTest(unittest.TestCase):
         self.db = Database(os.path.join(self.dir, "t.db"))
         self.cfg = Config(os.path.join(self.dir, "config.yaml"))
         self.c = SweepController(self.db, self.cfg)
-        self.seeks = []
-        self.c.autoseek_monitor = lambda: self.seeks.append(time.time())
+        self.probes = []
+        self.c._try_open_pluto_monitor = lambda: self.probes.append(time.time())
         self.c.concurrent_enabled = lambda: True
         self.c.active_source = "rfexplorer"
 
-    def tearDown(self):
-        stop = getattr(self.c, "_autoseek_stop", None)
-        if stop:
-            stop.set()
+    def test_no_background_seek_thread_exists(self):
+        """The load-bearing assertion: there is no timer that can probe on its
+        own. If a background seek is ever reintroduced, it must not be a bare
+        forever-loop — this test is the tripwire."""
+        self.assertFalse(hasattr(self.c, "start_monitor_autoseek"),
+                         "a background Pluto autoseek was reintroduced")
 
-    def _run_loop_briefly(self, listening, seconds=0.35):
-        self.c.listening = listening
-        self.c.start_monitor_autoseek(interval_s=0.05)
-        time.sleep(seconds)
-        self.c._autoseek_stop.set()
+    def test_nothing_probes_without_an_operator_action(self):
+        """Construct a controller, wait, and confirm the USB bus stayed quiet."""
+        time.sleep(0.35)
+        self.assertEqual(self.probes, [],
+                         "something probed the USB bus with no operator action")
 
-    def test_does_not_probe_while_listening(self):
-        """The load-bearing assertion: zero USB probes during live audio."""
-        self._run_loop_briefly(listening=True)
-        self.assertEqual(self.seeks, [],
-                         "autoseek probed the USB bus while audio was streaming")
+    def test_monitor_action_still_seeks_the_pluto(self):
+        """The hands-free seek must survive on the action path — pressing
+        LISTEN / ANALYZE / INSPECT / RECORD still brings the Pluto up with no
+        manual connect."""
+        self.c.ensure_monitor()
+        self.assertEqual(len(self.probes), 1,
+                         "a monitor action no longer seeks the Pluto")
 
-    def test_still_probes_when_not_listening(self):
-        """The hands-free seek must survive — this is a pause, not a removal."""
-        self._run_loop_briefly(listening=False)
-        self.assertGreater(len(self.seeks), 0,
-                           "autoseek stopped working when it should still run")
-
-    def test_resumes_after_listening_stops(self):
-        self.c.listening = True
-        self.c.start_monitor_autoseek(interval_s=0.05)
-        time.sleep(0.2)
-        self.assertEqual(self.seeks, [])
-        self.c.listening = False          # stream ended
-        time.sleep(0.25)
-        self.c._autoseek_stop.set()
-        self.assertGreater(len(self.seeks), 0,
-                           "autoseek never resumed after the stream ended")
+    def test_explicit_autoseek_call_still_works(self):
+        """The DEVICE-card connect path calls autoseek_monitor() directly."""
+        self.c.autoseek_monitor()
+        self.assertEqual(len(self.probes), 1,
+                         "the operator connect path no longer seeks the Pluto")
 
 
 if __name__ == "__main__":

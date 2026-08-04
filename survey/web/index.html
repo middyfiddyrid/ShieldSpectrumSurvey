@@ -281,6 +281,32 @@ body:not(.single-rx) nav .step.single-only { display:none; }
 #mm-verdict:empty { display:none; }
 #mm-verdict { padding:8px 10px; background:var(--panel2); border:1px solid var(--line);
   border-radius:3px; font-size:13px; }
+/* WINDOW 4 — truth panel: reveal the content or show a labelled FAIL */
+#mm-truth:empty { display:none; }
+#mm-truth { border:1px solid var(--line); border-radius:4px; overflow:hidden;
+  margin:2px 0 4px; }
+#mm-truth .t4-head { display:flex; align-items:center; gap:10px; padding:7px 10px;
+  font-size:12.5px; }
+#mm-truth .t4-badge { font-weight:700; letter-spacing:.6px; font-size:12px;
+  padding:2px 9px; border-radius:3px; }
+#mm-truth.win  .t4-head { background:rgba(30,160,90,.14); }
+#mm-truth.fail .t4-head { background:rgba(200,60,60,.14); }
+#mm-truth.win  .t4-badge { background:#1ea05a; color:#fff; }
+#mm-truth.fail .t4-badge { background:#c83c3c; color:#fff; }
+#mm-truth .t4-cause { margin-left:auto; font-size:10px; letter-spacing:.5px;
+  padding:1px 6px; border-radius:3px; border:1px solid var(--line); opacity:.85; }
+#mm-truth .t4-body { padding:8px 10px; font-size:12.5px; }
+#mm-truth .t4-body img { max-width:100%; border:1px solid var(--line); border-radius:3px; }
+#mm-truth .t4-body audio { width:100%; margin-top:4px; }
+#mm-truth .t4-reason { color:var(--muted); }
+#mm-truth pre.t4-text { white-space:pre-wrap; word-break:break-word; margin:0;
+  font-size:12px; max-height:180px; overflow:auto; }
+#mm-score:empty { display:none; }
+#mm-score { display:flex; align-items:center; gap:12px; flex-wrap:wrap;
+  padding:6px 10px; border:1px dashed var(--line); border-radius:4px;
+  font-size:11.5px; margin-bottom:4px; }
+#mm-score b { font-size:15px; }
+#mm-score .sc-seg { color:var(--muted); }
 #mm-cands:empty { display:none; }
 #mm-cands { display:flex; flex-direction:column; gap:1px; border:1px solid var(--line);
   border-radius:3px; overflow:hidden; }
@@ -2090,6 +2116,9 @@ body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid va
     </div>
     <div id="mm-body">
       <div class="note" id="mm-status">analyzing…</div>
+      <!-- WINDOW 4 — the truth panel: content revealed, or a labelled FAIL -->
+      <div id="mm-truth"></div>
+      <div id="mm-score"></div>
       <div id="mm-verdict"></div>
       <div id="mm-grid" class="kv"></div>
       <div id="mm-cands"></div>

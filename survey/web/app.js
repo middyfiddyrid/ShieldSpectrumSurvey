@@ -2259,6 +2259,82 @@ function openMarkModal(mhz, dbm) {
 }
 function closeMarkModal() { $("mark-modal").classList.remove("show"); }
 
+/* ---------- WINDOW 4: the truth panel + the per-sweep scorecard ----------
+   Rule (operator's): the panel REVEALS THE CONTENT of the signal, or the signal
+   is a FAIL. No middle. Every analyze resolves to WIN/FAIL from j.verdict (see
+   survey/verdict.py). The panel never decides whether a signal is "relevant" —
+   that is the operator's call — it only renders what came out and scores whether
+   content was revealed. Each FAIL carries its cause: code (on us) vs physics
+   (encryption / out-of-band / too-wide — unfixable by any software) vs no-signal. */
+function t4SweepKey() {
+  return (App._activeSweep && App._activeSweep.sweep_id)
+    || App._lastFinishedSweepId || "session";
+}
+function renderTruthPanel(j) {
+  const el = $("mm-truth");
+  if (!el) return;
+  const v = j && j.verdict;
+  if (!v) { el.className = ""; el.innerHTML = ""; return; }
+  if (v.verdict === "NA") {          // no capture attempted — not scored
+    el.className = "";
+    el.innerHTML = `<div class="t4-head"><span class="t4-cause">NOT SCORED</span>`
+      + `<span>${esc(v.reason || "no capture")}</span></div>`;
+    return;
+  }
+  const win = v.verdict === "WIN";
+  el.className = win ? "win" : "fail";
+  const causeLabel = { code: "CODE · on us", physics: "PHYSICS · unfixable",
+                       "no-signal": "NO SIGNAL" }[v.cause] || "";
+  let body = "";
+  if (win) {
+    const kind = v.content_kind;
+    if (kind === "image" && j.decode && j.decode.frame_png) {
+      body = `<div class="t4-reason">Recovered still (one field, greyscale — confirms a video raster):</div>`
+           + `<img alt="recovered video still" src="${j.decode.frame_png}">`;
+    } else if (kind === "audio" && j.audio) {
+      body = `<div class="t4-reason">Demodulated audio — listen to judge the content:</div>`
+           + `<audio controls preload="none" src="${esc(j.audio)}"></audio>`;
+    } else if (kind === "text" || kind === "data") {
+      const msgs = (j.decode && j.decode.messages) || [];
+      const txt = msgs.map(m => (m && (m.text != null ? m.text : JSON.stringify(m))))
+                      .join("\n") || "(decoded)";
+      body = `<div class="t4-reason">Decoded ${esc(kind)} — the payload itself:</div>`
+           + `<pre class="t4-text">${esc(txt)}</pre>`;
+    } else {
+      body = `<div class="t4-reason">Content revealed.</div>`;
+    }
+  } else {
+    body = `<div class="t4-reason">${esc(v.reason || "no content revealed")}</div>`;
+  }
+  el.innerHTML =
+    `<div class="t4-head"><span class="t4-badge">${win ? "WIN" : "FAIL"}</span>`
+    + `<span>${win ? "content revealed — " + esc(v.content_kind || "")
+                    : "content NOT revealed"}</span>`
+    + (causeLabel ? `<span class="t4-cause">${esc(causeLabel)}</span>` : "")
+    + `</div><div class="t4-body">${body}</div>`;
+}
+function updateScorecard(verdict) {
+  if (!verdict) return;
+  if (verdict.verdict !== "WIN" && verdict.verdict !== "FAIL") return;  // skip NA
+  const key = t4SweepKey();
+  if (!App._scorecard || App._scorecard.key !== key)
+    App._scorecard = { key, list: [] };
+  App._scorecard.list.push(verdict);
+  const L = App._scorecard.list, total = L.length;
+  const wins = L.filter(v => v.verdict === "WIN").length;
+  const fails = total - wins;
+  const byCause = c => L.filter(v => v.verdict === "FAIL" && v.cause === c).length;
+  const pct = total ? Math.round(1000 * wins / total) / 10 : 0;
+  const el = $("mm-score");
+  if (!el) return;
+  const sweepLbl = (typeof key === "number") ? ("sweep #" + key) : "this session";
+  el.innerHTML =
+    `<span>Did the job (${esc(sweepLbl)}): <b>${pct}%</b></span>`
+    + `<span class="sc-seg">wins ${wins} / ${total}</span>`
+    + `<span class="sc-seg">fails — code ${byCause("code")} · `
+    + `physics ${byCause("physics")} · empty ${byCause("no-signal")}</span>`;
+}
+
 async function runMarkAnalyze() {
   const stat = $("mm-status");
   stat.textContent = "analyzing " + fmtF(Mark.mhz) + " …";
@@ -2267,6 +2343,8 @@ async function runMarkAnalyze() {
   catch (e) { stat.textContent = "analyze failed: " + (e.message || e); return; }
   App.lastAnalyze = j;
   stat.textContent = j.note || "";
+  renderTruthPanel(j);          // WINDOW 4: reveal the content, or a labelled FAIL
+  updateScorecard(j.verdict);   // per-sweep did-the-job %
   const interp = j.interpretation || {};
   const verdict = interp.readable || interp.summary || "";
   $("mm-verdict").innerHTML = verdict

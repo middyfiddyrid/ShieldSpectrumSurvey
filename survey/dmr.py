@@ -17,16 +17,14 @@ into 30 ms TDMA frames. Each frame carries one 264-bit BURST:
     EMB(8) + embedded signalling(32) + EMB(8), the EMB being a (16,7,6) code
     holding the colour code, the PRIVACY INDICATOR and a 2-bit LCSS.
 
-What this module extracts, and why it matters for a sweep:
-    colour code, sync flavour (BS / MS / direct, voice / data, and for direct
-    mode the SLOT), data type, and from a Voice LC Header or a Terminator-with-LC
-    the TALKGROUP and SOURCE RADIO ID — plus, first-class, the ENCRYPTION state.
-
-ENCRYPTION IS A RESULT, NOT A FAILURE. Three independent indicators are read and
-any of them is enough: a PI-header data type, the privacy bit in the link
-control's service options, and the PI bit in a voice burst's EMB. "DMR, colour
-code 1, talkgroup 4021, ENCRYPTED" is a complete, useful, honest finding — the
-module never reports encrypted traffic as a failed decode or as silence.
+Fields recovered from a burst stream: colour code; sync flavour (BS / MS /
+direct; voice / data; direct-mode slot); data type; and, from a Voice LC Header
+or Terminator-with-LC, the talkgroup and source radio ID. Encryption state is
+reported as a decoded field, asserted on any of three independent indicators — a
+PI-header data type, the link-control service-options privacy bit, or the
+voice-burst EMB PI bit. An encrypted burst yields its framing metadata with the
+payload marked unreadable; it is not returned as a decode failure or as no
+signal.
 
 HONESTY GATE: a burst is only believed when a 48-bit sync pattern matches within
 SYNC_MAX_ERRS *and* some FEC independent of it validates — a clean BPTC(196,96)
