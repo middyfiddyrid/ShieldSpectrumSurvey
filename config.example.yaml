@@ -1,0 +1,193 @@
+# ---------------------------------------------------------------------------
+# config.example.yaml — TRACKED template for config.yaml.
+#
+# The live config.yaml is gitignored (it holds the OpenCellID key and, on some
+# machines, absolute paths). This example is the single source of truth for the
+# SHAPE of the config and travels with the repo, so every machine can build an
+# identical config.yaml.
+#
+# Setup on a new machine:
+#   1. copy this file to config.yaml   (cp config.example.yaml config.yaml)
+#   2. put your real OpenCellID key in api_keys.opencellid
+#   3. the two paths below are RELATIVE to the app folder and work as-is; only
+#      change them if your data/branding live somewhere else.
+#
+# The app also runs on survey/config.py DEFAULTS if a key is missing, so this
+# file only needs to carry what you want to override.
+# ---------------------------------------------------------------------------
+app:
+  host: 127.0.0.1
+  port: 8765
+  open_browser: true
+  admin: false
+branding:
+  company: Shield Security Systems
+  logo_path: branding/shield_security_logo.png   # relative to the app folder
+  operator: ''
+radius:
+  broadcast_miles: 25
+  land_mobile_miles: 5
+api_keys:
+  opencellid: ''            # <-- put your OpenCellID key here (pk....); keep it LOCAL
+  radioreference_user: ''
+  radioreference_pass: ''
+  anthropic: ''
+  openai: ''
+  xai: ''
+  deepseek: ''
+  gemini: ''
+uls:
+  extract_dir: data/uls_extract   # relative to the app folder
+  stale_days: 30
+detection:
+  threshold_db: 12.0
+  merge_gap_bins: 2
+  min_persistence: 0.05
+  interior_delta_flag_db: 10.0
+  room_delta_flag_db: 12.0
+  ignore_below_mhz: 0.15
+  lf_extra_threshold_db: 6.0
+  lf_extra_below_mhz: 50.0
+  candidate_threshold_db: 8.0
+  persistence_min_frac: 0.85
+capture:
+  avg_passes: 20
+  maxhold_dwell_s: 12.0
+sweep:
+  sweep_points: 112
+  seconds_per_sweep: 0.36
+  segment_width_mhz:
+    subghz: 75
+    mid: 100
+    high: 200
+  profiles:
+    quick:
+      minutes: 15
+      avg_passes: 5
+      span_scale: 2.0
+    standard:
+      minutes: 45
+      avg_passes: 10
+      span_scale: 1.0
+    deep:
+      minutes: 120
+      avg_passes: 20
+      span_scale: 0.5
+  band_dwell_weights:
+    ism_433: 3.0
+    ism_915: 3.0
+    ism_2400: 3.0
+    dect: 2.5
+    cellular_uplink: 2.5
+    ism_5800: 2.0
+    gps: 1.5
+    default: 1.0
+    broadcast: 0.4
+cellmapper:
+  import_path: data/cellmapper_towers.json
+integrations:
+  discord_webhook: ''
+device:
+  simulate: false
+  port: ''
+  baud: 500000
+  source: b220            # which radio this machine drives: rfexplorer | pluto | b220
+  isolate_workers: true
+  isolate_simulator: false
+  worker_call_timeout_s: 300.0
+  worker_connect_timeout_s: 300.0
+pluto:
+  uri: 'usb:'
+  libiio_dir: ''
+  sample_rate: 20000000
+  keep_fraction: 0.8
+  overlap: 0.5
+  fft_size: 1024
+  capture_samples: 32768
+  settle_seconds: 0.01
+  dc_notch_bins: 2
+  dc_guard_hz: 250000
+  sweep_bins: 2048
+  gain_mode: manual
+  gain_db: 64.0
+  sweep_avg_passes: 2
+  identify_samples: 131072
+  identify_captures: 8
+  listen_sample_rate: 2400000
+  listen_seconds: 0.5
+  analyze_seconds: 2.0
+  stream_sample_rate: 2400000
+  listen_block_seconds: 0.15
+  listen_wf_nperseg: 512
+  listen_wf_rows_per_block: 8
+  listen_wf_history_rows: 240
+  listen_analyzer_nperseg: 2048
+  listen_analyzer_bins: 512
+  listen_analyzer_ema: 0.4
+  listen_wf_floor_ema: 0.1
+  listen_wf_span_lo_db: -5.0
+  listen_wf_span_hi_db: 40.0
+  listen_squelch_snr_db: 5.0
+  listen_classify_samples: 8192
+  listen_classify_interval_s: 2.0
+  listen_classify_budget_s: 0.05
+  cal_offset_db: -30.0
+  freq_min_hz: 70000000
+  freq_max_hz: 6000000000
+  require_extended: false
+  concurrent_monitor: true
+b220:
+  device_args: type=b200
+  uhd_dir: ''
+  fpga: ''
+  fpga_bundled: usrp_b210_fpga.bin
+  antenna: RX2
+  sample_rate: 20000000
+  keep_fraction: 0.8
+  overlap: 0.5
+  fft_size: 1024
+  capture_samples: 32768
+  settle_seconds: 0.01
+  dc_notch_bins: 2
+  dc_guard_hz: 250000
+  sweep_bins: 2048
+  gain_mode: manual
+  gain_db: 60.0
+  sweep_avg_passes: 2
+  identify_samples: 131072
+  identify_captures: 8
+  cal_offset_db: 36.0
+  freq_min_hz: 70000000
+  freq_max_hz: 6000000000
+  require_extended: false
+  # AD9361 RFVCO cannot synthesise 2.4 MHz — 5 MHz is the safe floor for
+  # listen/analyze. Also set as a code default in survey/config.py.
+  listen_sample_rate: 5000000
+  stream_sample_rate: 5000000
+df:
+  spacing_m: 0.35
+  sample_rate: 5000000
+  capture_samples: 131072
+  nperseg: 4096
+  snr_gate_db: 6.0
+  coherence_gate: 0.5
+cache:
+  dir: cache
+  max_age_hours: 720
+recordings:
+  dir: recordings
+  max_seconds: 120.0
+# calibration is written per-unit by the in-app calibration tool; left empty
+# in the template so no machine's measured numbers ship as if they were yours.
+calibration: {}
+stimulate:
+  setup: split
+  tx_source: pluto
+  rx_source: b220
+  rx_sample_rate: 4000000
+  averages: 6
+  prominence_gate_db: 8.0
+  delta_gate_db: 6.0
+  tx_amp: 0.4
+  pluto_tx_hardwaregain_db: -30.0
+  tx_settle_s: 0.1
