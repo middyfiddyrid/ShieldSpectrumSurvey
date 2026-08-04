@@ -1286,11 +1286,15 @@ $("btn-create").onclick = async () => {
     const r = await api("/api/session", {
       address: $("in-address").value, radius_broadcast: $("in-rb").value,
       radius_lmr: $("in-rl").value, operator: $("in-op").value, kind });
-    // a LAB session is not geocoded, so there is no lat/lon to report back
-    $("session-msg").textContent = (r.kind === "lab" || !r.geocode || r.geocode.lat == null)
-      ? `session #${r.session_id} created — LAB / BENCH (no client report, not pushed to portal)`
-      : `session #${r.session_id} @ ${r.geocode.lat.toFixed(5)}, ` +
-        `${r.geocode.lon.toFixed(5)} (${r.geocode.geocoder})`;
+    // a LAB session may now carry an address (geocoded like field) OR none
+    // (bench work, no geo). Show coordinates whenever we actually got them, and
+    // still flag LAB so a bench session is never mistaken for a client one.
+    const geocoded = r.geocode && r.geocode.lat != null;
+    const labTag = r.kind === "lab" ? " — LAB / BENCH (no client report, not pushed to portal)" : "";
+    $("session-msg").textContent = geocoded
+      ? `session #${r.session_id} @ ${r.geocode.lat.toFixed(5)}, ` +
+        `${r.geocode.lon.toFixed(5)} (${r.geocode.geocoder})${labTag}`
+      : `session #${r.session_id} created${labTag || " (no geo)"}`;
     $("btn-baseline").disabled = false;
   } catch (e) { $("session-msg").textContent = "ERROR: " + e.message; }
 };

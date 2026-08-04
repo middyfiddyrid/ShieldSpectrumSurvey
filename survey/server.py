@@ -164,12 +164,14 @@ def create_app(db, cfg, demo=False) -> Flask:
         body = request.get_json(force=True)
         kind = "lab" if (body.get("kind") or "field").strip().lower() == "lab" else "field"
         address = (body.get("address") or "").strip()
-        # A LAB/BENCH session is test work at your own bench: there is no client
-        # site to geocode, and the licensed-transmitter radii that geocoding
-        # feeds are meaningless for it. Let it be created without an address.
-        if kind == "lab":
-            if not address:
-                address = "Lab / bench"
+        # A LAB/BENCH session is test work at your own bench, so unlike a field
+        # session it does NOT require an address. But it may still CARRY one —
+        # mobile bench work (e.g. characterizing a device from the car) has a
+        # real location worth capturing. So: given an address, geocode it exactly
+        # like a field session; given none, fall back to the bench placeholder
+        # with no geo. Field is unchanged (address required).
+        if kind == "lab" and not address:
+            address = "Lab / bench"
             geo = {"lat": None, "lon": None, "geocoder": "none (lab/bench session)"}
         else:
             if not address:
