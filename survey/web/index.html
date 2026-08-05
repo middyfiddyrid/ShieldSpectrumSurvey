@@ -529,6 +529,7 @@ body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid va
   <div class="step" data-view="cases"><div class="dot" id="dot-cases"></div>CASE STUDIES</div>
   <div class="step" data-view="inventory"><div class="dot" id="dot-inventory"></div>INVENTORY (WiFi/BT)</div>
   <div class="step" data-view="network"><div class="dot" id="dot-network"></div>NETWORK CHECK (LAN)</div>
+  <div class="step" data-view="exposure"><div class="dot" id="dot-exposure"></div>EXPOSURE (internet)</div>
   <div class="step" data-view="droid"><div class="dot" id="dot-droid"></div>DROID CHECK (phone)</div>
   <div class="step" data-view="devicelab"><div class="dot" id="dot-devicelab"></div>CAPTURE DEVICE (lab)</div>
   <div class="step" data-view="calibration"><div class="dot" id="dot-calibration"></div>CALIBRATION (shop)</div>
@@ -1862,6 +1863,27 @@ body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid va
     </div>
     <div class="scroll" style="max-height:520px"><table id="tbl-network"></table></div>
     <p class="note" id="net-enforce-note" style="display:none"></p>
+  </div>
+</section>
+
+<!-- ============ EXPOSURE (internet-facing, via Shodan) ============ -->
+<section class="view" id="view-exposure">
+  <h2>EXPOSURE CHECK <span class="tag">what's reachable from the public internet</span></h2>
+  <div class="card">
+    <p class="note">The mirror image of the LAN scan. NETWORK CHECK looks <b>inward</b> from inside
+    the client's network; this looks <b>inward from the outside</b> — devices at or near the client's
+    address that are already indexed as reachable on the public internet (an exposed IP camera, DVR,
+    or NAS). <b>Passive lookup: the app queries Shodan's existing index and transmits nothing.</b></p>
+    <p class="note" style="border-left:2px solid var(--amber,#ffb454);padding-left:9px">
+    <b>Internal only.</b> Results are LEADS, not proof — Shodan geolocates by IP, which is coarse, so
+    a hit may be a neighbor or the ISP, not the client. Confirm ownership before it goes in any memo,
+    and <b>never</b> put this in a client-facing report.</p>
+    <div class="row">
+      <button class="btn primary" id="btn-exposure">CHECK EXPOSURE</button>
+      <span class="note" id="exp-msg"></span>
+    </div>
+    <div class="scroll" style="max-height:520px"><table id="tbl-exposure"></table></div>
+    <p class="note" id="exp-attr" style="display:none;opacity:.8;margin-top:8px"></p>
   </div>
 </section>
 

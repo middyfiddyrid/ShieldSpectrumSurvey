@@ -6306,6 +6306,63 @@ window.netUnblock = async (id) => {
   catch (e) { $("net-msg").textContent = e.message; }
 };
 
+/* ---------- exposure check (Shodan, internal-only) ----------
+   Outside-in complement to the LAN scan. Cameras/DVRs lead — they're the finding.
+   Every status renders a plain-language line; 'not_configured' tells the operator
+   exactly what's missing (a paid Shodan key) rather than looking broken. */
+const _EXP_CLASS = {
+  camera: "var(--red, #ff6b6b)", dvr: "var(--red, #ff6b6b)",
+  nas: "var(--amber, #ffb454)", router: "var(--amber, #ffb454)",
+  printer: "var(--cyan, #6cc)", iot: "var(--cyan, #6cc)",
+  unknown: "var(--dim, #8a97a6)",
+};
+function renderExposure(hosts) {
+  const t = $("tbl-exposure");
+  if (!t) return;
+  if (!hosts || !hosts.length) { t.innerHTML = ""; return; }
+  t.innerHTML =
+    `<tr><th>type</th><th>host</th><th>product / banner</th><th>org / ISP</th><th>seen</th></tr>` +
+    hosts.map(h => {
+      const dot = _EXP_CLASS[h.device_class] || _EXP_CLASS.unknown;
+      const hostport = `${esc(h.ip)}${h.port ? ":" + esc(h.port) : ""}`;
+      const prod = esc(h.product || h.banner || "—");
+      const place = [h.city].filter(Boolean).map(esc).join("");
+      return `<tr>
+        <td><span class="tag" style="color:${dot}">${esc((h.device_class || "?").toUpperCase())}</span></td>
+        <td style="font-family:monospace">${hostport}${place ? `<br><span class="note">${place}</span>` : ""}</td>
+        <td>${prod}</td>
+        <td class="note">${esc(h.org || "—")}</td>
+        <td class="note">${esc((h.timestamp || "").slice(0, 10))}</td>
+      </tr>`;
+    }).join("");
+}
+if ($("btn-exposure")) $("btn-exposure").onclick = async () => {
+  const b = $("btn-exposure");
+  b.disabled = true;
+  $("exp-msg").textContent = "querying Shodan's index…";
+  $("exp-attr").style.display = "none";
+  try {
+    const r = await api("/api/osint/shodan/run", {});
+    renderExposure(r.hosts);
+    $("exp-msg").textContent = r.message || r.status;
+    if (r.status === "not_configured") {
+      $("exp-msg").innerHTML =
+        `<b style="color:var(--amber,#ffb454)">Not set up —</b> ${esc(r.message)}. ` +
+        `Add a paid Shodan key to <code>api_keys.shodan</code> in config.yaml.`;
+    } else if (r.status === "denied") {
+      $("exp-msg").innerHTML = `<b style="color:var(--red,#ff6b6b)">Denied —</b> ${esc(r.message)}`;
+    }
+    if (r.attribution && (r.hosts || []).length) {
+      $("exp-attr").textContent = r.attribution;
+      $("exp-attr").style.display = "";
+    }
+  } catch (e) {
+    renderExposure([]);
+    $("exp-msg").textContent = "exposure check failed: " + e.message;
+  }
+  b.disabled = false;
+};
+
 /* ---------- droid check (Android handset over adb, read-only) ----------
    Shows INDICATORS, never a clean/infected verdict. Severity orders the
    operator's attention; the evidence is always shown next to it. */

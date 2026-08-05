@@ -133,7 +133,7 @@ def create_app(db, cfg, demo=False) -> Flask:
                     "/api/analyze/threat_vectors", "/api/case_files", "/case_files",
                     "/api/triage", "/api/novelty", "/api/record",
                     "/api/attribution", "/api/decode/override", "/api/ble/scan",
-                    "/api/stimulate", "/api/netscan", "/api/droid")
+                    "/api/stimulate", "/api/netscan", "/api/droid", "/api/osint")
 
     @app.before_request
     def _demo_guard():
@@ -3910,6 +3910,27 @@ def create_app(db, cfg, demo=False) -> Flask:
         if devices:
             db.upsert_lan_devices(session["id"], devices)
         return jsonify({"meta": meta, "devices": _lan_view(session["id"])})
+
+    @app.post("/api/osint/shodan/run")
+    def osint_shodan_run():
+        """INTERNAL ONLY (DEMO_BLOCKED, PII). The outside-in complement to the LAN
+        scan: which devices at/near the client's address are already indexed as
+        reachable from the public internet (an exposed camera/DVR is a finding a
+        client grasps instantly). NOT a spectral baseline — this feeds the
+        confidential pre-sweep memo, never the client report. Needs a PAID Shodan
+        key; without one it returns status 'not_configured' with a plain message."""
+        session = st.session()
+        if not session:
+            return err("create a field session (with an address) first")
+        lat, lon = session.get("lat"), session.get("lon")
+        if lat is None or lon is None:
+            return err("this session has no coordinates — the exposure lookup needs "
+                       "a geocoded address (field session)")
+        from .osint_shodan import ShodanExposure
+        key = cfg.get("api_keys", "shodan", default="")
+        res = ShodanExposure(st.cache, key).fetch(float(lat), float(lon), 2.0)
+        return jsonify({"status": res.status, "message": res.message,
+                        "attribution": res.attribution, "hosts": res.hosts})
 
     @app.get("/api/netscan/devices")
     def netscan_devices():
