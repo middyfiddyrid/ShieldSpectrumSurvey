@@ -29,6 +29,7 @@ radius:
   land_mobile_miles: 5
 api_keys:
   opencellid: ''            # <-- put your OpenCellID key here (pk....); keep it LOCAL
+  shodan: ''                # <-- paid Shodan plan; internal exposure lookup only (never client report)
   radioreference_user: ''
   radioreference_pass: ''
   anthropic: ''
