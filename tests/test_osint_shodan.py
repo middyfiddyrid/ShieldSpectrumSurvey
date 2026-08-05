@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from survey.baseline.base import DiskCache  # noqa: E402
 from survey.osint_shodan import (  # noqa: E402
-    ShodanExposure, classify_exposed, lookup_ip, public_ip)
+    ShodanExposure, classify_exposed, lookup_ip, public_ip, geolocate, attach_geo)
 
 
 class _Resp:
@@ -130,6 +130,31 @@ class InternetDbFreeTests(unittest.TestCase):
     def test_public_ip_empty_on_failure(self):
         with patch("survey.osint_shodan.requests.get", side_effect=OSError("no net")):
             self.assertEqual(public_ip(), "")
+
+
+class GeolocateTests(unittest.TestCase):
+    def test_geolocate_ok(self):
+        payload = {"success": True, "latitude": 38.6, "longitude": -91.5,
+                   "city": "Rolla", "region": "Missouri"}
+        with patch("survey.osint_shodan.requests.get", return_value=_Resp(200, payload)):
+            g = geolocate("1.2.3.4")
+        self.assertEqual(g["lat"], 38.6)
+        self.assertEqual(g["city"], "Rolla")
+
+    def test_geolocate_failure_returns_none(self):
+        with patch("survey.osint_shodan.requests.get",
+                   return_value=_Resp(200, {"success": False})):
+            self.assertIsNone(geolocate("0.0.0.0"))
+
+    def test_attach_geo_fills_coords_once_per_ip(self):
+        hosts = [{"ip": "1.2.3.4", "lat": None, "lon": None},
+                 {"ip": "1.2.3.4", "lat": None, "lon": None}]
+        payload = {"success": True, "latitude": 10.0, "longitude": 20.0, "city": "X"}
+        with patch("survey.osint_shodan.requests.get", return_value=_Resp(200, payload)) as m:
+            attach_geo(hosts)
+        self.assertEqual(hosts[0]["lat"], 10.0)
+        self.assertEqual(hosts[1]["lon"], 20.0)
+        self.assertEqual(m.call_count, 1)          # deduped: one geo call for the repeated IP
 
 
 if __name__ == "__main__":

@@ -3911,6 +3911,17 @@ def create_app(db, cfg, demo=False) -> Flask:
             db.upsert_lan_devices(session["id"], devices)
         return jsonify({"meta": meta, "devices": _lan_view(session["id"])})
 
+    def _client_site():
+        """The active session's geocoded location for map-anchoring: the ONE point
+        we know exactly (the client gave us the address). None for lab/no-geo."""
+        s = st.session()
+        if not s:
+            return None
+        lat, lon = s.get("lat"), s.get("lon")
+        if lat is None or lon is None:
+            return None
+        return {"lat": float(lat), "lon": float(lon), "address": s.get("address", "")}
+
     @app.post("/api/osint/shodan/run")
     def osint_shodan_run():
         """INTERNAL ONLY (DEMO_BLOCKED, PII). The outside-in complement to the LAN
@@ -3937,7 +3948,7 @@ def create_app(db, cfg, demo=False) -> Flask:
         """FREE, no-key exposure lookup for a single IP via Shodan InternetDB.
         Body: {"ip": "1.2.3.4"} — or omit "ip" to auto-detect this machine's
         public IP (on-site, that's the client's connection). Internal-only."""
-        from .osint_shodan import lookup_ip, public_ip
+        from .osint_shodan import lookup_ip, public_ip, attach_geo
         body = request.get_json(silent=True) or {}
         ip = (body.get("ip") or "").strip()
         auto = False
@@ -3947,9 +3958,40 @@ def create_app(db, cfg, demo=False) -> Flask:
             if not ip:
                 return err("couldn't detect this machine's public IP — enter one manually")
         res = lookup_ip(ip)
+        site = _client_site()
+        if res.status == "ok":
+            if auto and site:
+                # this IS the client's own connection: its devices sit at the
+                # client's real, geocoded address — pin them there (accurate).
+                for h in res.hosts:
+                    h["lat"], h["lon"], h["geo_exact"] = site["lat"], site["lon"], True
+            else:
+                attach_geo(res.hosts)      # manual IP: IP-level (approximate)
         return jsonify({"status": res.status, "message": res.message,
                         "attribution": res.attribution, "hosts": res.hosts,
-                        "ip": ip, "auto_detected": auto})
+                        "ip": ip, "auto_detected": auto, "client_site": site})
+
+    @app.post("/api/osint/neighbors")
+    def osint_neighbors():
+        """FREE neighbor sweep — walk the /24 block around an IP (or this
+        connection's public IP) with per-address InternetDB lookups. No key.
+        'area' = the IP block chosen, not the whole internet. Internal-only."""
+        from .osint_shodan import scan_block, public_ip, attach_geo
+        body = request.get_json(silent=True) or {}
+        ip = (body.get("ip") or "").strip()
+        auto = False
+        if not ip:
+            ip = public_ip()
+            auto = True
+            if not ip:
+                return err("couldn't detect this connection's public IP — enter one manually")
+        n = int(cfg.get("osint", "neighbor_block_hosts", default=64) or 64)
+        res = scan_block(ip, max_hosts=n)
+        if res.status == "ok":
+            attach_geo(res.hosts)          # area hosts: IP-level (approximate)
+        return jsonify({"status": res.status, "message": res.message,
+                        "attribution": res.attribution, "hosts": res.hosts,
+                        "ip": ip, "auto_detected": auto, "client_site": _client_site()})
 
     @app.get("/api/netscan/devices")
     def netscan_devices():

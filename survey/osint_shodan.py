@@ -246,3 +246,106 @@ def lookup_ip(ip: str) -> ExposureResult:
     if not ports and not hostnames:
         return ExposureResult("empty", [], f"{ip}: nothing exposed in Shodan's index")
     return ExposureResult("ok", hosts, msg, "Exposure data: Shodan InternetDB (free)")
+
+
+# ---------------------------------------------------------------------------
+# FREE neighbor sweep: walk the IP block this connection sits in, one free
+# InternetDB lookup per address, and aggregate whatever is exposed. This is the
+# no-cost stand-in for the paid geo search.
+#
+# HONEST LIMIT — this is ISP-block adjacency, NOT street adjacency. Residential
+# ISPs don't hand out IPs by geography, so "same block" only loosely tracks
+# "nearby homes"; some hits are the ISP itself. True geographic neighbor search
+# is exactly what the PAID geo path buys. Say this in any memo that uses it.
+NEIGHBOR_MAX_HOSTS = 64      # addresses probed around the target (cap the sweep)
+
+
+def _block_ips(ip: str, max_hosts: int) -> list[str]:
+    """A window of IPv4 addresses in the same /24, centered on the target's last
+    octet, excluding the target itself and the .0/.255 network/broadcast ends."""
+    parts = (ip or "").split(".")
+    if len(parts) != 4:
+        return []
+    try:
+        a, b, c, d = (int(p) for p in parts)
+    except ValueError:
+        return []
+    if not all(0 <= x <= 255 for x in (a, b, c, d)):
+        return []
+    half = max(1, max_hosts) // 2
+    lo, hi = max(1, d - half), min(254, d + half)
+    return [f"{a}.{b}.{c}.{x}" for x in range(lo, hi + 1) if x != d]
+
+
+def scan_block(ip: str, max_hosts: int = NEIGHBOR_MAX_HOSTS,
+               delay: float = 0.1) -> ExposureResult:
+    """Free InternetDB lookups across the target's /24 window. Sequential with a
+    small delay to stay under InternetDB's rate limit (it's a read of Shodan's
+    index, NOT active scanning — no packets hit the neighbors)."""
+    import time
+    ip = (ip or "").strip()
+    targets = _block_ips(ip, max_hosts)
+    if not targets:
+        return ExposureResult("failed", [], f"can't read a network block from '{ip}'")
+    hosts, scanned = [], 0
+    for t in targets:
+        res = lookup_ip(t)
+        scanned += 1
+        if res.status == "ok":
+            hosts.extend(res.hosts)
+        time.sleep(delay)
+    hosts.sort(key=lambda h: (h["device_class"] in ("unknown",), h["ip"]))
+    if not hosts:
+        return ExposureResult("empty", [],
+                              f"probed {scanned} addresses in {ip}'s /24 — none are "
+                              f"indexed as exposed (common for residential blocks)")
+    n_ips = len({h["ip"] for h in hosts})
+    n_cam = sum(1 for h in hosts if h["device_class"] in ("camera", "dvr"))
+    msg = f"{n_ips} exposed host(s) across {scanned} addresses probed in the area"
+    if n_cam:
+        msg += f"; {n_cam} camera/DVR row(s) — confirm whose before reporting"
+    return ExposureResult("ok", hosts, msg, "Exposure data: Shodan InternetDB (free)")
+
+
+# ---------------------------------------------------------------------------
+# FREE IP -> location, so found hosts can go on a map. This is IP geolocation
+# (ipwho.is, no key): city/ISP-level, NOT rooftop — the same granularity Shodan's
+# own map uses. Enough to place a device in the right town/area; never treat the
+# pin as the device's literal address.
+GEO_URL = "https://ipwho.is"
+
+
+def geolocate(ip: str) -> dict | None:
+    """{lat, lon, city, region} for an IP, or None. Free, no key."""
+    ip = (ip or "").strip()
+    if not ip:
+        return None
+    try:
+        r = requests.get(f"{GEO_URL}/{ip}", timeout=10)
+        r.raise_for_status()
+        d = r.json()
+    except Exception:  # noqa: BLE001
+        return None
+    if isinstance(d, dict) and d.get("success") is False:
+        return None
+    lat, lon = d.get("latitude"), d.get("longitude")
+    if lat is None or lon is None:
+        return None
+    return {"lat": lat, "lon": lon,
+            "city": d.get("city") or "", "region": d.get("region") or ""}
+
+
+def attach_geo(hosts: list[dict]) -> list[dict]:
+    """Fill lat/lon/city on each host by geolocating its IP once (cached per IP
+    within the call). Rows keep whatever they had if geolocation fails."""
+    seen: dict[str, dict] = {}
+    for h in hosts:
+        ip = h.get("ip") or ""
+        if ip and ip not in seen:
+            seen[ip] = geolocate(ip) or {}
+        g = seen.get(ip) or {}
+        if g:
+            h["lat"], h["lon"] = g.get("lat"), g.get("lon")
+            h["city"] = g.get("city") or h.get("city", "")
+            h["region"] = g.get("region") or ""
+    return hosts

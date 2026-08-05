@@ -5,6 +5,7 @@
 <title>SHIELD TSCM — Spectrum Survey</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <script>try{var _t=localStorage.getItem('dcs-theme');if(_t)document.documentElement.className=_t;}catch(e){}</script>
+<link rel="stylesheet" href="/static/leaflet.css">
 <style>
 :root {
   --bg:#0b0f14; --panel:#121922; --panel2:#0e141c; --line:#1f2a37;
@@ -1888,13 +1889,17 @@ body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid va
       <span class="note" id="exp-ip-msg"></span>
     </div>
 
-    <h3 class="note" style="margin:16px 0 4px">PAID — search the area <span class="tag">needs a Shodan key</span></h3>
-    <p class="note">Searches Shodan's scanned database around the address — neighbors and nearby
-    devices too, not just this one connection. Requires a paid Shodan plan (<code>api_keys.shodan</code>).</p>
+    <h3 class="note" style="margin:16px 0 4px">FREE — sweep the area <span class="tag">no cost</span></h3>
+    <p class="note">Walks the network block around an IP (blank = this connection) and looks up each
+    address for free — the area view, without paying. <b>This is ISP-block adjacency, not house-by-house:</b>
+    some hits are nearby, some are the ISP; confirm whose before reporting. Takes ~15–20s to probe the area.</p>
     <div class="row">
-      <button class="btn" id="btn-exposure">SEARCH AREA (paid)</button>
+      <input class="small" id="exp-nb-ip" placeholder="1.2.3.4  (blank = this connection)" style="width:230px">
+      <button class="btn primary" id="btn-exposure-nb">SWEEP AREA (free)</button>
       <span class="note" id="exp-msg"></span>
     </div>
+    <div id="exp-map" style="display:none;height:340px;border-radius:4px;margin:10px 0;border:1px solid var(--line)"></div>
+    <p class="note" id="exp-map-note" style="display:none;opacity:.85"></p>
     <div class="scroll" style="max-height:520px"><table id="tbl-exposure"></table></div>
     <p class="note" id="exp-attr" style="display:none;opacity:.8;margin-top:8px"></p>
   </div>
@@ -2198,6 +2203,7 @@ body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid va
   mark();
 })();
 </script>
+<script src="/static/leaflet.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

@@ -6336,6 +6336,56 @@ function renderExposure(hosts) {
       </tr>`;
     }).join("");
 }
+/* Leaflet map for exposure hosts. The client site is the one EXACT point (we
+   geocoded the address); host pins with geo_exact sit there too (client's own
+   connection). Everything else is IP-level approximate and is labelled so. */
+let _expMap = null, _expLayer = null;
+function renderExposureMap(hosts, site) {
+  const box = $("exp-map"), note = $("exp-map-note");
+  if (!box || typeof L === "undefined") return;
+  const pts = (hosts || []).filter(h => h.lat != null && h.lon != null);
+  if (!pts.length && !site) { box.style.display = "none"; note.style.display = "none"; return; }
+  box.style.display = "";
+  if (!_expMap) {
+    _expMap = L.map(box, { scrollWheelZoom: false });
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+      { maxZoom: 19, attribution: "© OpenStreetMap" }).addTo(_expMap);
+    _expLayer = L.layerGroup().addTo(_expMap);
+  }
+  _expLayer.clearLayers();
+  const bounds = [];
+  let approx = 0;
+  if (site) {
+    L.circleMarker([site.lat, site.lon], { radius: 9, color: "#2d9bf0",
+      weight: 3, fillColor: "#2d9bf0", fillOpacity: 0.25 })
+      .bindPopup(`<b>CLIENT SITE</b><br>${esc(site.address || "")}`).addTo(_expLayer);
+    bounds.push([site.lat, site.lon]);
+  }
+  pts.forEach((h, i) => {
+    const col = _EXP_CLASS[h.device_class] || _EXP_CLASS.unknown;
+    let lat = h.lat, lon = h.lon;
+    if (!h.geo_exact) {                       // spread stacked approximate pins so they're clickable
+      approx++;
+      const a = i * 2.399963;                 // golden-angle spiral, ~120m radius
+      lat += 0.0011 * Math.cos(a); lon += 0.0011 * Math.sin(a);
+    }
+    L.circleMarker([lat, lon], { radius: 6, color: col, weight: 2,
+      fillColor: col, fillOpacity: h.geo_exact ? 0.85 : 0.45,
+      dashArray: h.geo_exact ? null : "3" })
+      .bindPopup(`<b>${esc(h.ip)}${h.port ? ":" + esc(h.port) : ""}</b>` +
+        `<br>${esc((h.device_class || "?").toUpperCase())}` +
+        (h.geo_exact ? "" : "<br><i>approx — IP-level location</i>") +
+        (h.banner ? `<br>${esc(h.banner)}` : "")).addTo(_expLayer);
+    bounds.push([lat, lon]);
+  });
+  if (bounds.length) _expMap.fitBounds(bounds, { padding: [30, 30], maxZoom: 15 });
+  setTimeout(() => _expMap.invalidateSize(), 60);   // container may have been hidden
+  note.style.display = "";
+  note.innerHTML = site
+    ? `<b>Solid pin = client site (exact).</b> Dashed pins are IP-level approximate` +
+      (approx ? ` (${approx} device${approx === 1 ? "" : "s"}, spread for visibility — not real addresses)` : "") + `.`
+    : `Pins are IP-level approximate — not real addresses.`;
+}
 if ($("btn-exp-ip")) $("btn-exp-ip").onclick = async () => {
   const b = $("btn-exp-ip");
   b.disabled = true;
@@ -6345,6 +6395,7 @@ if ($("btn-exp-ip")) $("btn-exp-ip").onclick = async () => {
     const ip = ($("exp-ip").value || "").trim();
     const r = await api("/api/osint/internetdb", ip ? { ip } : {});
     renderExposure(r.hosts);
+    renderExposureMap(r.hosts, r.client_site);
     const who = r.auto_detected ? `${esc(r.ip)} (this connection)` : esc(r.ip);
     $("exp-ip-msg").innerHTML = `<b>${who}</b> — ${esc(r.message || r.status)}`;
     if (r.attribution && (r.hosts || []).length) {
@@ -6357,29 +6408,25 @@ if ($("btn-exp-ip")) $("btn-exp-ip").onclick = async () => {
   }
   b.disabled = false;
 };
-if ($("btn-exposure")) $("btn-exposure").onclick = async () => {
-  const b = $("btn-exposure");
+if ($("btn-exposure-nb")) $("btn-exposure-nb").onclick = async () => {
+  const b = $("btn-exposure-nb");
   b.disabled = true;
-  $("exp-msg").textContent = "querying Shodan's index…";
+  $("exp-msg").textContent = "sweeping the area (probing the block, ~15–20s)…";
   $("exp-attr").style.display = "none";
   try {
-    const r = await api("/api/osint/shodan/run", {});
+    const ip = ($("exp-nb-ip").value || "").trim();
+    const r = await api("/api/osint/neighbors", ip ? { ip } : {});
     renderExposure(r.hosts);
-    $("exp-msg").textContent = r.message || r.status;
-    if (r.status === "not_configured") {
-      $("exp-msg").innerHTML =
-        `<b style="color:var(--amber,#ffb454)">Not set up —</b> ${esc(r.message)}. ` +
-        `Add a paid Shodan key to <code>api_keys.shodan</code> in config.yaml.`;
-    } else if (r.status === "denied") {
-      $("exp-msg").innerHTML = `<b style="color:var(--red,#ff6b6b)">Denied —</b> ${esc(r.message)}`;
-    }
+    renderExposureMap(r.hosts, r.client_site);
+    const who = r.auto_detected ? `${esc(r.ip)} (this connection)` : esc(r.ip);
+    $("exp-msg").innerHTML = `<b>${who}</b> — ${esc(r.message || r.status)}`;
     if (r.attribution && (r.hosts || []).length) {
       $("exp-attr").textContent = r.attribution;
       $("exp-attr").style.display = "";
     }
   } catch (e) {
     renderExposure([]);
-    $("exp-msg").textContent = "exposure check failed: " + e.message;
+    $("exp-msg").textContent = "area sweep failed: " + e.message;
   }
   b.disabled = false;
 };
