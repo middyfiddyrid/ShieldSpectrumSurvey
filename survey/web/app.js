@@ -6336,6 +6336,27 @@ function renderExposure(hosts) {
       </tr>`;
     }).join("");
 }
+if ($("btn-exp-ip")) $("btn-exp-ip").onclick = async () => {
+  const b = $("btn-exp-ip");
+  b.disabled = true;
+  $("exp-ip-msg").textContent = "looking up…";
+  $("exp-attr").style.display = "none";
+  try {
+    const ip = ($("exp-ip").value || "").trim();
+    const r = await api("/api/osint/internetdb", ip ? { ip } : {});
+    renderExposure(r.hosts);
+    const who = r.auto_detected ? `${esc(r.ip)} (this connection)` : esc(r.ip);
+    $("exp-ip-msg").innerHTML = `<b>${who}</b> — ${esc(r.message || r.status)}`;
+    if (r.attribution && (r.hosts || []).length) {
+      $("exp-attr").textContent = r.attribution;
+      $("exp-attr").style.display = "";
+    }
+  } catch (e) {
+    renderExposure([]);
+    $("exp-ip-msg").textContent = "lookup failed: " + e.message;
+  }
+  b.disabled = false;
+};
 if ($("btn-exposure")) $("btn-exposure").onclick = async () => {
   const b = $("btn-exposure");
   b.disabled = true;

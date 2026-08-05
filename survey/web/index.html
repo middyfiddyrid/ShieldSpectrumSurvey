@@ -1878,8 +1878,21 @@ body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid va
     <b>Internal only.</b> Results are LEADS, not proof — Shodan geolocates by IP, which is coarse, so
     a hit may be a neighbor or the ISP, not the client. Confirm ownership before it goes in any memo,
     and <b>never</b> put this in a client-facing report.</p>
+    <h3 class="note" style="margin:12px 0 4px">FREE — look up one IP <span class="tag">no account, no cost</span></h3>
+    <p class="note">On-site, this is the real move: check what the client's <b>own internet connection</b>
+    leaks to the outside — open ports, hostnames, known CVEs. Leave the box empty to auto-detect the
+    public IP of the connection this laptop is on (= the client's, when you're on their WiFi).</p>
     <div class="row">
-      <button class="btn primary" id="btn-exposure">CHECK EXPOSURE</button>
+      <input class="small" id="exp-ip" placeholder="1.2.3.4  (blank = this connection)" style="width:230px">
+      <button class="btn primary" id="btn-exp-ip">LOOK UP IP (free)</button>
+      <span class="note" id="exp-ip-msg"></span>
+    </div>
+
+    <h3 class="note" style="margin:16px 0 4px">PAID — search the area <span class="tag">needs a Shodan key</span></h3>
+    <p class="note">Searches Shodan's scanned database around the address — neighbors and nearby
+    devices too, not just this one connection. Requires a paid Shodan plan (<code>api_keys.shodan</code>).</p>
+    <div class="row">
+      <button class="btn" id="btn-exposure">SEARCH AREA (paid)</button>
       <span class="note" id="exp-msg"></span>
     </div>
     <div class="scroll" style="max-height:520px"><table id="tbl-exposure"></table></div>

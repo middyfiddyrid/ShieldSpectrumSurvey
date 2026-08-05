@@ -3932,6 +3932,25 @@ def create_app(db, cfg, demo=False) -> Flask:
         return jsonify({"status": res.status, "message": res.message,
                         "attribution": res.attribution, "hosts": res.hosts})
 
+    @app.post("/api/osint/internetdb")
+    def osint_internetdb():
+        """FREE, no-key exposure lookup for a single IP via Shodan InternetDB.
+        Body: {"ip": "1.2.3.4"} — or omit "ip" to auto-detect this machine's
+        public IP (on-site, that's the client's connection). Internal-only."""
+        from .osint_shodan import lookup_ip, public_ip
+        body = request.get_json(silent=True) or {}
+        ip = (body.get("ip") or "").strip()
+        auto = False
+        if not ip:
+            ip = public_ip()
+            auto = True
+            if not ip:
+                return err("couldn't detect this machine's public IP — enter one manually")
+        res = lookup_ip(ip)
+        return jsonify({"status": res.status, "message": res.message,
+                        "attribution": res.attribution, "hosts": res.hosts,
+                        "ip": ip, "auto_detected": auto})
+
     @app.get("/api/netscan/devices")
     def netscan_devices():
         session = st.session()

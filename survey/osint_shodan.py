@@ -174,3 +174,75 @@ class ShodanExposure:
                 return ExposureResult("ok", cached.value,
                                       f"live query failed ({e}); using {age} snapshot")
             return ExposureResult("failed", [], str(e))
+
+
+# ---------------------------------------------------------------------------
+# FREE, no-key path: Shodan InternetDB (https://internetdb.shodan.io/{ip}).
+# One IP at a time — returns the open ports, hostnames, and known CVEs Shodan
+# last saw on THAT address. No account, no query credits. This is the useful
+# on-site move: look up the client's OWN public IP and see what their connection
+# leaks to the internet (the thing NETWORK CHECK, seen from inside, cannot tell
+# you). It CANNOT search by area/neighbors — that needs the paid geo search above.
+#
+# NOTE (commercial-use caveat): InternetDB is offered free for NON-COMMERCIAL use.
+# Using it inside a paid engagement is a gray area — keep it to operator recon /
+# the internal memo, and if it ever becomes routine client-billable work, move to
+# a paid Shodan plan. Not legal advice.
+INTERNETDB_URL = "https://internetdb.shodan.io"
+IPIFY_URL = "https://api.ipify.org"
+
+
+def public_ip(timeout: float = 10) -> str:
+    """This machine's public-facing IP (what the internet sees), via ipify.
+    On-site that IS the client's connection. Empty string if it can't be read."""
+    try:
+        r = requests.get(IPIFY_URL, params={"format": "json"}, timeout=timeout)
+        r.raise_for_status()
+        return str(r.json().get("ip", "")).strip()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def lookup_ip(ip: str) -> ExposureResult:
+    """Free InternetDB lookup for a single IP. hosts[] carries one row per open
+    port so it renders in the same table as the paid path; vulns/hostnames ride
+    along on each row."""
+    ip = (ip or "").strip()
+    if not ip:
+        return ExposureResult("failed", [], "no IP given")
+    try:
+        r = requests.get(f"{INTERNETDB_URL}/{ip}", timeout=TIMEOUT)
+        if r.status_code == 404:
+            return ExposureResult("empty", [],
+                                  f"{ip} is not indexed — Shodan has never seen an "
+                                  f"open service on it (often a good sign)")
+        r.raise_for_status()
+        d = r.json()
+    except Exception as e:  # noqa: BLE001
+        return ExposureResult("failed", [], f"lookup failed for {ip} ({e})")
+
+    ports = d.get("ports", []) or []
+    hostnames = d.get("hostnames", []) or []
+    vulns = d.get("vulns", []) or []
+    cpes = d.get("cpes", []) or []
+    tag_hay = " ".join(str(c) for c in cpes) + " " + " ".join(hostnames)
+    hosts = []
+    for p in (ports or [None]):
+        hosts.append({
+            "ip": ip, "port": p, "transport": "",
+            "product": (cpes[0] if cpes else ""),
+            "device_class": classify_exposed("", tag_hay, []),
+            "org": "", "os": "", "hostnames": hostnames,
+            "lat": None, "lon": None, "city": "",
+            "tags": vulns, "timestamp": "",
+            "banner": (", ".join(f"CVE:{v}" for v in vulns[:6]) if vulns else ""),
+        })
+    n_v = len(vulns)
+    msg = f"{ip}: {len(ports)} open port(s)"
+    if hostnames:
+        msg += f", {len(hostnames)} hostname(s)"
+    if n_v:
+        msg += f"; {n_v} known CVE(s) — review"
+    if not ports and not hostnames:
+        return ExposureResult("empty", [], f"{ip}: nothing exposed in Shodan's index")
+    return ExposureResult("ok", hosts, msg, "Exposure data: Shodan InternetDB (free)")

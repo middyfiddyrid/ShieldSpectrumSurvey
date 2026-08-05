@@ -7,7 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from survey.baseline.base import DiskCache  # noqa: E402
 from survey.osint_shodan import (  # noqa: E402
-    ShodanExposure, classify_exposed)
+    ShodanExposure, classify_exposed, lookup_ip, public_ip)
 
 
 class _Resp:
@@ -100,6 +100,36 @@ class ShodanExposureTests(unittest.TestCase):
         # 100 mi request must be clamped to RADIUS_CAP_MI before km conversion
         self.assertLessEqual(ShodanExposure(self.cache, "K")._radius_km(100.0),
                              2.0 * 1.609344 + 0.001)
+
+
+class InternetDbFreeTests(unittest.TestCase):
+    def test_lookup_ok_maps_ports_and_vulns(self):
+        payload = {"ip": "1.2.3.4", "ports": [80, 554], "hostnames": ["cam.example"],
+                   "vulns": ["CVE-2021-1234"], "cpes": ["cpe:/h:hikvision:camera"]}
+        with patch("survey.osint_shodan.requests.get", return_value=_Resp(200, payload)):
+            res = lookup_ip("1.2.3.4")
+        self.assertEqual(res.status, "ok")
+        self.assertEqual(res.count, 2)                       # one row per open port
+        self.assertEqual(res.hosts[0]["device_class"], "camera")
+        self.assertIn("CVE", res.hosts[0]["banner"])
+        self.assertIn("free", res.attribution.lower())
+
+    def test_lookup_404_is_empty_not_error(self):
+        with patch("survey.osint_shodan.requests.get", return_value=_Resp(404)):
+            res = lookup_ip("8.8.8.8")
+        self.assertEqual(res.status, "empty")
+
+    def test_lookup_blank_ip(self):
+        self.assertEqual(lookup_ip("").status, "failed")
+
+    def test_public_ip_reads_ipify(self):
+        with patch("survey.osint_shodan.requests.get",
+                   return_value=_Resp(200, {"ip": "203.0.113.7"})):
+            self.assertEqual(public_ip(), "203.0.113.7")
+
+    def test_public_ip_empty_on_failure(self):
+        with patch("survey.osint_shodan.requests.get", side_effect=OSError("no net")):
+            self.assertEqual(public_ip(), "")
 
 
 if __name__ == "__main__":
