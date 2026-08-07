@@ -7,7 +7,7 @@ import numpy as np
 
 from survey import atsc
 
-CH34_LOW = 585_000_000.0          # US TV RF channel 34 = 585-591 MHz
+CH34_LOW = 590_000_000.0          # US TV RF channel 34 = 590-596 MHz (post-repack)
 CH34_CENTRE = CH34_LOW + atsc.CHANNEL_BW_HZ / 2.0
 FS = 8_000_000.0
 

@@ -1301,8 +1301,9 @@ def create_app(db, cfg, demo=False) -> Flask:
         base = {"channel": int(channel), "channel_low_mhz": ch_low,
                 "channel_high_mhz": ch_low + 6.0, "tuned_mhz": tune_hz / 1e6,
                 "station": station}
+        from .autodemod import can_capture_iq
         dev, mlock, mstop, msrc = st.controller.ensure_monitor()
-        if not msrc or dev is None or not getattr(dev, "is_swept_sdr", False):
+        if not msrc or not can_capture_iq(dev):
             return jsonify({**base, "in_range": False,
                             "note": "connect an SDR to verify this channel on air"})
         if st.controller.busy(msrc):

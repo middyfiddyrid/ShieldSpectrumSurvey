@@ -82,6 +82,27 @@ def _b64_wav(pcm16, rate):
             + base64.b64encode(demod_mod.wav_bytes(pcm16, rate)).decode("ascii"))
 
 
+def can_capture_iq(dev):
+    """Does this device REALLY implement IQ capture?
+
+    Not `is_swept_sdr` alone. Every device inherits a capture_iq that raises
+    NotImplementedError, so hasattr is useless, but the simulator genuinely
+    implements it (deliberately — it is what makes the lab and this worker
+    demo-able) while never claiming to be a swept SDR. Asking whether the
+    subclass overrides the base method tests the actual capability instead of a
+    label, so a --simulate run exercises this whole path.
+    """
+    if dev is None:
+        return False
+    if getattr(dev, "is_swept_sdr", False):
+        return True
+    try:
+        from .sweep.device import BaseDevice
+        return type(dev).capture_iq is not BaseDevice.capture_iq
+    except Exception:  # noqa: BLE001
+        return False
+
+
 class AutoDemod:
     """Owns the background cycle. One instance per app, created by the server."""
 
@@ -254,7 +275,7 @@ class AutoDemod:
         dev, mlock, mstop, msrc = c.ensure_monitor()
         if not msrc or dev is None:
             return None, "no monitor radio connected"
-        if not (hasattr(dev, "capture_iq") and getattr(dev, "is_swept_sdr", False)):
+        if not can_capture_iq(dev):
             return None, "the monitor radio cannot capture IQ"
         if c.state.get("running") and msrc == c.active_source:
             return None, "the sweep owns the only radio"
