@@ -478,8 +478,127 @@ body.pdock-on.pdock-v #page-split { flex-direction:row; }
 body.pdock-on.pdock-v #page-monitor-pane { flex:0 0 42%; border-left:1px solid var(--line); }
 body.pdock-on.pdock-h #page-split { flex-direction:column; }
 body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid var(--line); }
+
+/* ---- WINDOW 4 (auto-demod): the third child of #page-split. Hidden entirely
+   unless body.ad-on, so with it closed the split is exactly the two-pane layout
+   that shipped before. ---- */
+#autodemod-pane { display:none; min-width:0; min-height:0; flex-direction:column;
+  overflow:hidden; background:var(--panel2); padding:10px 12px; }
+body.ad-on #autodemod-pane { display:flex; }
+body.ad-on.ad-v #page-split { flex-direction:row; }
+body.ad-on.ad-v #autodemod-pane { flex:0 0 38%; border-left:1px solid var(--line); }
+body.ad-on.ad-h #page-split { flex-direction:column; }
+body.ad-on.ad-h #autodemod-pane { flex:0 0 40%; border-top:1px solid var(--line); }
+#ad-head { display:flex; align-items:center; gap:8px; margin-bottom:8px; flex:none; }
+#ad-head .btn { padding:4px 9px; font-size:12px; }
+#ad-scroll { flex:1 1 auto; min-height:0; overflow-y:auto; border:1px solid var(--line); }
+#ad-table td { font-family:var(--mono); }
+#ad-table tr.ad-hit td { background:rgba(46,204,113,.09); }
+#ad-table tr.ad-locked td { opacity:.72; }
+#ad-table tr.ad-current td { box-shadow:inset 3px 0 0 var(--amber); }
+#ad-table .ad-what { max-width:230px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+#ad-table audio { height:26px; width:150px; vertical-align:middle; }
+.ad-gate { display:none; border:1px solid var(--amber); background:var(--warn-bg);
+  color:var(--amber); padding:8px 10px; border-radius:3px; margin-bottom:8px;
+  font-size:12px; line-height:1.45; flex:none; }
+.ad-gate.show { display:block; }
+.ad-gate .btn { margin-top:6px; }
+#ad-progress { flex:none; margin:0 0 6px; }
+
+/* ---- TV / VIDEO channel check ---- */
+#tv-card { background:var(--panel); border:1px solid var(--line); border-radius:4px;
+  width:min(760px,94vw); max-height:92vh; overflow-y:auto; padding:16px; }
+#tv-head { display:flex; align-items:center; gap:10px; margin-bottom:10px; }
+#tv-head b { color:var(--bright); letter-spacing:1px; }
+#tv-verdict { padding:10px 12px; border-radius:3px; margin-bottom:10px; line-height:1.5; }
+#tv-verdict.ok { background:var(--ok-bg); border:1px solid var(--green); color:var(--green); }
+#tv-verdict.warn { background:var(--warn-bg); border:1px solid var(--amber); color:var(--amber); }
+#tv-verdict.bad { background:var(--err-bg); border:1px solid var(--red); color:var(--red); }
+#tv-body img.tv-still { max-width:100%; border:1px solid var(--line); image-rendering:pixelated; }
+#tv-body .tv-caveats { color:var(--dim); font-size:11.5px; line-height:1.6; margin-top:10px; }
+#tv-body .tv-caveats li { margin-left:16px; }
 /* ---- style switcher (footer) ---- */
+/* ================= LAYOUT PRESETS =================
+   The second axis of the STYLE control: colour is a <html> class (t-*), SIZE and
+   ARRANGEMENT are a <body> class (ly-*). They are deliberately separate elements
+   because the anti-FOUC restore at the top of this file assigns
+   documentElement.className wholesale — a layout class parked there would be
+   wiped on every page load.
+
+   STD is the original desk layout and is defined by the absence of a class, so
+   an operator who never touches this sees byte-identical CSS.
+
+   COMPACT / FIELD / WIDE unify the per-table scroll heights (the base sheet sets
+   ~20 different inline max-heights) onto one viewport-relative value. That needs
+   !important to beat the inline style, and it is intentional: a density preset
+   whose tables ignored it would not be a density preset. STD leaves every one of
+   those inline heights untouched.
+   ------------------------------------------------------------------ */
+
+/* ---- COMPACT: maximum rows on screen; for triage at the desk ---- */
+body.ly-compact { font-size:12.5px; }
+body.ly-compact nav { width:186px; padding:8px 0; }
+body.ly-compact nav .step { padding:6px 12px; gap:7px; }
+body.ly-compact nav .sect { font-size:10px; margin-top:9px; }
+body.ly-compact #panel { padding:12px 14px; }
+body.ly-compact .card { padding:10px; margin-bottom:9px; }
+body.ly-compact .row { gap:8px; margin-bottom:7px; }
+body.ly-compact h2 { font-size:13.5px; margin-bottom:9px; }
+body.ly-compact h3 { font-size:12px; margin:11px 0 6px; }
+body.ly-compact .btn { padding:5px 10px; font-size:12px; }
+body.ly-compact .btn.big { font-size:14px; padding:9px 18px; }
+body.ly-compact table { font-size:11.5px; }
+body.ly-compact th { padding:4px 6px; }
+body.ly-compact td { padding:3px 6px; }
+body.ly-compact input, body.ly-compact select { padding:5px 7px; font-size:12px; }
+body.ly-compact input[type=text] { width:300px; }
+body.ly-compact .scroll { max-height:46vh !important; }
+body.ly-compact .chart-wrap, body.ly-compact .sweep-stage,
+body.ly-compact .info-tabs, body.ly-compact .info-pane { width:84%; }
+body.ly-compact #livechart, body.ly-compact #dirchart { height:190px; }
+body.ly-compact .sweep-side { flex:0 0 210px; }
+body.ly-compact footer { padding:5px 12px; font-size:11px; gap:16px; }
+body.ly-compact header { padding:7px 12px; gap:12px; }
+
+/* ---- FIELD: gloves, daylight, arm's length from the laptop ---- */
+body.ly-field { font-size:16px; }
+body.ly-field nav { width:268px; padding:16px 0; }
+body.ly-field nav .step { padding:14px 18px; gap:12px; font-size:15px; }
+body.ly-field nav .dot { width:11px; height:11px; }
+body.ly-field nav .sect { font-size:12px; }
+body.ly-field #panel { padding:24px 28px; }
+body.ly-field .card { padding:20px; margin-bottom:18px; }
+body.ly-field .row { gap:16px; margin-bottom:14px; }
+body.ly-field h2 { font-size:18px; margin-bottom:18px; }
+body.ly-field h3 { font-size:15px; }
+body.ly-field .btn { padding:13px 20px; font-size:15px; }
+body.ly-field .btn.big { font-size:19px; padding:18px 32px; }
+body.ly-field table { font-size:14.5px; }
+body.ly-field th { padding:9px 10px; }
+body.ly-field td { padding:9px 10px; }
+body.ly-field label { font-size:14px; }
+body.ly-field input, body.ly-field select { padding:11px 12px; font-size:15px; }
+body.ly-field input[type=text] { width:min(440px, 60vw); }
+body.ly-field .pill { padding:4px 11px; font-size:13px; }
+body.ly-field .scroll { max-height:52vh !important; }
+body.ly-field #livechart, body.ly-field #dirchart { height:280px; }
+body.ly-field .chart-wrap, body.ly-field .sweep-stage,
+body.ly-field .info-tabs, body.ly-field .info-pane { width:88%; }
+body.ly-field footer { padding:11px 16px; font-size:13px; }
+
+/* ---- WIDE: give the charts and tables the whole screen ---- */
+body.ly-wide nav { width:200px; }
+body.ly-wide #panel { padding:16px 20px; }
+body.ly-wide .chart-wrap, body.ly-wide .sweep-stage,
+body.ly-wide .info-tabs, body.ly-wide .info-pane { width:100%; }
+body.ly-wide #livechart, body.ly-wide #dirchart { height:300px; }
+body.ly-wide .scroll { max-height:60vh !important; }
+body.ly-wide .sweep-side { flex:0 0 300px; }
+body.ly-wide input[type=text] { width:min(560px, 46vw); }
+body.ly-wide .cmp-cols { grid-template-columns:1fr 1fr 1fr; }
+
 .themebar { display:flex; align-items:center; gap:3px; }
+.layoutbar { margin-left:10px; }
 .themebar .tb-lbl { font-size:10px; letter-spacing:.14em; color:var(--dim); margin-right:4px; }
 .themebar button { display:inline-flex; align-items:center; gap:5px; cursor:pointer;
   background:transparent; color:var(--dim); border:1px solid transparent; border-radius:10px;
@@ -497,6 +616,7 @@ body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid va
   <div class="brand">SHIELD<span>TSCM</span> // SPECTRUM SURVEY</div>
   <div class="addr" id="hdr-addr">no session</div>
   <span class="note" id="report-msg"></span>
+  <button class="btn" id="btn-window4" title="WINDOW 4 — auto-demodulate every detection, continuously">WINDOW 4</button>
   <button class="btn" id="btn-csv" disabled>EXPORT CSV</button>
   <button class="btn" id="btn-report" disabled>GENERATE REPORT</button>
 </header>
@@ -1979,6 +2099,31 @@ body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid va
   </div>
   <div id="page-monitor-slot"></div>
 </div>
+<!-- ===== WINDOW 4 — AUTO-DEMOD =====
+     A docked pane, not a modal: it stays open across every view and keeps
+     working while the operator does something else. That is the whole point —
+     the radio walks the whole ledger on its own so no signal goes unlistened-to
+     just because nobody clicked it. -->
+<div id="autodemod-pane">
+  <div id="ad-head">
+    <b style="color:var(--cyan);letter-spacing:1px">WINDOW 4 · AUTO-DEMOD</b>
+    <span class="pill" id="ad-status">idle</span>
+    <span style="flex:1 1 auto"></span>
+    <button class="btn" id="btn-ad-run" title="walk every detection continuously">START</button>
+    <button class="btn" id="btn-ad-orient" title="flip the split: side-by-side ⇄ stacked">⇅</button>
+    <button class="btn" id="btn-ad-close" title="close WINDOW 4">✕</button>
+  </div>
+  <div id="ad-gate" class="ad-gate"></div>
+  <div id="ad-progress" class="note"></div>
+  <div class="scroll" id="ad-scroll">
+    <table id="ad-table">
+      <thead><tr>
+        <th>MHz</th><th>WHAT</th><th>MOD</th><th>SNR</th><th>AUDIO</th><th>AGE</th>
+      </tr></thead>
+      <tbody id="ad-body"></tbody>
+    </table>
+  </div>
+</div>
 </div><!-- /page-split -->
 </main>
 
@@ -1997,6 +2142,13 @@ body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid va
     <button data-t="t-day" type="button" title="Daylight — clean light"><i style="background:#f7f9fb"></i>DAY</button>
     <button data-t="t-file" type="button" title="Case File — paper dossier"><i style="background:#efe7d2"></i>FILE</button>
     <button data-t="t-neon" type="button" title="Neon — spectrum violet"><i style="background:#7c5cff"></i>NEON</button>
+  </div>
+  <div class="themebar layoutbar" role="group" aria-label="Layout density">
+    <span class="tb-lbl">LAYOUT</span>
+    <button data-ly="" type="button" title="Standard — the original desk layout">STD</button>
+    <button data-ly="ly-compact" type="button" title="Compact — more rows on screen, tighter chrome">COMPACT</button>
+    <button data-ly="ly-field" type="button" title="Field — big touch targets and type for gloves and daylight">FIELD</button>
+    <button data-ly="ly-wide" type="button" title="Wide — charts and tables use the full screen width">WIDE</button>
   </div>
   <div id="ft-wake"></div>
   <div id="ft-msg">idle</div>
@@ -2120,6 +2272,18 @@ body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid va
   <button class="btn" id="next-step-x" title="dismiss">✕</button>
 </div>
 
+<!-- TV / VIDEO channel check: is the licensed station actually radiating here? -->
+<div class="overlay" id="tv-modal" style="z-index:76">
+  <div id="tv-card">
+    <div id="tv-head">
+      <b id="tv-title">TV CHANNEL CHECK</b>
+      <span style="flex:1 1 auto"></span>
+      <button class="btn" id="tv-close">✕</button>
+    </div>
+    <div id="tv-body"></div>
+  </div>
+</div>
+
 <!-- F8: signal lightbox — expanded fingerprint + everything known + actions -->
 <div class="overlay" id="sig-lightbox" style="z-index:70">
   <div id="sl-card">
@@ -2187,7 +2351,7 @@ body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid va
 
 <script>
 (function(){
-  var tbtns=document.querySelectorAll(".themebar button");
+  var tbtns=document.querySelectorAll(".themebar:not(.layoutbar) button");
   function mark(){
     var cur=document.documentElement.className||"";
     tbtns.forEach(function(b){b.classList.toggle("on",b.getAttribute("data-t")===cur);});
@@ -2201,6 +2365,44 @@ body.pdock-on.pdock-h #page-monitor-pane { flex:0 0 46%; border-top:1px solid va
     });
   });
   mark();
+
+  // LAYOUT presets — the size/arrangement axis. Kept on <body> (never <html>,
+  // which the theme code above overwrites wholesale) with its own storage key,
+  // and applied by swapping one ly-* class so the other body flags the app sets
+  // at runtime (single-rx, demo, pdock-on) survive a layout change.
+  var LAYOUTS=["ly-compact","ly-field","ly-wide"];
+  var lbtns=document.querySelectorAll(".layoutbar button");
+  function current(){
+    for(var i=0;i<LAYOUTS.length;i++){
+      if(document.body.classList.contains(LAYOUTS[i])) return LAYOUTS[i];
+    }
+    return "";
+  }
+  function markLayout(){
+    var cur=current();
+    lbtns.forEach(function(b){b.classList.toggle("on",b.getAttribute("data-ly")===cur);});
+  }
+  function apply(ly){
+    LAYOUTS.forEach(function(c){document.body.classList.remove(c);});
+    if(ly) document.body.classList.add(ly);
+    markLayout();
+    // canvases size their backing store in JS from the element's box, so a
+    // layout change has to trigger the same redraw path a window resize does —
+    // otherwise every chart stays at the old scale until something else redraws.
+    try{window.dispatchEvent(new Event("resize"));}catch(e){}
+  }
+  try{
+    var saved=localStorage.getItem("dcs-layout");
+    if(saved && LAYOUTS.indexOf(saved)>=0) document.body.classList.add(saved);
+  }catch(e){}
+  lbtns.forEach(function(b){
+    b.addEventListener("click",function(){
+      var ly=b.getAttribute("data-ly");
+      apply(ly);
+      try{localStorage.setItem("dcs-layout",ly);}catch(e){}
+    });
+  });
+  markLayout();
 })();
 </script>
 <script src="/static/leaflet.js"></script>

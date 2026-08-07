@@ -1828,7 +1828,14 @@ function renderBaselineTable() {
     rows.map((r, i) => {
       const f1 = r.freq_low_mhz === r.freq_high_mhz ? fmtF(r.freq_low_mhz) :
         fmtF(r.freq_low_mhz) + " – " + fmtF(r.freq_high_mhz);
-      return `<tr><td><a href="#" class="freqlink" data-i="${i}">${f1}</a></td><td>${esc(r.service)}</td>` +
+      // A TV row gets its own action: the FCC record says a station is licensed
+      // here, and the only way to know it is actually radiating — rather than
+      // being a comfortable 6 MHz label over something else — is to measure it.
+      const tv = (r.service === "TV")
+        ? ` <a href="#" class="freqlink tv-check" data-tv="${
+            (r.freq_low_mhz + 3).toFixed(3)}" title="verify this station on air">📺 CHECK</a>`
+        : "";
+      return `<tr><td><a href="#" class="freqlink" data-i="${i}">${f1}</a>${tv}</td><td>${esc(r.service)}</td>` +
         `<td>${esc(r.callsign || r.label)}</td><td>${esc(r.licensee)}</td>` +
         `<td>${r.distance_mi != null ? r.distance_mi.toFixed(1) : ""}</td>` +
         `<td>${r.bearing_deg != null ? r.bearing_deg.toFixed(0) + "°" : ""}</td>` +
@@ -2101,6 +2108,12 @@ $("tbl-baseline").addEventListener("click", (e) => {
   const a = e.target.closest(".freqlink");
   if (!a) return;
   e.preventDefault();
+  // the TV action is its own link inside the same cell — check it FIRST, or the
+  // generic handler below swallows it and opens the ordinary inspector
+  if (a.classList.contains("tv-check")) {
+    TvCheck.open(parseFloat(a.dataset.tv));
+    return;
+  }
   openInspect(parseInt(a.dataset.i, 10));
 });
 
@@ -7855,3 +7868,286 @@ window.addEventListener("hashchange", () => {
   const v = location.hash.replace("#", "") || "session";
   if (!document.getElementById("view-" + v).classList.contains("active")) show(v);
 });
+
+/* ===================== WINDOW 4 — AUTO-DEMOD =========================
+   A docked pane that keeps a background worker walking EVERY detection in the
+   session, demodulating each one, so the ledger fills in without the operator
+   clicking three hundred rows. Not a modal: it stays open across views and
+   survives navigation, because the whole value is that it works while you do
+   something else.
+
+   The server owns the radio arbitration and the ECPA content gate (see
+   survey/autodemod.py) — this file only renders what it reports and never
+   decides on its own that content may be decoded. */
+const AutoDemod = {
+  poll: null,
+  orient() { try { return localStorage.getItem("adOrient") || "v"; } catch (e) { return "v"; } },
+  setOrient(o) {
+    try { localStorage.setItem("adOrient", o); } catch (e) {}
+    document.body.classList.toggle("ad-v", o === "v");
+    document.body.classList.toggle("ad-h", o !== "v");
+  },
+  open() {
+    document.body.classList.add("ad-on");
+    this.setOrient(this.orient());
+    this.startPolling();
+    // canvases size from their box; the pane changes it
+    try { window.dispatchEvent(new Event("resize")); } catch (e) {}
+  },
+  close() {
+    document.body.classList.remove("ad-on");
+    this.stopPolling();
+    try { window.dispatchEvent(new Event("resize")); } catch (e) {}
+  },
+  toggle() {
+    if (document.body.classList.contains("ad-on")) this.close(); else this.open();
+  },
+  startPolling() {
+    if (this.poll) return;
+    this.refresh();
+    this.poll = setInterval(() => this.refresh(), 2000);
+  },
+  stopPolling() {
+    if (this.poll) { clearInterval(this.poll); this.poll = null; }
+  },
+  async run(on) {
+    try {
+      if (on) await api("/api/autodemod/start", {});
+      else await api("/api/autodemod/stop", {});
+      this.refresh();
+    } catch (e) { alert("AUTO-DEMOD: " + e.message); }
+  },
+  /* The content gate. Turning it on is an explicit, written, logged act — the
+     server refuses without a reason and writes the decode_overrides audit row.
+     Deliberately not a silent checkbox. */
+  async acknowledge() {
+    const reason = prompt(
+      "ECPA acknowledgment — decoding the CONTENT of signals not attributed to " +
+      "the client's own space.\n\n" +
+      "Signals already marked 'client space' are decoded without this. This " +
+      "covers the rest, for this run, and is written to the permanent audit log.\n\n" +
+      "State the authorization for this engagement:");
+    if (reason === null) return;
+    if (!reason.trim()) { alert("A written reason is required."); return; }
+    try {
+      await api("/api/autodemod/consent", { on: true, ecpa_ack: true, reason });
+      this.refresh();
+    } catch (e) { alert("Not enabled: " + e.message); }
+  },
+  fmtAge(utc) {
+    if (!utc) return "";
+    const s = Math.max(0, Math.round(Date.now() / 1000 - utc));
+    if (s < 60) return s + "s";
+    if (s < 3600) return Math.round(s / 60) + "m";
+    return Math.round(s / 3600) + "h";
+  },
+  rowHtml(r) {
+    const cls = [];
+    if (r.messages && r.messages.length) cls.push("ad-hit");
+    else if ((r.audio_rms || 0) > 0.02) cls.push("ad-hit");
+    if (r.content_permitted === false) cls.push("ad-locked");
+    const what = r.messages && r.messages.length
+      ? "DECODED: " + esc(String(r.messages[0]).slice(0, 60))
+      : esc(r.verdict || r.best_guess || r.label || r.note || "");
+    const audio = r.audio
+      ? `<audio controls preload="none" src="${r.audio}"></audio>`
+      : (r.content_permitted === false
+          ? `<span class="note" title="${esc(r.gate_note || "")}">content locked</span>`
+          : `<span class="note">${esc(r.state || "")}</span>`);
+    return `<tr class="${cls.join(" ")}" data-id="${r.id}">
+      <td><a class="freqlink" href="#" onclick="AutoDemod.inspect(${r.center_mhz});return false">${
+        r.center_mhz != null ? r.center_mhz.toFixed(4) : ""}</a></td>
+      <td class="ad-what" title="${esc(r.verdict || "")}">${what}</td>
+      <td>${esc(r.modulation || "")}</td>
+      <td>${r.snr_db != null ? r.snr_db.toFixed(1) : ""}</td>
+      <td>${audio}</td>
+      <td class="note">${this.fmtAge(r.utc)}</td>
+    </tr>`;
+  },
+  inspect(mhz) {
+    // hand off to the existing single-signal inspector
+    if (typeof inspectByFreq === "function") inspectByFreq(mhz);
+    else if (typeof listenAt === "function") listenAt(mhz);
+  },
+  async refresh() {
+    if (!document.body.classList.contains("ad-on")) return;
+    let s;
+    try { s = await api("/api/autodemod/state"); }
+    catch (e) { return; }
+    const st = $("ad-status");
+    if (st) {
+      const running = !!s.running;
+      st.textContent = running ? (s.paused_reason ? "paused" : "running") : "idle";
+      st.className = "pill " + (running ? (s.paused_reason ? "SCANNING" : "ok") : "");
+    }
+    const btn = $("btn-ad-run");
+    if (btn) btn.textContent = s.running ? "STOP" : "START";
+    const prog = $("ad-progress");
+    if (prog) {
+      const bits = [];
+      if (s.total) bits.push(`${s.total} of ${s.queued || s.total} measured`);
+      if (s.cycle) bits.push(`pass ${s.cycle}`);
+      if (s.radio) bits.push(`on ${esc(s.radio)}`);
+      if (s.paused_reason) bits.push(esc(s.paused_reason));
+      else if (s.message) bits.push(esc(s.message));
+      prog.innerHTML = bits.join(" · ");
+    }
+    // the content gate banner — only when something is actually being withheld
+    const gate = $("ad-gate");
+    if (gate) {
+      const locked = (s.rows || []).filter(r => r.content_permitted === false).length;
+      if (locked && !s.consent) {
+        gate.classList.add("show");
+        gate.innerHTML =
+          `<b>${locked} signal${locked === 1 ? "" : "s"} measured but not decoded.</b> ` +
+          `Audio and payload decoding is limited to signals attributed to the ` +
+          `client's own space (ECPA, 18 U.S.C. 2511). Mark a signal's attribution ` +
+          `as CLIENT SPACE to decode it, or acknowledge the authorization for this ` +
+          `whole run — which is written to the permanent audit log.` +
+          `<br><button class="btn" onclick="AutoDemod.acknowledge()">ACKNOWLEDGE &amp; DECODE ALL</button>`;
+      } else if (s.consent) {
+        gate.classList.add("show");
+        gate.innerHTML = `<b>Content decode enabled for this run</b> — logged to the ` +
+          `decode-override audit trail. ${esc(s.consent_reason || "")}`;
+      } else {
+        gate.classList.remove("show");
+        gate.innerHTML = "";
+      }
+    }
+    const body = $("ad-body");
+    if (body) {
+      const rows = s.rows || [];
+      body.innerHTML = rows.length
+        ? rows.map(r => this.rowHtml(r)).join("")
+        : `<tr><td colspan="6" class="note">${
+             s.running ? "measuring…" : "press START to walk every detection"}</td></tr>`;
+      const cur = s.current && s.current.id;
+      if (cur != null) {
+        const tr = body.querySelector(`tr[data-id="${cur}"]`);
+        if (tr) tr.classList.add("ad-current");
+      }
+    }
+  },
+};
+window.AutoDemod = AutoDemod;
+
+(() => {
+  const run = $("btn-ad-run");
+  if (run) run.onclick = async () => {
+    let s = {};
+    try { s = await api("/api/autodemod/state"); } catch (e) {}
+    AutoDemod.run(!s.running);
+  };
+  const cl = $("btn-ad-close");
+  if (cl) cl.onclick = () => AutoDemod.close();
+  const or = $("btn-ad-orient");
+  if (or) or.onclick = () => {
+    AutoDemod.setOrient(AutoDemod.orient() === "v" ? "h" : "v");
+    try { window.dispatchEvent(new Event("resize")); } catch (e) {}
+  };
+  const open = $("btn-window4");
+  if (open) open.onclick = () => AutoDemod.toggle();
+})();
+
+/* ===================== TV / VIDEO CHANNEL CHECK =======================
+   The FCC record says a station is licensed on this 6 MHz block. That is
+   paperwork. This measures whether the transmitter is actually radiating —
+   the ATSC 8VSB pilot at +309.44 kHz from the lower channel edge, under a flat
+   5.38 MHz data plateau (survey/atsc.py).
+
+   Why it matters for a sweep: a channel the operator has already labelled
+   "that's just channel 34" is the most comfortable place in the spectrum for
+   something else to sit. A confirmed pilot means the licensed signal is present
+   as expected; a full channel with NO pilot means whatever is there is not the
+   TV station, and wants identifying.
+
+   On a DIGITAL station there is no picture — decoding 8VSB video needs an
+   equalizer/trellis/RS/MPEG chain this app does not carry, and the panel says so
+   rather than implying one is coming. Where the carrier turns out to be ANALOG
+   video (a sender or camera parked in broadcast spectrum) a still IS recovered,
+   because that is the case where a picture is physically available. */
+const TvCheck = {
+  async open(centerMhz) {
+    const modal = $("tv-modal");
+    if (!modal) return;
+    modal.classList.add("show");
+    $("tv-title").textContent = "TV CHANNEL CHECK";
+    $("tv-body").innerHTML = `<p class="note">tuning ${
+      centerMhz != null ? centerMhz.toFixed(3) : ""} MHz and measuring…</p>`;
+    let r;
+    try {
+      r = await api("/api/tv/check", { center_mhz: centerMhz });
+    } catch (e) {
+      $("tv-body").innerHTML = `<div id="tv-verdict" class="bad">${esc(e.message)}</div>`;
+      return;
+    }
+    this.render(r);
+  },
+  render(r) {
+    const st = r.station || {};
+    const name = st.callsign || st.label || "";
+    $("tv-title").textContent =
+      `TV RF CH ${r.channel} · ${r.channel_low_mhz}–${r.channel_high_mhz} MHz` +
+      (name ? ` · ${name}` : "");
+    if (!r.in_range) {
+      $("tv-body").innerHTML =
+        `<div id="tv-verdict" class="warn">${esc(r.note || "cannot measure right now")}</div>` +
+        this.stationHtml(st);
+      return;
+    }
+    const a = r.atsc || {};
+    const cls = a.confirmed ? "ok" : (a.pilot && a.pilot.prominence_db > 6 ? "warn" : "bad");
+    let html = `<div id="tv-verdict" class="${cls}">${esc(r.summary || a.summary || "")}</div>`;
+    html += this.stationHtml(st);
+
+    const p = a.pilot, pl = a.plateau;
+    html += `<h3>MEASURED</h3><div class="kv">`;
+    html += `<span>8VSB pilot</span><span>${
+      p ? `${p.mhz.toFixed(4)} MHz · ${p.prominence_db.toFixed(1)} dB above the data floor · ${
+        (p.offset_error_hz / 1e3).toFixed(1)} kHz from nominal` : "not found"}</span>`;
+    html += `<span>expected at</span><span>${
+      a.pilot_expected_mhz != null ? a.pilot_expected_mhz.toFixed(4) + " MHz" : ""}</span>`;
+    if (pl) {
+      html += `<span>data plateau</span><span>${(pl.width_hz / 1e6).toFixed(2)} MHz wide · ${
+        pl.ripple_db.toFixed(1)} dB ripple${
+        pl.snr_db != null ? ` · ${pl.snr_db.toFixed(1)} dB above the surrounding floor` : ""}</span>`;
+    }
+    html += `<span>tuned</span><span>${r.tuned_mhz != null ? r.tuned_mhz.toFixed(3) : ""} MHz</span>`;
+    html += `</div>`;
+
+    if (r.picture) {
+      html += `<h3>RECOVERED PICTURE (analog raster)</h3>
+        <img class="tv-still" src="${r.picture}" alt="recovered video field">`;
+    } else if (a.confirmed) {
+      html += `<h3>PICTURE</h3><p class="note">Digital (8VSB) — the picture is not
+        decoded here. Confirming the pilot proves the licensed transmitter is on
+        the air at this location, which is the question a sweep actually asks. If
+        you want to watch the channel, use a TV or an ATSC tuner.</p>`;
+    }
+    const cav = (a.caveats || []).concat(
+      ((r.video || {}).messages || []).flatMap(m => m.caveats || []));
+    if (cav.length) {
+      html += `<div class="tv-caveats"><b>Read this before you act on it:</b><ul>` +
+        cav.map(c => `<li>${esc(c)}</li>`).join("") + `</ul></div>`;
+    }
+    $("tv-body").innerHTML = html;
+  },
+  stationHtml(st) {
+    if (!st || !Object.keys(st).length) {
+      return `<p class="note">No licensed TV record for this channel in the
+        session baseline — build the baseline to name the station.</p>`;
+    }
+    return `<div class="kv">
+      <span>callsign</span><span>${esc(st.callsign || st.label || "")}</span>
+      <span>licensee</span><span>${esc(st.licensee || "")}</span>
+      <span>distance</span><span>${st.distance_mi != null ? st.distance_mi.toFixed(1) + " mi" : ""}${
+        st.bearing_deg != null ? " · bearing " + st.bearing_deg.toFixed(0) + "°" : ""}</span>
+      </div>`;
+  },
+  close() { const m = $("tv-modal"); if (m) m.classList.remove("show"); },
+};
+window.TvCheck = TvCheck;
+(() => {
+  const x = $("tv-close");
+  if (x) x.onclick = () => TvCheck.close();
+})();
