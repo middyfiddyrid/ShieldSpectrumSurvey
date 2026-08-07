@@ -98,12 +98,63 @@ Layout lives on `<body>` with its own storage key, because the anti-FOUC restore
 at the top of `index.html` assigns `documentElement.className` wholesale and would
 wipe a layout class parked there.
 
-## 6. What you still owe (real-hardware verify)
+## 6. Hidden cameras — what this app can and cannot recover
+
+"If it can't decode a TV station, how does it decode a camera?" — they are not the
+same problem, and the difficulty runs the opposite way to intuition.
+
+| Camera type | Picture? | Why |
+|---|---|---|
+| **Analog video sender** (cheap covert cams, FPV, "wireless video sender") | **YES — recovered still** | FM composite video: discriminate, slice sync, read the raster. `survey/video.py`. No error correction, no equalizer, no transport stream |
+| **ATSC broadcast TV** | no | trellis + Reed-Solomon + adaptive equalizer + MPEG transport demux — the hardest video chain in the band. Also not a bug: it is a licensed transmitter on a tower |
+| **WiFi IP camera** (most common modern covert cam) | no, and never | the video is H.264 inside WPA2/WPA3. That is **cryptography, not DSP** — no radio recovers it. Found via NETWORK CHECK + RF correlation + LOCATE/DF. If it is on the client's own network you can often just watch it from the network side |
+| **Digital FPV / proprietary** (OcuSync, HDZero, Walksnail) | no | proprietary, usually encrypted, no public spec. DF it |
+
+**Two real bugs this question exposed, both now fixed:**
+
+1. **Auto-demod captured at a fixed 5 MHz.** A wideband video sender overflows
+   that, its sync tips alias, and a camera reads as ordinary wideband FM. Capture
+   width is now chosen per signal from the width the sweep measured. Measured on a
+   synthetic NTSC sender at 1 MHz deviation: **20 MHz capture recovers a picture,
+   5 MHz capture does not.**
+
+2. **`looks_like_video()` was rejecting real cameras — this was pre-existing, in
+   your analyze path, not new code.** The gate requires `occupied_bw_khz >= 1000`,
+   but `iq_features` badly under-reads an FM carrier: it is constant-envelope and
+   instantaneously narrow, so over a short slice it has not yet swept its
+   deviation. Measured on a signal the decoder **does** lock and return a picture
+   from: **78 kHz** over 0.41 ms, **117 kHz** over 1.6 ms, **723 kHz** over 6.6 ms
+   — all below the 1 MHz gate. Result: `route_decode` never tried video, and
+   `/api/analyze/signal` reported that camera as an **"OOK/FSK-DEVICE"**.
+
+   `looks_like_video` now takes an optional `bw_khz_hint` — pass the sweep's
+   max-hold width, which does not have this problem. **Additive and non-breaking:
+   callers that pass no hint behave exactly as before**, so your existing analyze
+   path is unchanged until you decide to pass the hint there too. That is your
+   call, not mine — flagging it rather than changing a shared gate you verify by
+   hand.
+
+WINDOW 4 now surfaces a confirmed raster as a red row with the recovered still
+inline, sorted to the top of the ledger. The raster confirmation is content-free
+and always reported (a camera must never go unreported because attribution has not
+been set); only the **picture** is behind the content gate.
+
+**The caveat that ships with every positive:** a sync lock is evidence of a video
+raster, **not proof of a camera**. A monitor emanation, a video sender relaying a
+TV, or a bench test pattern all produce the same signature. Find the device and
+recover it physically before calling it.
+
+## 7. What you still owe (real-hardware verify)
 
 1. **Restart 8765 + Ctrl+F5.**
 2. **TV check against a real station** — pick a strong local one in the baseline,
    hit CHECK, confirm it says "ATSC 8VSB confirmed on air". This is the first real
    test of the pilot detector against live RF; it has only ever seen synthetic input.
+2b. **Camera recovery with your test transmitter** — put an analog video sender on
+   the bench and confirm WINDOW 4 flags it as a VIDEO RASTER and pulls a still. The
+   whole video path has only ever been proven against `encode_video`'s synthetic
+   raster; the recovered frame in testing showed a ~0.12 % line-rate error (a
+   visible diagonal skew), which is legible but wants a real-signal check.
 3. **WINDOW 4 with the Pluto** — confirm it cycles, that audio is real, and that it
    yields the radio instantly when you hit LISTEN.
 4. **Confirm the abort self-heal** next time a sweep gets stuck — one click should

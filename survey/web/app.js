@@ -7951,13 +7951,22 @@ const AutoDemod = {
     if (r.messages && r.messages.length) cls.push("ad-hit");
     else if ((r.audio_rms || 0) > 0.02) cls.push("ad-hit");
     if (r.content_permitted === false) cls.push("ad-locked");
-    const what = r.messages && r.messages.length
+    if (r.video_confirmed) cls.push("ad-video");
+    const what = r.video_confirmed
+      ? `<b>📹 VIDEO RASTER (${esc(r.video_standard || "")})</b> — camera or video sender`
+      : r.messages && r.messages.length
       ? "DECODED: " + esc(String(r.messages[0]).slice(0, 60))
       : esc(r.verdict || r.best_guess || r.label || r.note || "");
-    const audio = r.audio
+    // a recovered still IS the finding — show it in the row, not two clicks away
+    const audio = r.picture
+      ? `<img class="ad-still" src="${r.picture}" alt="recovered video frame"
+             title="recovered field — click to enlarge"
+             onclick="AutoDemod.showStill('${r.picture}')">`
+      : r.audio
       ? `<audio controls preload="none" src="${r.audio}"></audio>`
       : (r.content_permitted === false
-          ? `<span class="note" title="${esc(r.gate_note || "")}">content locked</span>`
+          ? `<span class="note" title="${esc(r.gate_note || "")}">${
+              r.video_confirmed ? "picture locked" : "content locked"}</span>`
           : `<span class="note">${esc(r.state || "")}</span>`);
     return `<tr class="${cls.join(" ")}" data-id="${r.id}">
       <td><a class="freqlink" href="#" onclick="AutoDemod.inspect(${r.center_mhz});return false">${
@@ -7973,6 +7982,22 @@ const AutoDemod = {
     // hand off to the existing single-signal inspector
     if (typeof inspectByFreq === "function") inspectByFreq(mhz);
     else if (typeof listenAt === "function") listenAt(mhz);
+  },
+  showStill(src) {
+    const m = $("tv-modal");
+    if (!m) return;
+    $("tv-title").textContent = "RECOVERED VIDEO FIELD";
+    $("tv-body").innerHTML =
+      `<img class="tv-still" src="${src}" alt="recovered video field">
+       <div class="tv-caveats"><b>Read this before you act on it:</b><ul>
+       <li>a sync lock is evidence of a VIDEO RASTER, not proof of a camera — a
+       monitor emanation, a video sender relaying another feed, or a bench test
+       pattern all produce this same signature</li>
+       <li>luminance only, one field, contrast-stretched: no colour, no audio
+       subcarrier, no playback</li>
+       <li>find the device before you call it: DF the emission and recover it
+       physically</li></ul></div>`;
+    m.classList.add("show");
   },
   async refresh() {
     if (!document.body.classList.contains("ad-on")) return;

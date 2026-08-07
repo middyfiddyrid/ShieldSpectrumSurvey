@@ -494,6 +494,11 @@ body.ad-on.ad-h #autodemod-pane { flex:0 0 40%; border-top:1px solid var(--line)
 #ad-scroll { flex:1 1 auto; min-height:0; overflow-y:auto; border:1px solid var(--line); }
 #ad-table td { font-family:var(--mono); }
 #ad-table tr.ad-hit td { background:rgba(46,204,113,.09); }
+/* a video raster is the loudest thing this pane can find — make it unmissable */
+#ad-table tr.ad-video td { background:rgba(231,76,60,.14); }
+#ad-table tr.ad-video td:first-child { box-shadow:inset 3px 0 0 var(--red); }
+#ad-table img.ad-still { height:52px; width:auto; border:1px solid var(--red);
+  cursor:zoom-in; display:block; image-rendering:pixelated; }
 #ad-table tr.ad-locked td { opacity:.72; }
 #ad-table tr.ad-current td { box-shadow:inset 3px 0 0 var(--amber); }
 #ad-table .ad-what { max-width:230px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }

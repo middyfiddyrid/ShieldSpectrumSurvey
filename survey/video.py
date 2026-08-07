@@ -607,7 +607,7 @@ def decode_video(iq, fs: float, frame: bool = True) -> dict:
             "note": note, "stats": stats}
 
 
-def looks_like_video(feats: dict) -> bool:
+def looks_like_video(feats: dict, bw_khz_hint: float = None) -> bool:
     """Cheap pre-gate from identify.iq_features() output: a WIDE, CONTINUOUS
     carrier. An analog video link is continuously transmitting and occupies MHz,
     never the tens of kHz a bug or remote does.
@@ -617,17 +617,41 @@ def looks_like_video(feats: dict) -> bool:
     camera can arrive here labelled OFDM. Excluding that class to save a decode
     would lose the very signals this module exists for. The narrowband/keyed
     classes ARE excluded — they can't be a video raster at any bandwidth — and
-    decode_video's own sync gate is the real filter."""
+    decode_video's own sync gate is the real filter.
+
+    `bw_khz_hint` — pass the width the SWEEP measured when you have it, because
+    iq_features UNDER-READS the width of an FM carrier and this gate then throws
+    away real cameras. An FM signal is constant-envelope and instantaneously
+    narrow: over a short IQ slice the carrier has not yet swept its full
+    deviation, so occupied_bw_khz reads a fraction of the true occupancy.
+    Measured 2026-08-07 on a synthetic NTSC sender with 2 MHz deviation, against
+    a decoder that locks on it and returns a picture: 78 kHz over a 0.41 ms
+    slice, 117 kHz over 1.6 ms, 723 kHz over 6.6 ms — all under this gate's
+    1 MHz threshold, so route_decode never tried video and the camera came back
+    labelled an OOK/FSK device. A sweep's max-hold width does not have that
+    problem. The hint only ever RAISES the measured width, so callers that do
+    not pass one behave exactly as before.
+
+    The narrowband/keyed exclusion is likewise skipped when the hint says
+    wideband — those classes are what a mis-measured FM carrier gets labelled.
+    """
     if not feats:
         return False
     if feats.get("signal_present") is False:
         return False
-    if feats.get("modulation_class") in ("fsk", "ook", "noise_floor"):
+    hint = float(bw_khz_hint or 0.0)
+    wide_by_hint = hint >= 1000.0
+    if not wide_by_hint and feats.get("modulation_class") in ("fsk", "ook",
+                                                             "noise_floor"):
         return False
-    bw = feats.get("occupied_bw_khz", 0.0) or 0.0
+    bw = max(feats.get("occupied_bw_khz", 0.0) or 0.0, hint)
     duty = feats.get("duty_cycle")
     duty = 1.0 if duty is None else duty
     cont = feats.get("continuity", "")
+    if wide_by_hint:
+        # the sweep says this occupies MHz; let the sync gate decide, rather
+        # than a duty/continuity read taken from a sub-millisecond slice
+        return True
     return bool(bw >= 1000.0 and (cont == "continuous" or duty >= 0.85))
 
 

@@ -75,6 +75,18 @@ AUDIO_KEEP = 40
 AUDIO_SECONDS = 1.5
 # a signal this far down is noise; measuring it wastes a radio slot
 MIN_SNR_DB = 4.0
+# A WIDE signal has to be captured WIDE or the demodulator is handed garbage.
+# This matters most for the case that matters most: an analog video sender
+# deviates far wider than a voice channel, and video.py says so in its own
+# limitations — "capture as wide as the radio allows", because a link that
+# overflows the capture aliases its sync tips and fails to lock on a signal that
+# IS a camera. A fixed narrow capture would therefore miss hidden cameras
+# specifically. Capture bandwidth is chosen per signal from the width the sweep
+# already measured.
+WIDE_BW_KHZ = 1000.0           # at/above this, treat it as a wideband carrier
+CAPTURE_BW_HEADROOM = 2.5      # capture this multiple of the measured width
+MAX_CAPTURE_SAMPLES = 3_000_000   # ~24 MB complex64 — bounds a wide grab
+MIN_VIDEO_SECONDS = 0.09       # video.py needs ~70 ms of carrier for a field lock
 
 
 def _b64_wav(pcm16, rate):
@@ -308,9 +320,8 @@ class AutoDemod:
                               "note": f"{msrc} cannot tune {center_mhz:.3f} MHz"})
             return
 
-        fs = float(self.cfg.get("pluto", "listen_sample_rate", default=5_000_000))
-        secs = float(self.cfg.get("autodemod", "seconds", default=DEFAULT_SECONDS))
-        n = int(fs * max(0.1, min(1.0, secs)))
+        fs, secs = self._capture_shape(row, msrc)
+        n = min(int(fs * secs), MAX_CAPTURE_SAMPLES)
         try:
             mstop.set()                     # preempt any idle stream on this radio
             with mlock:
@@ -324,6 +335,61 @@ class AutoDemod:
 
         res = self._analyze(row, iq, fs, center_mhz)
         self._store(row, res)
+
+    def _capture_shape(self, row, msrc):
+        """(sample_rate, seconds) for THIS signal, from the width the sweep
+        already measured. A narrowband voice channel gets the cheap default; a
+        wideband carrier gets the radio's full span, because that is the only way
+        an analog video raster survives the capture intact. Sample COUNT stays
+        bounded, so a wide grab buys bandwidth by shortening in time — which is
+        free, since a field lock needs ~70 ms and nothing needs a full second."""
+        narrow = float(self.cfg.get(msrc, "listen_sample_rate",
+                       default=self.cfg.get("pluto", "listen_sample_rate",
+                                            default=5_000_000)))
+        secs = float(self.cfg.get("autodemod", "seconds", default=DEFAULT_SECONDS))
+        secs = max(0.1, min(1.0, secs))
+        bw_khz = float(row.get("bw_khz") or 0.0)
+        if bw_khz < WIDE_BW_KHZ:
+            return narrow, secs
+        want = bw_khz * 1e3 * CAPTURE_BW_HEADROOM
+        top = float(self.cfg.get(msrc, "sample_rate",
+                    default=self.cfg.get("pluto", "sample_rate", default=20e6)))
+        fs = max(narrow, min(want, top))
+        # keep the sample budget flat: wider means shorter, never both
+        secs = max(MIN_VIDEO_SECONDS, min(secs, MAX_CAPTURE_SAMPLES / fs))
+        return fs, secs
+
+    def _video_check(self, iq, fs, feats, permitted, bw_khz_hint=None):
+        """Is this carrier a VIDEO RASTER — and if content is permitted, what
+        does it show?
+
+        Split deliberately along the same line as everything else here.
+        Confirming a raster reads SYNC STRUCTURE (line rate, sync width, the
+        vertical interval) and is content-free: it is the detection, and it is
+        what tells the operator there is a camera. The recovered still IS
+        content, so it is only rendered when content is permitted —
+        decode_video's own `frame` argument already draws exactly that line."""
+        from .video import decode_video, looks_like_video
+        # hand the gate the SWEEP's width, not just the short-slice estimate —
+        # iq_features under-reads an FM carrier badly enough to lose cameras
+        if not looks_like_video(feats, bw_khz_hint=bw_khz_hint):
+            return None
+        try:
+            vid = decode_video(np.asarray(iq), fs, frame=bool(permitted))
+        except Exception:  # noqa: BLE001
+            log.debug("video decode failed", exc_info=True)
+            return None
+        msgs = (vid or {}).get("messages") or []
+        if not msgs:
+            return None
+        m = msgs[0]
+        return {"video_confirmed": True,
+                "video_standard": m.get("standard"),
+                "video_line_rate_hz": m.get("line_rate_hz"),
+                "video_confidence": m.get("confidence"),
+                "video_note": vid.get("note", ""),
+                "video_caveats": m.get("caveats", []),
+                "picture": m.get("frame_png") if permitted else None}
 
     def _analyze(self, row, iq, fs, center_mhz):
         """Content-free measurement for every signal; content only where allowed."""
@@ -368,9 +434,21 @@ class AutoDemod:
                                    or row.get("matched_label") or "")
         out["mode"] = mode
 
+        # VIDEO RASTER CHECK — runs whether or not content is permitted, because
+        # "there is a camera pointed at this room" is the detection, not the
+        # content. Only the recovered still is withheld. A camera must never go
+        # unreported just because its attribution has not been set yet.
+        vid = self._video_check(iq, fs, feats, permitted,
+                                bw_khz_hint=row.get("bw_khz"))
+        if vid:
+            out.update(vid)
+            out["interest_reason"] = "VIDEO RASTER"
+
         if not permitted:
             # characterized, deliberately not decoded
-            out["verdict"] = interpret(feats, None).get("summary", "")
+            out["verdict"] = (f"ANALOG VIDEO RASTER ({vid.get('video_standard')}) "
+                              f"— evidence of a camera or video sender"
+                              if vid else interpret(feats, None).get("summary", ""))
             out["state"] = "characterized"
             self._persist(row, out.get("verdict", ""), "identify_only", "")
             return out
@@ -388,6 +466,12 @@ class AutoDemod:
                            bool((decoded or {}).get("encrypted")))
         out["verdict"] = interp.get("summary", "")
         out["readable"] = interp.get("readable", "")
+        if vid:
+            # a confirmed raster outranks the generic "wideband FM" reading
+            out["verdict"] = (f"ANALOG VIDEO RASTER ({vid.get('video_standard')}) "
+                              f"— evidence of a camera or video sender"
+                              + (" · still recovered" if vid.get("picture") else ""))
+            out["protocol"] = "ANALOG-VIDEO"
 
         if mode not in DATA_MODES:
             try:
@@ -440,6 +524,10 @@ class AutoDemod:
             interest += 2.0
         if (rec.get("snr_db") or 0) > 20:
             interest += 0.5
+        # a video raster in a client's space outranks everything else in the
+        # ledger — it goes to the top of WINDOW 4 and stays there
+        if rec.get("video_confirmed"):
+            interest += 10.0
         rec["interest"] = round(interest, 3)
         with self._lock:
             first = sid not in self.results
