@@ -85,6 +85,10 @@ def create_app(db, cfg, demo=False) -> Flask:
     app = Flask(__name__, static_folder=None)
     st = AppState(db, cfg)
     st.demo = demo
+    # AUTO-DEMOD: the background per-signal demodulator behind WINDOW 4. Created
+    # here (never started here) so tests and the demo build it without hardware.
+    from .autodemod import AutoDemod
+    st.autodemod = AutoDemod(st.controller, db, cfg, demo=demo)
     # Admin/operator-verify mode: lets an AUTHORIZED operator (the app owner on
     # their own machine, testing against a KNOWN signal they control) listen to
     # confirm the app's blinded call was right. Content-listening stays audited.
@@ -683,7 +687,11 @@ def create_app(db, cfg, demo=False) -> Flask:
                        or cfg.get("device", "source", default="rfexplorer")),
             "device": st.controller.device_info(),
             "roles": st.controller.device_roles(),
-            "sweep": st.controller.state,
+            # `finalizing` = the sweep itself is over and the radio is already
+            # free; only the post-run save is still working. The UI shows SAVING
+            # instead of SWEEPING so a slow archive never reads as a hung sweep.
+            "sweep": dict(st.controller.state,
+                          finalizing=bool(getattr(st.controller, "_finalizing", False))),
             "sweeps": sweeps,
             "baseline": st.baseline_status,
             "calibration": st.calibration_status,
@@ -1196,6 +1204,148 @@ def create_app(db, cfg, demo=False) -> Flask:
                 log.exception("demod failed")
         return jsonify({**base, "in_range": True, "analyzer": analyzer,
                         "waterfall": waterfall, "audio": audio, "decode": decode, "note": ""})
+
+    # ---------- WINDOW 4: auto-demod ----------
+
+    @app.get("/api/autodemod/state")
+    def autodemod_state():
+        """Everything WINDOW 4 renders: worker status + one row per detection."""
+        try:
+            limit = int(request.args.get("limit") or 400)
+        except (TypeError, ValueError):
+            limit = 400
+        return jsonify(st.autodemod.state(limit=limit))
+
+    @app.post("/api/autodemod/start")
+    def autodemod_start():
+        session = st.session()
+        if not session:
+            return err("create a session first")
+        body = request.get_json(silent=True) or {}
+        try:
+            state = st.autodemod.start(
+                session["id"], consent=bool(body.get("consent")),
+                consent_reason=body.get("reason") or "",
+                operator=body.get("operator") or session.get("operator") or "")
+        except ValueError as e:
+            return err(str(e))
+        return jsonify(state)
+
+    @app.post("/api/autodemod/stop")
+    def autodemod_stop():
+        return jsonify(st.autodemod.stop())
+
+    @app.post("/api/autodemod/consent")
+    def autodemod_consent():
+        """Lift (or drop) the ECPA content gate for this run. Turning it ON
+        requires a written reason and writes an immutable decode_overrides row —
+        the same audit artifact the manual force-decode path produces."""
+        if st.demo:
+            return err("content decode is disabled in the demo")
+        session = st.session()
+        if not session:
+            return err("create a session first")
+        body = request.get_json(force=True, silent=True) or {}
+        on = bool(body.get("on"))
+        if on and not body.get("ecpa_ack"):
+            return err("ecpa_ack is required to decode content")
+        try:
+            state = st.autodemod.set_consent(
+                on, reason=body.get("reason") or "",
+                operator=body.get("operator") or session.get("operator") or "")
+        except ValueError as e:
+            return err(str(e))
+        return jsonify(state)
+
+    # ---------- TV / video channel check ----------
+
+    @app.post("/api/tv/check")
+    def tv_check():
+        """Is the licensed TV station actually radiating in this 6 MHz block?
+
+        Measures the ATSC 8VSB pilot + data plateau (survey/atsc.py) and, when
+        the carrier looks like ANALOG video instead, recovers a still frame
+        (survey/video.py). Digital TV pictures are not decoded — see the module
+        docstring for why — so a digital verdict returns proof-of-carriage and
+        says so plainly rather than implying a picture is coming."""
+        from . import atsc
+        from .video import decode_video
+        body = request.get_json(silent=True) or {}
+        center_mhz = body.get("center_mhz")
+        channel = body.get("channel")
+        if channel:
+            from .baseline.fcc_broadcast import tv_channel_to_range
+            rng = tv_channel_to_range(int(channel))
+            if not rng:
+                return err(f"channel {channel} is not a US TV RF channel")
+            ch_low = rng[0]
+        elif center_mhz:
+            got = atsc.channel_for_frequency(float(center_mhz))
+            if not got:
+                return err(f"{center_mhz} MHz is not inside a US TV RF channel")
+            channel, ch_low = got
+        else:
+            return err("center_mhz or channel required")
+        ch_low_hz = float(ch_low) * 1e6
+        tune_hz = ch_low_hz + atsc.CHANNEL_BW_HZ / 2.0
+
+        # station identity from the baseline already built for this session
+        station = None
+        session = st.session()
+        if session:
+            station = db.query_one(
+                "SELECT * FROM baseline WHERE session_id=? AND service='TV' "
+                "AND freq_low_mhz<=? AND freq_high_mhz>=? ORDER BY distance_mi "
+                "LIMIT 1", (session["id"], ch_low + 3.0, ch_low + 3.0))
+
+        base = {"channel": int(channel), "channel_low_mhz": ch_low,
+                "channel_high_mhz": ch_low + 6.0, "tuned_mhz": tune_hz / 1e6,
+                "station": station}
+        dev, mlock, mstop, msrc = st.controller.ensure_monitor()
+        if not msrc or dev is None or not getattr(dev, "is_swept_sdr", False):
+            return jsonify({**base, "in_range": False,
+                            "note": "connect an SDR to verify this channel on air"})
+        if st.controller.busy(msrc):
+            return jsonify({**base, "in_range": False,
+                            "note": f"the {msrc} radio is busy"})
+        mods = getattr(dev.info, "modules", None) or []
+        if mods and not any(m.min_mhz <= tune_hz / 1e6 <= m.max_mhz for m in mods):
+            return jsonify({**base, "in_range": False,
+                            "note": f"{msrc} cannot tune {tune_hz / 1e6:.1f} MHz"})
+        # the pilot sits 2.69 MHz below channel centre, so the span must cover it
+        fs = float(cfg.get(msrc, "tv_sample_rate",
+                           default=cfg.get("pluto", "sample_rate", default=8e6)))
+        fs = max(fs, 7_000_000.0)
+        secs = float(cfg.get("tv", "seconds", default=0.06))
+        try:
+            mstop.set()
+            with mlock:
+                mstop.clear()
+                iq = dev.capture_iq(tune_hz, fs, int(fs * secs))
+        except Exception as e:  # noqa: BLE001
+            log.exception("TV capture failed")
+            return jsonify({**base, "in_range": False, "note": str(e)[:200]})
+
+        result = atsc.atsc_signature(iq, fs, tune_hz, ch_low_hz)
+        out = {**base, "in_range": True, "atsc": result,
+               "summary": result.get("summary", "")}
+        # An analog raster in a TV channel is the interesting case for TSCM (a
+        # video sender or camera parked in broadcast spectrum), and it is the one
+        # case where a PICTURE is actually recoverable.
+        if not result.get("confirmed"):
+            try:
+                vid = decode_video(iq, fs)
+                # decode_video signals a lock by returning a message; the still
+                # (when one could be framed) rides in messages[0].frame_png
+                msgs = (vid or {}).get("messages") or []
+                if msgs:
+                    out["video"] = vid
+                    out["picture"] = msgs[0].get("frame_png")
+                    out["summary"] = ("ANALOG video raster in this TV channel — "
+                                      + (vid.get("note") or ""))
+            except Exception:  # noqa: BLE001
+                log.debug("analog video check failed", exc_info=True)
+        return jsonify(out)
 
     @app.post("/api/analyze/signal")
     def analyze_signal():
@@ -2047,11 +2197,18 @@ def create_app(db, cfg, demo=False) -> Flask:
     @app.post("/api/sweep/abort")
     def sweep_abort():
         """F7: default = pause the radio, save everything. {'erase': true} is the
-        confirmed hard abort — the aborted sweep's data is deleted."""
+        confirmed hard abort — the aborted sweep's data is deleted.
+
+        Reports what abort() actually did rather than a blanket success: there is
+        nothing to stop once the worker has exited or moved past the erase
+        decision, and pretending otherwise is how "abort requested — erasing this
+        sweep's data" ended up on screen against a sweep whose data was kept."""
         body = request.get_json(force=True, silent=True) or {}
         erase = bool(body.get("erase"))
-        st.controller.abort(erase=erase)
-        return jsonify({"aborted": True, "erase": erase})
+        res = st.controller.abort(erase=erase) or {}
+        out = {"aborted": bool(res.get("stopped")), "erase": bool(res.get("erased"))}
+        out.update(res)
+        return jsonify(out)
 
     @app.post("/api/sweep/next_segment")
     def sweep_next_segment():
