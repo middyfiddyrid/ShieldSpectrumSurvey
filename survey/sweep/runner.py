@@ -58,6 +58,8 @@ class SweepController:
         self.devices = {}                # source -> handle
         self.device_locks = {}           # source -> threading.Lock
         self.listen_stops = {}           # source -> threading.Event
+        # one open at a time per radio — see connect_device()'s single-flight note
+        self._connect_locks = {}         # source -> threading.Lock
         self._thread = None              # the sweep/capture/directional worker
         self._monitor_thread = None      # the concurrent monitor (recording) worker
         self._busy_source = None         # source the sweep worker is bound to
@@ -95,6 +97,14 @@ class SweepController:
         # F7: confirmed hard abort — erase the aborted sweep's data (vs the
         # default pause-and-save). Set via abort(erase=True), applied in work().
         self.erase_on_abort = False
+        # Finalize bookkeeping so abort() can tell the operator the truth:
+        # _finalizing is True only while the post-run save/archive is in flight
+        # (the erase decision has already been made by then), and the _last_*
+        # fields describe the run that most recently ended.
+        self._finalizing = False
+        self._finished_utc = 0.0
+        self._last_status = None
+        self._last_erased = False
         # F2 anomaly accumulator — persists across segments for the whole sweep.
         self._anomalies = []
         self.state = {"running": False, "phase": None, "module": None, "room": None,
@@ -113,9 +123,40 @@ class SweepController:
         return bool(self.cfg.get("pluto", "concurrent_monitor", default=False))
 
     def connect_device(self, source=None, keep_other=False):
-        from .device import open_device
+        """Open (or re-open) a radio. SINGLE-FLIGHT per source: two opens of the
+        same USB radio at once make one of them fail — on the B220 the loser gets
+        uhd_error 11, whose text ("no OTHER process using it?") points at a
+        stranger when the competitor is actually this app's own second attempt.
+        That is exactly what killed the sweep on 2026-08-06 at 20:24, when the
+        operator pressed CONNECT ~2 s into the runner's own mid-sweep _reconnect.
+        A caller arriving while an open is in flight now WAITS for it and reuses
+        the resulting handle instead of racing it for the device."""
         src = (source or os.environ.get("SWEEP_SOURCE")
                or self.cfg.get("device", "source", default="rfexplorer")).strip().lower()
+        lock = self._connect_locks.setdefault(src, threading.Lock())
+        joined = not lock.acquire(blocking=False)
+        if joined:
+            log.info("connect(%s): an open is already in flight — waiting for it "
+                     "instead of racing for the radio", src)
+            lock.acquire()
+        try:
+            if joined:
+                dev = self.devices.get(src)
+                if dev is not None:
+                    try:
+                        if dev.is_alive():
+                            log.info("connect(%s): reusing the handle the in-flight "
+                                     "open produced", src)
+                            return dev.info
+                    except Exception:  # noqa: BLE001
+                        pass
+                # the open we waited on failed (or died immediately) — our turn
+            return self._connect_device_locked(src, keep_other)
+        finally:
+            lock.release()
+
+    def _connect_device_locked(self, src, keep_other=False):
+        from .device import open_device
         if keep_other and self.concurrent_enabled():
             # DUAL: replace only a same-source handle; keep the OTHER radio open
             # so it can run concurrently (RFE sweep + Pluto monitor).
@@ -388,7 +429,37 @@ class SweepController:
         """Stop the active worker. erase=False (default) is 'pause the radio,
         save the session' — everything recorded so far is kept. erase=True is a
         confirmed hard abort: this sweep's rows (signals/segments/sweep) are
-        deleted once the worker stops. Baseline and other sweeps are untouched."""
+        deleted once the worker stops. Baseline and other sweeps are untouched.
+
+        Never promises something it cannot deliver. If the worker is already gone
+        (or is past the erase decision and merely saving), say so instead of
+        showing "erasing this sweep's data" against a run nothing is listening
+        for — 2026-08-06, that message sat on screen while the data was in fact
+        being kept. Returns a dict describing what actually happened.
+        """
+        alive = bool(self._thread and self._thread.is_alive())
+        if not alive:
+            # No worker to stop. If the UI still thinks a sweep is running, the
+            # finalize thread died — clear the stale flag here so the operator
+            # gets their app back with a click instead of an app restart.
+            if self.state.get("running"):
+                log.warning("abort with no live sweep worker — clearing a stale "
+                            "running flag (last status=%s)", self._last_status)
+                self._set(running=False, sustain_requested=False, sustaining=False,
+                          message="sweep had already ended (its finalize did not "
+                                  "complete) — cleared; data collected so far is kept")
+                return {"stopped": False, "erased": False, "stale_cleared": True,
+                        "message": "sweep had already ended — stale run cleared, data kept"}
+            self._set(message="no sweep is running")
+            return {"stopped": False, "erased": False, "stale_cleared": False,
+                    "message": "no sweep is running"}
+        if self._finalizing:
+            # The run is over and the erase decision has already been evaluated;
+            # honouring erase now would be a lie either way.
+            self._set(message="sweep already finished — saving results; data kept")
+            return {"stopped": False, "erased": False, "stale_cleared": False,
+                    "finalizing": True,
+                    "message": "sweep already finished — saving results; data kept"}
         self.erase_on_abort = bool(erase)
         self.abort_event.set()
         self.advance_event.set()   # wake a manually-paused sweep so it can stop
@@ -397,6 +468,9 @@ class SweepController:
         self._set(message="abort requested — erasing this sweep's data" if erase
                           else "abort requested — keeping data collected so far",
                   sustain_requested=False)
+        return {"stopped": True, "erased": bool(erase), "stale_cleared": False,
+                "message": "abort requested — erasing this sweep's data" if erase
+                           else "abort requested — keeping data collected so far"}
 
     def advance(self):
         """F5: operator tapped NEXT SEGMENT — release the manual-advance gate."""
@@ -468,69 +542,100 @@ class SweepController:
              "running", int(self.device.info.simulated)))
 
         def work():
+            # running=False MUST be published no matter how this thread dies.
+            # 2026-08-06: a finalize step died in a way neither `except Exception`
+            # caught nor logged, the tail _set() never ran, and sweep.running
+            # stayed True forever — ABORT became a no-op and every new sweep 409'd
+            # until the app was restarted. Everything below therefore lives inside
+            # try/finally, and the finally is the ONLY place that clears the flag.
+            status = "error"
+            erased = False
             try:
-                self._run_plan(session_id, sweep_id, phase, module, room, plan)
-                status = "aborted" if self.abort_event.is_set() else "done"
-            except Exception as e:  # noqa: BLE001
-                log.exception("sweep failed")
-                status = "error"
-                self._set(error=str(e), message=f"sweep error: {e}")
+                try:
+                    self._run_plan(session_id, sweep_id, phase, module, room, plan)
+                    status = "aborted" if self.abort_event.is_set() else "done"
+                except Exception as e:  # noqa: BLE001
+                    log.exception("sweep failed")
+                    status = "error"
+                    self._set(error=str(e), message=f"sweep error: {e}")
+                finally:
+                    # the RBW override is PER-SWEEP: clear it the moment the worker
+                    # exits so it can't leak into signal captures, directional
+                    # passes, or calibration on the same device handle (adversarial
+                    # review 2026-07-11: a leaked 500 kHz override collapsed a
+                    # 0.8 MHz fingerprint zoom to 16 grid points)
+                    try:
+                        if self.device is not None:
+                            self.device.set_rbw_khz(None)
+                    except Exception:  # noqa: BLE001
+                        pass
+                # past this point the run is over and only bookkeeping remains;
+                # abort() must stop claiming it can still erase anything. Say so
+                # on screen too: this stretch used to run for minutes while the
+                # UI still showed "SWEEPING", which reads as a hung app.
+                self._finalizing = True
+                self._set(message="sweep finished — saving results "
+                                  "(archiving + novelty); the radio is free")
+                # F7: confirmed hard abort — this sweep's data is erased instead of
+                # finalized. Baseline, other sweeps, wiki captures and the session
+                # itself are untouched; postprocess still runs so session-wide
+                # deltas/localization recompute without the erased rows.
+                erased = self.erase_on_abort and status in ("aborted", "error")
+                if erased:
+                    try:
+                        self.db.execute("DELETE FROM signals WHERE sweep_id=?", (sweep_id,))
+                        self.db.execute("DELETE FROM segments WHERE sweep_id=?", (sweep_id,))
+                        self.db.execute("DELETE FROM sweeps WHERE id=?", (sweep_id,))
+                        log.info("sweep %s aborted — data erased at operator request", sweep_id)
+                    except Exception:  # noqa: BLE001
+                        log.exception("sweep-data erase failed — rows kept")
+                        erased = False
+                if not erased:
+                    self.db.execute("UPDATE sweeps SET status=?, finished_utc=? WHERE id=?",
+                                    (status, time.time(), sweep_id))
+                try:
+                    postprocess_session(self.db, self.cfg, session_id)
+                except Exception:  # noqa: BLE001
+                    log.exception("postprocess failed")
+                if not erased:
+                    try:
+                        from ..sigcapture import archive_observations
+                        sess = self.db.query_one("SELECT address FROM sessions WHERE id=?",
+                                                 (session_id,))
+                        added = archive_observations(
+                            self.db, self.cfg, session_id,
+                            self.cfg.abs_path("capture_images"),
+                            sess["address"] if sess else "")
+                        log.info("archived %d signal observations to the wiki", added)
+                    except Exception:  # noqa: BLE001
+                        log.exception("observation archive failed")
+                    try:
+                        from ..novelty import mark_session_novelty
+                        n_novel = mark_session_novelty(self.db, session_id)
+                        log.info("novelty: %d signals new to this address", n_novel)
+                    except Exception:  # noqa: BLE001
+                        log.exception("novelty marking failed")
+            except BaseException as e:  # noqa: BLE001
+                # MemoryError, a C-extension teardown, an interpreter shutdown —
+                # anything the per-step guards above cannot see. Say so out loud
+                # instead of dying silently and stranding the UI.
+                log.exception("sweep finalize died (%s) — releasing the run anyway",
+                              type(e).__name__)
+                self._set(error=f"finalize failed: {type(e).__name__}: {e}")
             finally:
-                # the RBW override is PER-SWEEP: clear it the moment the worker
-                # exits so it can't leak into signal captures, directional
-                # passes, or calibration on the same device handle (adversarial
-                # review 2026-07-11: a leaked 500 kHz override collapsed a
-                # 0.8 MHz fingerprint zoom to 16 grid points)
-                try:
-                    if self.device is not None:
-                        self.device.set_rbw_khz(None)
-                except Exception:  # noqa: BLE001
-                    pass
-            # F7: confirmed hard abort — this sweep's data is erased instead of
-            # finalized. Baseline, other sweeps, wiki captures and the session
-            # itself are untouched; postprocess still runs so session-wide
-            # deltas/localization recompute without the erased rows.
-            erased = self.erase_on_abort and status in ("aborted", "error")
-            if erased:
-                try:
-                    self.db.execute("DELETE FROM signals WHERE sweep_id=?", (sweep_id,))
-                    self.db.execute("DELETE FROM segments WHERE sweep_id=?", (sweep_id,))
-                    self.db.execute("DELETE FROM sweeps WHERE id=?", (sweep_id,))
-                    log.info("sweep %s aborted — data erased at operator request", sweep_id)
-                except Exception:  # noqa: BLE001
-                    log.exception("sweep-data erase failed — rows kept")
-                    erased = False
-            if not erased:
-                self.db.execute("UPDATE sweeps SET status=?, finished_utc=? WHERE id=?",
-                                (status, time.time(), sweep_id))
-            try:
-                postprocess_session(self.db, self.cfg, session_id)
-            except Exception:  # noqa: BLE001
-                log.exception("postprocess failed")
-            if not erased:
-                try:
-                    from ..sigcapture import archive_observations
-                    sess = self.db.query_one("SELECT address FROM sessions WHERE id=?",
-                                             (session_id,))
-                    added = archive_observations(
-                        self.db, self.cfg, session_id,
-                        self.cfg.abs_path("capture_images"),
-                        sess["address"] if sess else "")
-                    log.info("archived %d signal observations to the wiki", added)
-                except Exception:  # noqa: BLE001
-                    log.exception("observation archive failed")
-                try:
-                    from ..novelty import mark_session_novelty
-                    n_novel = mark_session_novelty(self.db, session_id)
-                    log.info("novelty: %d signals new to this address", n_novel)
-                except Exception:  # noqa: BLE001
-                    log.exception("novelty marking failed")
-            self._set(running=False,
-                      message=f"{phase} sweep ({module}) aborted — data erased" if erased
-                              else f"{phase} sweep ({module}) {status}; "
-                                   f"{self.state['signal_count']} signals detected")
-            if on_done:
-                on_done(status)
+                self._finalizing = False
+                self._finished_utc = time.time()
+                self._last_status = status
+                self._last_erased = erased
+                self._set(running=False,
+                          message=f"{phase} sweep ({module}) aborted — data erased" if erased
+                                  else f"{phase} sweep ({module}) {status}; "
+                                       f"{self.state['signal_count']} signals detected")
+                if on_done:
+                    try:
+                        on_done(status)
+                    except Exception:  # noqa: BLE001
+                        log.exception("sweep on_done callback failed")
 
         self._thread = threading.Thread(target=work, daemon=True)
         self._busy_source = self.active_source
