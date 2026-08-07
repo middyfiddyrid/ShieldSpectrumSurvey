@@ -565,7 +565,12 @@ function render(st) {
   if (st.sweep.running && st.sweep.phase !== "directional" && !App.overlayHidden) {
     so.classList.add("show");
     const capt = st.sweep.phase === "capture" ? st.sweep.capture : null;
-    $("sweep-overlay-title").textContent = capt ?
+    // The radio is already free during finalize; only the save is still working.
+    // Saying SWEEPING through a long archive is what made a healthy app look
+    // hung for eleven minutes on 2026-08-06.
+    $("sweep-overlay-title").textContent = st.sweep.finalizing ?
+      "SAVING RESULTS — the radio is free" :
+      capt ?
       `SIGNAL CAPTURE — ${fmtF(capt.center_mhz)}` :
       `${(st.sweep.phase || "").toUpperCase()} SWEEP — ${(st.sweep.module || "").toUpperCase()} MODULE` +
       (st.sweep.room ? ` — ${st.sweep.room.toUpperCase()}` : "");
